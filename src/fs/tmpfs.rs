@@ -12,6 +12,7 @@
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
@@ -451,8 +452,8 @@ pub struct TmpfsStatfs {
 // ============================================================================
 
 lazy_static::lazy_static! {
-    /// Mount edilmiş tmpfs örnekleri
-    static ref TMPFS_INSTANCES: Mutex<BTreeMap<String, TmpfsFilesystem>> = Mutex::new(BTreeMap::new());
+    /// Mount edilmiş tmpfs örnekleri (her biri kendi per-instance lock'ına sahip)
+    static ref TMPFS_INSTANCES: Mutex<BTreeMap<String, Arc<Mutex<TmpfsFilesystem>>>> = Mutex::new(BTreeMap::new());
 }
 
 /// Yeni tmpfs mount eder.
@@ -461,12 +462,12 @@ pub fn mount(mount_point: &str, max_bytes: u64) -> Result<(), i32> {
     if instances.contains_key(mount_point) {
         return Err(-16); // EBUSY
     }
-    let fs = TmpfsFilesystem::new(mount_point, max_bytes);
+    let fs = Arc::new(Mutex::new(TmpfsFilesystem::new(mount_point, max_bytes)));
     instances.insert(String::from(mount_point), fs);
     Ok(())
 }
 
-/// tmpfs unmount eder.
+/// tmpfs unmount eder — per-instance lock kullanılmaz (map'ten çıkarılır).
 pub fn umount(mount_point: &str) -> Result<(), i32> {
     let mut instances = TMPFS_INSTANCES.lock();
     if instances.remove(mount_point).is_some() {
@@ -479,6 +480,76 @@ pub fn umount(mount_point: &str) -> Result<(), i32> {
 /// Mount edilmiş tmpfs sayısını döner.
 pub fn mounted_count() -> usize {
     TMPFS_INSTANCES.lock().len()
+}
+
+/// Belirtilen mount_point için TmpfsFilesystem referansını döndürür.
+/// Per-instance lock'ı tutmaz — çağıran kısa süreli kullanım için lock'ı almalıdır.
+fn get_fs(mount_point: &str) -> Result<Arc<Mutex<TmpfsFilesystem>>, i32> {
+    let instances = TMPFS_INSTANCES.lock();
+    instances.get(mount_point).cloned().ok_or(-2i32) // ENOENT
+}
+
+/// Dosya oluşturur (per-instance lock ile).
+pub fn create_file(mount_point: &str, parent_ino: u64, name: &str, mode: u32) -> Result<u64, i32> {
+    let fs = get_fs(mount_point)?;
+    let mut guard = fs.lock();
+    guard.create_file(parent_ino, name, mode)
+}
+
+/// Alt dizin oluşturur (per-instance lock ile).
+pub fn mkdir(mount_point: &str, parent_ino: u64, name: &str, mode: u32) -> Result<u64, i32> {
+    let fs = get_fs(mount_point)?;
+    let mut guard = fs.lock();
+    guard.mkdir(parent_ino, name, mode)
+}
+
+/// Dosya siler (per-instance lock ile).
+pub fn unlink(mount_point: &str, parent_ino: u64, name: &str) -> Result<(), i32> {
+    let fs = get_fs(mount_point)?;
+    let mut guard = fs.lock();
+    guard.unlink(parent_ino, name)
+}
+
+/// Dosyaya yazar (per-instance lock ile).
+pub fn write_file(mount_point: &str, ino: u64, offset: usize, data: &[u8]) -> Result<usize, i32> {
+    let fs = get_fs(mount_point)?;
+    let mut guard = fs.lock();
+    guard.write_file(ino, offset, data)
+}
+
+/// Dosyadan okur (per-instance lock ile).
+pub fn read_file(mount_point: &str, ino: u64, offset: usize, buf: &mut [u8]) -> Result<usize, i32> {
+    let fs = get_fs(mount_point)?;
+    let mut guard = fs.lock();
+    guard.read_file(ino, offset, buf)
+}
+
+/// Dizin içeriğini listeler (per-instance lock ile).
+pub fn readdir(mount_point: &str, ino: u64) -> Result<Vec<(String, u64, TmpfsNodeType)>, i32> {
+    let fs = get_fs(mount_point)?;
+    let guard = fs.lock();
+    guard.readdir(ino)
+}
+
+/// Yol ile inode bul (per-instance lock ile).
+pub fn lookup(mount_point: &str, path: &str) -> Option<u64> {
+    let fs = get_fs(mount_point).ok()?;
+    let guard = fs.lock();
+    guard.lookup(path)
+}
+
+/// Durum bilgisi (per-instance lock ile).
+pub fn statfs(mount_point: &str) -> Result<TmpfsStatfs, i32> {
+    let fs = get_fs(mount_point)?;
+    let guard = fs.lock();
+    Ok(guard.statfs())
+}
+
+/// Toplam inode sayısı (per-instance lock ile).
+pub fn inode_count(mount_point: &str) -> Result<usize, i32> {
+    let fs = get_fs(mount_point)?;
+    let guard = fs.lock();
+    Ok(guard.inode_count())
 }
 
 /// Modülü başlatır — varsayılan mount'ları oluşturur.

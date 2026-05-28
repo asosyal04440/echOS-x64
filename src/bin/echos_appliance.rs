@@ -20,6 +20,7 @@ const BOOT_CONTROL_VERSION: u16 = 1;
 const BOOT_CONTROL_SIZE: usize = 136;
 const BOOT_FLAG_AUTO_LOGIN: u8 = 1 << 0;
 const BOOT_FLAG_SUSPEND_RESUME_SMOKE: u8 = 1 << 1;
+const BOOT_FLAG_FS_SMOKE_TEST: u8 = 1 << 2;
 
 const F2FS_MAGIC: u32 = 0xF2F52010;
 const F2FS_SUPERBLOCK_SECTOR_OFFSET: usize = 2;
@@ -172,6 +173,7 @@ struct ApplianceConfig {
     pending_slot: String,
     auto_login: bool,
     suspend_resume_smoke: bool,
+    fs_smoke_test: bool,
     update_smoke_request_url: Option<String>,
     pe_smoke_bundle: Option<PathBuf>,
     bundles: Vec<PathBuf>,
@@ -180,6 +182,7 @@ struct ApplianceConfig {
 }
 
 fn run_appliance(mut args: Args) -> Result<(), String> {
+    std::fs::write("C:\\Users\\Bahadir\\Desktop\\dersler_ve_projeler\\echOS\\logs\\appliance_debug.txt", "run_appliance called\n").unwrap();
     let mut cfg = ApplianceConfig {
         efi: PathBuf::new(),
         bootctrl: None,
@@ -190,6 +193,7 @@ fn run_appliance(mut args: Args) -> Result<(), String> {
         pending_slot: "none".to_string(),
         auto_login: false,
         suspend_resume_smoke: false,
+        fs_smoke_test: false,
         update_smoke_request_url: None,
         pe_smoke_bundle: None,
         bundles: Vec::new(),
@@ -211,6 +215,7 @@ fn run_appliance(mut args: Args) -> Result<(), String> {
             "--pending-slot" => cfg.pending_slot = args.value("--pending-slot")?,
             "--auto-login" => cfg.auto_login = true,
             "--suspend-resume-smoke" => cfg.suspend_resume_smoke = true,
+            "--fs-smoke-test" => cfg.fs_smoke_test = true,
             "--update-smoke-request-url" => {
                 cfg.update_smoke_request_url = Some(args.value("--update-smoke-request-url")?)
             }
@@ -273,6 +278,7 @@ fn build_appliance(cfg: &ApplianceConfig) -> Result<(), String> {
             &cfg.pending_slot,
             cfg.auto_login,
             cfg.suspend_resume_smoke,
+            cfg.fs_smoke_test,
         )?,
     };
     let pe_smoke_bundle = match &cfg.pe_smoke_bundle {
@@ -338,6 +344,10 @@ fn build_appliance(cfg: &ApplianceConfig) -> Result<(), String> {
         (cfg.system_image_mib * MIB) as usize,
         cfg.update_smoke_request_url.as_deref(),
     )?;
+    let data_part = part(&layout, "data")?;
+    let data_bytes = ((data_part.last_lba - data_part.first_lba + 1) * SECTOR_SIZE as u64) as usize;
+    let data_image = build_empty_f2fs_image(data_bytes)?;
+
     let (protective_mbr, primary_gpt, backup_gpt) = build_partition_table(disk_sectors, &layout);
 
     write_at(&mut image, 0, &protective_mbr)?;
@@ -355,6 +365,11 @@ fn build_appliance(cfg: &ApplianceConfig) -> Result<(), String> {
         };
         write_at(&mut image, p.first_lba * SECTOR_SIZE as u64, data)?;
     }
+    write_at(
+        &mut image,
+        data_part.first_lba * SECTOR_SIZE as u64,
+        &data_image,
+    )?;
     write_at(
         &mut image,
         (disk_sectors - 33) * SECTOR_SIZE as u64,
@@ -725,6 +740,10 @@ fn build_system_slot_image(
     builder.build()
 }
 
+fn build_empty_f2fs_image(total_bytes: usize) -> Result<Vec<u8>, String> {
+    F2fsSlotImageBuilder::new(total_bytes)?.build()
+}
+
 struct DirectoryState {
     inode_nid: u32,
     data_block: u32,
@@ -763,11 +782,12 @@ impl F2fsSlotImageBuilder {
         let blocks_per_seg = 32;
         let segment_count_sit = 1;
         let segment_count_nat = 1;
-        let segment_count_ssa = 2;
         let cp_blkaddr = 1;
         let sit_blkaddr = cp_blkaddr + (2 * blocks_per_seg);
         let nat_blkaddr = sit_blkaddr + (2 * segment_count_sit * blocks_per_seg);
         let ssa_blkaddr = nat_blkaddr + (2 * segment_count_nat * blocks_per_seg);
+        let segment_count_ssa =
+            Self::compute_ssa_segments(total_blocks, blocks_per_seg, ssa_blkaddr)?;
         let main_blkaddr = ssa_blkaddr + (segment_count_ssa * blocks_per_seg);
         let main_blocks = total_blocks - main_blkaddr;
         let segment_count_main = std::cmp::max(1, main_blocks / blocks_per_seg);
@@ -821,6 +841,31 @@ impl F2fsSlotImageBuilder {
         builder.rewrite_dir_by_nid(builder.root_ino)?;
         builder.write_inode_block(builder.root_ino, true, BLOCK_SIZE as u64, &[root_dir_block])?;
         Ok(builder)
+    }
+
+    fn compute_ssa_segments(
+        total_blocks: u32,
+        blocks_per_seg: u32,
+        ssa_blkaddr: u32,
+    ) -> Result<u32, String> {
+        let mut segment_count_ssa = 2u32;
+        for _ in 0..16 {
+            let main_blkaddr = ssa_blkaddr + (segment_count_ssa * blocks_per_seg);
+            if main_blkaddr >= total_blocks {
+                return Err("slot image too small for F2FS metadata areas".to_string());
+            }
+            let main_blocks = total_blocks - main_blkaddr;
+            let segment_count_main = std::cmp::max(1, main_blocks / blocks_per_seg);
+            let required_ssa = std::cmp::max(
+                1,
+                div_ceil(segment_count_main as usize, blocks_per_seg as usize) as u32,
+            );
+            if required_ssa == segment_count_ssa {
+                return Ok(segment_count_ssa);
+            }
+            segment_count_ssa = required_ssa;
+        }
+        Err("SSA sizing did not converge".to_string())
     }
 
     fn allocate_nid(&mut self) -> u32 {
@@ -1514,6 +1559,7 @@ fn build_boot_control(
     pending_slot: &str,
     auto_login: bool,
     suspend_resume_smoke: bool,
+    fs_smoke_test: bool,
 ) -> Result<Vec<u8>, String> {
     let active = slot_id(active_slot)?;
     let pending = slot_id(pending_slot)?;
@@ -1533,6 +1579,9 @@ fn build_boot_control(
     }
     if suspend_resume_smoke {
         flags |= BOOT_FLAG_SUSPEND_RESUME_SMOKE;
+    }
+    if fs_smoke_test {
+        flags |= BOOT_FLAG_FS_SMOKE_TEST;
     }
     blob[48] = flags;
     write_u32(&mut blob, 128, 0);

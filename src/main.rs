@@ -262,6 +262,7 @@ unsafe fn debugcon_write_hex(val: u64) {
     debugcon_write_byte(b'\n');
 }
 
+#[cfg(not(target_os = "windows"))]
 #[panic_handler]
 fn panic(info: &core::panic::PanicInfo) -> ! {
     unsafe {
@@ -1033,6 +1034,30 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         ));
     }
 
+    // FS smoke test flag'ini boot_control'dan oku
+    let run_fs_smoke_test = ech_os::boot::appliance::fs_smoke_test_requested();
+    if run_fs_smoke_test {
+        serial_write_str(&format_args!("[FS_SMOKE] FS smoke test requested via boot control\n"));
+    }
+
+    if run_fs_smoke_test {
+        let results = ech_os::fs::fs_smoke_test::run_all_fs_smoke_tests();
+        let passed = results.iter().filter(|r| r.passed).count();
+        let total = results.len();
+        serial_write_str(&format_args!(
+            "[FS_SMOKE] FINAL: {}/{} tests passed\n",
+            passed, total
+        ));
+        if passed == total {
+            serial_write_str(&format_args!("[FS_SMOKE] ALL TESTS PASSED\n"));
+        } else {
+            serial_write_str(&format_args!("[FS_SMOKE] SOME TESTS FAILED\n"));
+        }
+    }
+
+    // F2FS background GC thread — free segment threshold monitoring
+    ech_os::fs::f2fs::start_gc_thread();
+
     // Shell yerine yeni compositor tabanlı GUI'yi başlat
     serial_write_str(&format_args!(
         "[BOOT] Starting Velvet Glove compositor...\n"
@@ -1150,10 +1175,21 @@ unsafe fn boot_pipeline_multiboot(boot_info_addr: usize, kaslr_offset: u64) -> !
     ));
     debugcon_write_byte(b'M');
 
-    let info = if boot_info_addr != 0 {
-        unsafe { load(boot_info_addr).unwrap() }
+    let info = if boot_info_addr == 0 {
+        serial_write_str(&format_args!("[MULTIBOOT] boot_info_addr is null\n"));
+        loop {
+            asm!("hlt");
+        }
     } else {
-        panic!("[MULTIBOOT] boot_info_addr is null");
+        match unsafe { load(boot_info_addr) } {
+            Ok(info) => info,
+            Err(_) => {
+                serial_write_str(&format_args!("[MULTIBOOT] boot info parse failed\n"));
+                loop {
+                    asm!("hlt");
+                }
+            }
+        }
     };
     serial_write_str(&format_args!("[MULTIBOOT] Info parsed\n"));
 

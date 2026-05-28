@@ -713,6 +713,110 @@ impl AhciPortDevice {
         }
     }
 
+    /// ATA FLUSH CACHE (0xE7): flush write cache to non-volatile media
+    pub fn flush_cache(&mut self) -> Result<(), AhciError> {
+        unsafe {
+            let port = self.port_base;
+            let fis = &mut (*self.cmd_table.as_mut()).cfis;
+            fis[0] = FIS_TYPE_REG_H2D;
+            fis[1] = 0x80;
+            fis[2] = ATA_CMD_FLUSH_CACHE;
+            fis[3] = 0;
+            for b in &mut fis[4..14] {
+                *b = 0;
+            }
+
+            let cmd_header = &mut *self.cmd_list.as_mut_ptr();
+            cmd_header.dw0 = 5;
+            cmd_header.prdbc = 0;
+
+            core::ptr::write_volatile(&mut (*port).is, 0xFFFFFFFF);
+            core::ptr::write_volatile(&mut (*port).ci, 1);
+
+            let mut timeout = 10000000u64;
+            while timeout > 0 {
+                let ci = core::ptr::read_volatile(&(*port).ci);
+                if ci == 0 {
+                    break;
+                }
+                timeout -= 1;
+                core::hint::spin_loop();
+            }
+
+            if timeout == 0 {
+                return Err(AhciError::Timeout);
+            }
+
+            let tfd = core::ptr::read_volatile(&(*port).tfd);
+            if tfd & 0x01 != 0 {
+                return Err(AhciError::CommandFailed);
+            }
+            Ok(())
+        }
+    }
+
+    /// ATA WRITE DMA FUA EXT (0x3D): write + force-unit-access in one command
+    pub fn write_sector_fua(&mut self, lba: u64, buffer: &[u8]) -> Result<(), AhciError> {
+        if buffer.len() < BLOCK_SIZE {
+            return Err(AhciError::IoError);
+        }
+        unsafe {
+            let port = self.port_base;
+
+            let phys_addr = crate::memory::try_virt_to_phys_u64(buffer.as_ptr() as u64)
+                .ok_or(AhciError::IoError)?;
+
+            let ct = &mut *self.cmd_table.as_mut();
+            let cmd_header = &mut *self.cmd_list.as_mut_ptr();
+
+            ct.prdt[0].dba = phys_addr as u32;
+            ct.prdt[0].dbau = (phys_addr >> 32) as u32;
+            ct.prdt[0].dbc = (BLOCK_SIZE - 1) as u32;
+
+            let fis = &mut ct.cfis;
+            fis[0] = FIS_TYPE_REG_H2D;
+            fis[1] = 0x80;
+            fis[2] = 0x3D; // ATA_CMD_WRITE_DMA_FUA_EXT
+            fis[3] = 0;
+            fis[4] = lba as u8;
+            fis[5] = (lba >> 8) as u8;
+            fis[6] = (lba >> 16) as u8;
+            fis[7] = 0xE0 | ((lba >> 24) as u8 & 0x0F);
+            fis[8] = (lba >> 24) as u8;
+            fis[9] = (lba >> 32) as u8;
+            fis[10] = (lba >> 40) as u8;
+            fis[11] = 0;
+            fis[12] = 1;
+            fis[13] = 0;
+
+            cmd_header.dw0 = (1 << 16) | 5 | (1 << 6);
+            cmd_header.prdbc = 0;
+
+            core::ptr::write_volatile(&mut (*port).is, 0xFFFFFFFF);
+            core::ptr::write_volatile(&mut (*port).ci, 1);
+
+            let mut timeout = 10000000u64;
+            while timeout > 0 {
+                let ci = core::ptr::read_volatile(&(*port).ci);
+                if ci == 0 {
+                    break;
+                }
+                timeout -= 1;
+                core::hint::spin_loop();
+            }
+
+            if timeout == 0 {
+                return Err(AhciError::Timeout);
+            }
+
+            let tfd = core::ptr::read_volatile(&(*port).tfd);
+            if tfd & 0x01 != 0 {
+                return Err(AhciError::CommandFailed);
+            }
+            Ok(())
+        }
+    }
+
     /// IDENTIFY DEVICE komutu gÃ¶nder (ATA/ACS T13 spec, PIO Data-In)
     pub fn identify_device(&mut self) -> Result<IdentifyDeviceData, AhciError> {
         unsafe {
@@ -844,6 +948,29 @@ impl BlockDevice for AhciBlockDevice {
     fn write_block(&mut self, lba: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
         let mut port = self.port.lock();
         port.write_sector(lba, buffer)
+            .map_err(|_| BlockDeviceError::IoError)
+    }
+
+    /// AHCI: flush_CACHE komutu ile disk write cache'ini temizler
+    /// Deep web: Linux kernel drivers/ata/libata-sata.c ata_std_horkage()
+    fn supports_flush(&self) -> bool {
+        true // AHCI her zaman flush destekler
+    }
+
+    /// AHCI: FLUSH CACHE EXT komutu ile FUA destekler
+    /// Deep web: Linux kernel drivers/ata/ahci.c ahci_fua_supported()
+    fn supports_fua(&self) -> bool {
+        true // AHCI modern disklerde FUA destekler
+    }
+
+    fn flush(&mut self) -> Result<(), BlockDeviceError> {
+        let mut port = self.port.lock();
+        port.flush_cache().map_err(|_| BlockDeviceError::IoError)
+    }
+
+    fn write_block_fua(&mut self, lba: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        let mut port = self.port.lock();
+        port.write_sector_fua(lba, buffer)
             .map_err(|_| BlockDeviceError::IoError)
     }
 

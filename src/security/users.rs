@@ -317,6 +317,17 @@ impl UserDatabase {
         self.current_uid.load(Ordering::SeqCst)
     }
 
+    /// Mevcut GID'yi getir (aktif oturumdan)
+    pub fn current_gid(&self) -> Gid {
+        let uid = self.current_uid();
+        let users = self.users.lock();
+        if let Some(user) = users.get(&uid) {
+            user.gid
+        } else {
+            0 // root varsayımı
+        }
+    }
+
     /// Mevcut kullanıcı root mu?
     pub fn is_root(&self) -> bool {
         self.current_uid() == 0

@@ -868,3 +868,275 @@ pub fn mount_from_data(disk_data: &[u8], mount_point: &str) -> Result<(), &'stat
 pub fn mounted_count() -> usize {
     XFS_FILESYSTEMS.lock().len()
 }
+
+// ============================================================================
+// XFS WRITE SUPPORT (C9 — extent allocation, data write, inode update)
+// ============================================================================
+
+/// Allocate blocks from an Allocation Group's free space using the
+/// by-size B+Tree (CNTBT) for best-fit allocation.
+///
+/// Spec: xfsprogs xfs_alloc.c — xfs_alloc_vextent, xfs_alloc_lookup_le.
+/// AGF'deki agf_roots_cnt (CNTBT root) ve agf_levels_cnt (CNTBT levels)
+/// kullanılarak by-size B+Tree traverse edilir. En küçük yeterli extent
+/// bulunur (best-fit).
+fn xfs_alloc_blocks_from_ag(
+    fs: &mut XfsFilesystem,
+    ag_num: u32,
+    count: u64,
+    disk_data: &mut [u8],
+) -> Result<u64, &'static str> {
+    if ag_num >= fs.ags.len() as u32 {
+        return Err("XFS: AG number out of range");
+    }
+
+    let ag = &mut fs.ags[ag_num as usize].0;
+    if (ag.agf_freeblks as u64) < count {
+        return Err("XFS: AG does not have enough free blocks");
+    }
+
+    let block_size = fs.superblock.sb_blocksize as usize;
+    let ag_offset = if ag_num == 0 {
+        // AG0: superblock blok 0'da, AGF blok 1'de
+        block_size
+    } else {
+        (ag_num as usize) * (fs.superblock.sb_agblocks as usize) * block_size
+    };
+
+    // CNTBT (by-size B+Tree) root blok oku
+    let cnt_root = ag.agf_roots_cnt as usize;
+    let cnt_levels = ag.agf_levels_cnt as usize;
+    let cnt_root_offset = ag_offset + cnt_root * block_size;
+
+    if cnt_root_offset + block_size > disk_data.len() {
+        return Err("XFS: CNTBT root block out of range");
+    }
+
+    // B+Tree traversal: root'dan leaf'e in
+    let mut current_block = cnt_root;
+    let mut current_level = cnt_levels;
+
+    while current_level > 1 {
+        let block_offset = ag_offset + current_block * block_size;
+        if block_offset + 16 > disk_data.len() {
+            return Err("XFS: B+Tree block read out of range");
+        }
+
+        let btree_block = XfsBtreeShortBlock::from_bytes(&disk_data[block_offset..])
+            .ok_or("XFS: invalid B+Tree block")?;
+
+        // Internal node: ilk child'a git (en küçük key)
+        // Record'lar header'dan sonra: her record 8 byte (startblock + blockcount)
+        let rec_offset = block_offset + 16; // header sonrası
+        if rec_offset + 8 > disk_data.len() || btree_block.bb_numrecs == 0 {
+            return Err("XFS: B+Tree internal node empty");
+        }
+
+        // İlk record'un child pointer'ını al (record sonrası 4 byte)
+        let first_rec_end = rec_offset + 8;
+        if first_rec_end + 4 > disk_data.len() {
+            return Err("XFS: B+Tree child pointer out of range");
+        }
+        current_block = u32::from_be_bytes([
+            disk_data[first_rec_end],
+            disk_data[first_rec_end + 1],
+            disk_data[first_rec_end + 2],
+            disk_data[first_rec_end + 3],
+        ]) as usize;
+        current_level -= 1;
+    }
+
+    // Leaf seviyesi: en küçük yeterli extent'i bul (best-fit)
+    let leaf_offset = ag_offset + current_block * block_size;
+    if leaf_offset + 16 > disk_data.len() {
+        return Err("XFS: B+Tree leaf block out of range");
+    }
+
+    let leaf_block = XfsBtreeShortBlock::from_bytes(&disk_data[leaf_offset..])
+        .ok_or("XFS: invalid B+Tree leaf block")?;
+
+    if !leaf_block.is_leaf() {
+        return Err("XFS: expected leaf level");
+    }
+
+    // Leaf record'larını tara — by-size tree'de record'lar size'a göre sıralı
+    // En küçük yeterli extent'i bul
+    let mut best_start: Option<u32> = None;
+    let rec_offset = leaf_offset + 16;
+
+    for i in 0..leaf_block.bb_numrecs {
+        let rec_pos = rec_offset + (i as usize) * 8;
+        if rec_pos + 8 > disk_data.len() {
+            break;
+        }
+        let rec = XfsAllocRec::from_bytes(&disk_data[rec_pos..])
+            .ok_or("XFS: invalid alloc record")?;
+
+        if (rec.ar_blockcount as u64) >= count {
+            best_start = Some(rec.ar_startblock);
+            break; // by-size tree'de ilk yeterli olan en küçük
+        }
+    }
+
+    let start_agblock = match best_start {
+        Some(s) => s,
+        None => {
+            // CNTBT leaf traversal found no single record >= count.
+            // Remaining path: split largest extent (agf_longest) across record
+            // boundaries and update B+Tree keys. Deferred until full B+Tree
+            // mutation (insert/delete/split) is implemented.
+            if (ag.agf_longest as u64) < count {
+                return Err("XFS: no single extent large enough");
+            }
+            return Err("XFS: B+Tree traversal found no suitable extent; need full B+Tree mutation (split/merge) for fragmented volumes");
+        }
+    };
+
+    // AGF güncelle
+    ag.agf_freeblks -= count as u32;
+    fs.superblock.sb_fdblocks -= count;
+
+    // AGF'yi diske yaz
+    let agf_write_offset = ag_offset;
+    if agf_write_offset + 56 <= disk_data.len() {
+        let freeblks_bytes = (ag.agf_freeblks as u32).to_be_bytes();
+        disk_data[agf_write_offset + 48..agf_write_offset + 52]
+            .copy_from_slice(&freeblks_bytes);
+    }
+
+    let global_block = (ag_num as u64) * (fs.superblock.sb_agblocks as u64) + start_agblock as u64;
+    Ok(global_block)
+}
+
+/// Write data to XFS filesystem — allocates extents and writes data
+///
+/// Spec: xfsprogs xfs_bmap.c — xfs_bmapi_write.
+/// 1. Gerekli blok sayısını hesapla
+/// 2. Her AG'den CNTBT üzerinden best-fit allocation
+/// 3. Veriyi allocated bloklara yaz
+/// 4. Inode extent listesini güncelle (inline veya B+Tree)
+/// 5. Inode di_size ve di_nblocks güncelle
+pub fn xfs_write_data(
+    fs: &mut XfsFilesystem,
+    disk_data: &mut [u8],
+    inode_num: u64,
+    data: &[u8],
+) -> Result<Vec<XfsExtent>, &'static str> {
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let block_size = fs.superblock.sb_blocksize as usize;
+    let blocks_needed = ((data.len() + block_size - 1) / block_size) as u64;
+
+    let mut extents = Vec::new();
+    let mut remaining = blocks_needed;
+    let mut logical_offset = 0u64;
+
+    for ag_num in 0..fs.ag_count() {
+        if remaining == 0 {
+            break;
+        }
+
+        let ag = &fs.ags[ag_num as usize].0;
+        if ag.agf_freeblks == 0 {
+            continue;
+        }
+
+        let alloc_count = remaining.min(ag.agf_freeblks as u64);
+        let start_block = xfs_alloc_blocks_from_ag(fs, ag_num, alloc_count, disk_data)?;
+
+        let data_offset = logical_offset as usize * block_size;
+        let bytes_to_write = (alloc_count as usize * block_size)
+            .min(data.len().saturating_sub(data_offset));
+        let disk_offset = (start_block as usize) * block_size;
+
+        if disk_offset + bytes_to_write <= disk_data.len()
+            && data_offset < data.len()
+        {
+            disk_data[disk_offset..disk_offset + bytes_to_write]
+                .copy_from_slice(&data[data_offset..data_offset + bytes_to_write]);
+        }
+
+        extents.push(XfsExtent {
+            flag: false,
+            startoff: logical_offset,
+            startblock: start_block,
+            blockcount: alloc_count as u32,
+        });
+
+        logical_offset += alloc_count;
+        remaining -= alloc_count;
+    }
+
+    if remaining > 0 {
+        return Err("XFS: not enough free space for write");
+    }
+
+    xfs_update_inode_extents(fs, disk_data, inode_num, &extents, data.len() as u64)?;
+
+    Ok(extents)
+}
+
+/// Update inode extent list after write
+fn xfs_update_inode_extents(
+    fs: &XfsFilesystem,
+    disk_data: &mut [u8],
+    inode_num: u64,
+    extents: &[XfsExtent],
+    new_size: u64,
+) -> Result<(), &'static str> {
+    let ino_per_ag = fs.superblock.sb_agblocks as u64 * (fs.superblock.sb_blocksize as u64)
+        / (fs.superblock.sb_inodesize as u64);
+    let ag_num = (inode_num / ino_per_ag) as u32;
+    let ag_ino = inode_num % ino_per_ag;
+
+    let inode_offset = (ag_num as usize) * (fs.superblock.sb_agblocks as usize) * (fs.superblock.sb_blocksize as usize)
+        + (ag_ino as usize) * (fs.superblock.sb_inodesize as usize);
+
+    if inode_offset + fs.superblock.sb_inodesize as usize > disk_data.len() {
+        return Err("XFS: inode offset out of bounds");
+    }
+
+    let inode_start = inode_offset;
+    let di_format_offset = inode_start + 100;
+    let di_size_offset = inode_start + 96;
+
+    disk_data[di_format_offset] = XFS_DINODE_FMT_EXTENTS;
+
+    let size_bytes = new_size.to_be_bytes();
+    disk_data[di_size_offset..di_size_offset + 8].copy_from_slice(&size_bytes);
+
+    let extent_start = inode_start + 176;
+    for (i, ext) in extents.iter().enumerate() {
+        let ext_offset = extent_start + i * 16;
+        if ext_offset + 16 > inode_start + fs.superblock.sb_inodesize as usize {
+            return Err("XFS: extents exceed inline inode capacity, need B+Tree format");
+        }
+        // 128-bit packed extent record (big-endian)
+        // [127] flag, [126:73] startoff (54 bits), [72:21] startblock (52 bits), [20:0] blockcount (21 bits)
+        let mut raw = [0u8; 16];
+        let flag_bit = if ext.flag { 1u64 } else { 0 };
+        // w0: flag(1) + startoff(54) + startblock_hi(11)
+        let hi = (flag_bit << 63)
+            | ((ext.startoff & 0x003F_FFFF_FFFF_FFFF) << 9)
+            | ((ext.startblock >> 43) & 0x1FF);
+        // w1: startblock_lo(41) + blockcount(21)
+        let lo = ((ext.startblock & 0x1FFFFFFFFFF) << 21)
+            | ((ext.blockcount as u64) & 0x1FFFFF);
+        raw[..8].copy_from_slice(&hi.to_be_bytes());
+        raw[8..].copy_from_slice(&lo.to_be_bytes());
+        disk_data[ext_offset..ext_offset + 16].copy_from_slice(&raw);
+    }
+
+    let nextents_offset = inode_start + 108;
+    let nextents_bytes = (extents.len() as u32).to_be_bytes();
+    disk_data[nextents_offset..nextents_offset + 4].copy_from_slice(&nextents_bytes);
+
+    let nblocks_offset = inode_start + 144;
+    let total_blocks: u64 = extents.iter().map(|e| e.blockcount as u64).sum();
+    let nblocks_bytes = total_blocks.to_be_bytes();
+    disk_data[nblocks_offset..nblocks_offset + 8].copy_from_slice(&nblocks_bytes);
+
+    Ok(())
+}

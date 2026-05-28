@@ -20,6 +20,7 @@ param(
     [switch]$WaitForExit,
     [switch]$ForceVarsReset,
     [switch]$SuspendResumeSmoke,
+    [switch]$FsSmokeTest,
     [switch]$PackagedPeSmoke,
     [switch]$MixedUpdateSmoke,
     [string]$CuratedBundleDir = "",
@@ -65,6 +66,63 @@ function Get-FileContentLength {
         return 0
     }
     return $content.Length
+}
+
+function ConvertTo-ProcessArgumentString {
+    param(
+        [string[]]$ArgumentList
+    )
+
+    $quoted = @()
+    foreach ($arg in $ArgumentList) {
+        if ($null -eq $arg) {
+            continue
+        }
+        if ($arg -match '[\s"]') {
+            $escaped = $arg.Replace('"', '\"')
+            $quoted += '"' + $escaped + '"'
+        } else {
+            $quoted += $arg
+        }
+    }
+    return ($quoted -join ' ')
+}
+
+function Start-CleanProcess {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+
+    if ($StdoutPath -ne "") { Set-Content -LiteralPath $StdoutPath -Value "" -Encoding ASCII }
+    if ($StderrPath -ne "") { Set-Content -LiteralPath $StderrPath -Value "" -Encoding ASCII }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $argString = ConvertTo-ProcessArgumentString -ArgumentList $ArgumentList
+    $psi.FileName = $FilePath
+    $psi.Arguments = $argString
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    if (-not $proc.Start()) {
+        throw "process start failed: $FilePath"
+    }
+    Start-Sleep -Milliseconds 2000
+    if ($proc.HasExited) {
+        if ($StdoutPath -ne "") {
+            Set-Content -LiteralPath $StdoutPath -Value $proc.StandardOutput.ReadToEnd() -Encoding ASCII
+        }
+        if ($StderrPath -ne "") {
+            Set-Content -LiteralPath $StderrPath -Value $proc.StandardError.ReadToEnd() -Encoding ASCII
+        }
+    }
+    return $proc
 }
 
 function Wait-FileMarkerAfterOffset {
@@ -186,7 +244,10 @@ function Invoke-HostCargoBuild {
     try {
         Remove-Item Env:CC -ErrorAction SilentlyContinue
         Remove-Item Env:HOST_CC -ErrorAction SilentlyContinue
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
         cargo @CargoArgs
+        $ErrorActionPreference = $savedEap
         return $LASTEXITCODE
     } finally {
         if ($null -ne $savedCc) { $env:CC = $savedCc } else { Remove-Item Env:CC -ErrorAction SilentlyContinue }
@@ -414,7 +475,7 @@ Write-Host "NIC model: $nicModel" -ForegroundColor DarkGray
 
 $llvmBin = "C:\Program Files\LLVM\bin"
 if (Test-Path $llvmBin) {
-    $env:PATH = "$llvmBin;$env:PATH"
+    $env:Path = "$llvmBin;$env:Path"
     if (-not $env:CC -or $env:CC -eq "") { $env:CC = "clang" }
     if (-not $env:CC_x86_64_unknown_none -or $env:CC_x86_64_unknown_none -eq "") { $env:CC_x86_64_unknown_none = "clang" }
 }
@@ -655,6 +716,9 @@ if ($useIso) {
     if ($SuspendResumeSmoke) {
         $builderArgs += "--suspend-resume-smoke"
     }
+    if ($FsSmokeTest) {
+        $builderArgs += "--fs-smoke-test"
+    }
     if ($PackagedPeSmoke) {
         $builderArgs += @("--pe-smoke-bundle", $peSmokeBundlePath)
     }
@@ -669,6 +733,7 @@ if ($useIso) {
     }
     $canReuseAppliance = (-not $RebuildAppliance) -and `
         (-not $SuspendResumeSmoke) -and `
+        (-not $FsSmokeTest) -and `
         (-not $PackagedPeSmoke) -and `
         (-not $MixedUpdateSmoke) -and `
         ($EspExtraFile.Count -eq 0)
@@ -710,6 +775,11 @@ if ($useIso) {
     if (-not (Test-Path $ovmfVars)) {
         Copy-Item $ovmfVarsTemplate $ovmfVars -Force
     }
+    $ovmfCodeRuntime = Join-Path $artifactDir "OVMF_CODE.fd"
+    if ((-not (Test-Path $ovmfCodeRuntime)) -or ((Get-Item -LiteralPath $ovmfCode).LastWriteTimeUtc -gt (Get-Item -LiteralPath $ovmfCodeRuntime -ErrorAction SilentlyContinue).LastWriteTimeUtc)) {
+        Copy-Item $ovmfCode $ovmfCodeRuntime -Force
+    }
+    $ovmfCode = $ovmfCodeRuntime
 
     $displayArgs = if ($Headless) {
         @("-display", "none")
@@ -719,8 +789,8 @@ if ($useIso) {
     $monitorHost = "127.0.0.1"
     $monitorPort = 45454
     $monitorEndpoint = "tcp:${monitorHost}:${monitorPort},server,nowait"
-    $ovmfCodeDrive = "if=pflash,format=raw,readonly=on,file=`"$ovmfCode`""
-    $ovmfVarsDrive = "if=pflash,format=raw,file=`"$ovmfVars`""
+    $ovmfCodeDrive = "if=pflash,format=raw,readonly=on,file=$ovmfCode"
+    $ovmfVarsDrive = "if=pflash,format=raw,file=$ovmfVars"
     $qemuArgs = @(
         "-machine", "q35",
         "-cpu", $cpuModel,
@@ -755,13 +825,22 @@ function Assert-SerialMarkers {
         [string[]]$Markers
     )
 
-    $serialContent = if (Test-Path $Path) { Get-Content $Path -Raw } else { "" }
     $missing = @()
-    foreach ($marker in $Markers) {
-        if (-not $serialContent.Contains($marker)) {
-            $missing += $marker
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        $serialContent = if (Test-Path $Path) { Get-Content $Path -Raw -ErrorAction SilentlyContinue } else { "" }
+        $missing = @()
+        foreach ($marker in $Markers) {
+            if (-not $serialContent.Contains($marker)) {
+                $missing += $marker
+            }
         }
-    }
+        if ($missing.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 200
+    } while ((Get-Date) -lt $deadline)
+
     if ($missing.Count -gt 0) {
         Write-Host "Missing boot markers in ${Path}:" -ForegroundColor Red
         $missing | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
@@ -846,7 +925,7 @@ function Start-MixedUpdatePhase {
     }
 
     Write-Host "Launching QEMU ($PhaseName)...`n" -ForegroundColor Yellow
-    $proc = Start-Process -FilePath $qemu -ArgumentList $phaseArgs -PassThru -RedirectStandardOutput $phaseStdoutPath -RedirectStandardError $phaseStderrPath
+    $proc = Start-CleanProcess -FilePath $qemu -ArgumentList $phaseArgs -StdoutPath $phaseStdoutPath -StderrPath $phaseStderrPath
     [PSCustomObject]@{
         Name = $PhaseName
         Process = $proc
@@ -937,7 +1016,7 @@ try {
         }
     } else {
         Write-Host "Launching QEMU...`n" -ForegroundColor Yellow
-        $proc = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -RedirectStandardOutput $qemuStdoutPath -RedirectStandardError $qemuStderrPath
+        $proc = Start-CleanProcess -FilePath $qemu -ArgumentList $qemuArgs -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
 
         if ($whpxEnabled -and -not $useIso) {
             $whpxEntryTimeoutSec = if ($Accel -eq "whpx") { 20 } else { 5 }
@@ -989,7 +1068,7 @@ try {
                 $cpuModel = $tcgCpuModel
                 $qemuCpuCount = $fallbackCpuCount
                 $qemuSmpArg = "sockets=1,cores=$qemuCpuCount,threads=1,maxcpus=$qemuCpuCount"
-                $proc = Start-Process -FilePath $qemu -ArgumentList $qemuArgs -PassThru -RedirectStandardOutput $qemuStdoutPath -RedirectStandardError $qemuStderrPath
+                $proc = Start-CleanProcess -FilePath $qemu -ArgumentList $qemuArgs -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
             }
         }
 

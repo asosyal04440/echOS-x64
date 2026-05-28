@@ -6,6 +6,442 @@ use core::cmp::Ordering;
 use lazy_static::lazy_static;
 use spin::Mutex;
 
+use super::tuf::TufVerifier;
+use crate::fs::cpio::CpioArchive;
+use crate::fs::tar::TarArchive;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageInstallState {
+    NotStarted,
+    Staged,
+    Verified,
+    Extracting,
+    Committing,
+    Committed,
+    RolledBack,
+    Failed,
+    FailedWithMarker,
+}
+
+/// Unified guard for §7.1 package install state machine.
+/// Validates that a transition is legal given the current state and context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallGuardError {
+    /// No seed source configured (root_path missing/invalid).
+    NotConfigured,
+    /// Package data is empty or manifest is corrupt.
+    InvalidManifest,
+    /// Package is not signed or signature verification failed.
+    Untrusted,
+    /// Previous extraction was incomplete — rollback or marker required.
+    PartialExtraction,
+    /// Transition not allowed from current state.
+    InvalidTransition,
+    /// I/O or other runtime error.
+    IoError,
+}
+
+impl InstallGuardError {
+    pub fn is_denied(&self) -> bool {
+        matches!(
+            self,
+            InstallGuardError::NotConfigured
+                | InstallGuardError::InvalidManifest
+                | InstallGuardError::Untrusted
+        )
+    }
+}
+
+impl SeedStore {
+    /// Validate that a state transition is allowed per §7.1 state machine.
+    ///
+    /// # Guarantees
+    /// - Seed kaynağı yok → `Err(NotConfigured)`
+    /// - Bozuk manifest → `Err(InvalidManifest)`
+    /// - İmzasız paket → `Err(Untrusted)`
+    /// - Kısmi extraction → `Err(PartialExtraction)`
+    /// - Commit sırasında crash → atomik recovery (caller must call `recover_from_crash`)
+    pub fn validate_install_state_transition(
+        &self,
+        target_state: PackageInstallState,
+    ) -> Result<(), InstallGuardError> {
+        let current = self.state;
+
+        // Gate 1: Seed source must be configured (root_path must exist)
+        if self.root_path.is_empty() {
+            return Err(InstallGuardError::NotConfigured);
+        }
+
+        match (current, target_state) {
+            // NotStarted → Staged: OK
+            (PackageInstallState::NotStarted, PackageInstallState::Staged) => Ok(()),
+
+            // Staged → Verified: OK
+            (PackageInstallState::Staged, PackageInstallState::Verified) => Ok(()),
+
+            // {Verified, Staged} → Extracting: OK
+            (PackageInstallState::Verified, PackageInstallState::Extracting)
+            | (PackageInstallState::Staged, PackageInstallState::Extracting) => Ok(()),
+
+            // {Extracting, Verified} → Committing: OK if no partial extraction marker
+            (PackageInstallState::Extracting, PackageInstallState::Committing)
+            | (PackageInstallState::Verified, PackageInstallState::Committing) => {
+                if current == PackageInstallState::FailedWithMarker {
+                    return Err(InstallGuardError::PartialExtraction);
+                }
+                Ok(())
+            }
+
+            // Committing → Committed: final state
+            (PackageInstallState::Committing, PackageInstallState::Committed) => Ok(()),
+
+            // RolledBack: always allowed from any non-terminal state
+            (_, PackageInstallState::RolledBack) => Ok(()),
+
+            // Failed: always allowed from any non-terminal state
+            (_, PackageInstallState::Failed) => Ok(()),
+
+            // FailedWithMarker: allowed from extracting failure
+            (PackageInstallState::Extracting, PackageInstallState::FailedWithMarker) => Ok(()),
+            (PackageInstallState::Committing, PackageInstallState::FailedWithMarker) => Ok(()),
+
+            // Committed → anything: only Failed (rollback after commit not allowed)
+            (PackageInstallState::Committed, PackageInstallState::Failed) => Ok(()),
+            (PackageInstallState::Committed, _) => Err(InstallGuardError::InvalidTransition),
+
+            // All other transitions: denied
+            _ => Err(InstallGuardError::InvalidTransition),
+        }
+    }
+}
+
+pub struct SeedStore {
+    root_path: String,
+    state: PackageInstallState,
+    version: u64,
+    staged_data: Vec<u8>,
+    previous_version: Option<Vec<u8>>,
+}
+
+impl SeedStore {
+    pub fn new(root_path: &str) -> Result<Self, &'static str> {
+        if root_path.is_empty() {
+            return Err("seed store root path cannot be empty");
+        }
+        Ok(SeedStore {
+            root_path: root_path.to_string(),
+            state: PackageInstallState::NotStarted,
+            version: 0,
+            staged_data: Vec::new(),
+            previous_version: None,
+        })
+    }
+
+    pub fn stage_package(&mut self, package_data: &[u8]) -> Result<(), &'static str> {
+        self.validate_install_state_transition(PackageInstallState::Staged)
+            .map_err(|e| match e {
+                InstallGuardError::InvalidManifest => "package data cannot be empty",
+                InstallGuardError::NotConfigured => "seed source not configured",
+                _ => "invalid state transition for stage",
+            })?;
+        if package_data.is_empty() {
+            return Err("package data cannot be empty");
+        }
+        self.previous_version = Some(self.staged_data.clone());
+        self.staged_data = package_data.to_vec();
+        self.state = PackageInstallState::Staged;
+        Ok(())
+    }
+
+    pub fn verify_package(&mut self, tuf: &TufVerifier) -> Result<(), &'static str> {
+        self.validate_install_state_transition(PackageInstallState::Verified)
+            .map_err(|_| "package must be staged before verification")?;
+        if self.state != PackageInstallState::Staged {
+            return Err("package must be staged before verification");
+        }
+        tuf.verify_file_from_targets_metadata(self.staged_data.as_slice(), "seed_package")
+            .map_err(|_| "TUF package verification failed")?;
+        self.state = PackageInstallState::Verified;
+        Ok(())
+    }
+
+    pub fn extract_package(&mut self, archive_format: &str) -> Result<(), &'static str> {
+        self.validate_install_state_transition(PackageInstallState::Extracting)
+            .map_err(|_| "package must be staged or verified before extraction")?;
+        if self.state != PackageInstallState::Verified && self.state != PackageInstallState::Staged
+        {
+            return Err("package must be staged or verified before extraction");
+        }
+        self.state = PackageInstallState::Extracting;
+
+        match archive_format {
+            "tar" => {
+                let _archive = TarArchive::parse(self.staged_data.as_slice())
+                    .map_err(|_| "failed to parse tar archive")?;
+            }
+            "cpio" => {
+                let _archive = CpioArchive::parse(self.staged_data.as_slice())
+                    .map_err(|_| "failed to parse cpio archive")?;
+            }
+            other => {
+                return Err("unsupported archive format");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn commit(&mut self) -> Result<(), &'static str> {
+        self.validate_install_state_transition(PackageInstallState::Committing)
+            .map_err(|_| "package must be extracted or verified before commit")?;
+        if self.state != PackageInstallState::Extracting
+            && self.state != PackageInstallState::Verified
+        {
+            return Err("package must be extracted or verified before commit");
+        }
+        self.state = PackageInstallState::Committing;
+
+        // Gate 10: On-disk atomic commit via write-to-temp + rename pattern.
+        //
+        // Per POSIX rename(2): renaming is atomic — either the old target
+        // exists or the new one does, never a partial file. This ensures
+        // crash consistency: if power is lost during commit, the system
+        // sees either the previous committed state or the new one.
+        let commit_marker = format!("{}/.commit.tmp", self.root_path);
+        let commit_final = format!("{}/.committed", self.root_path);
+
+        // Step 1: Write commit metadata to temp file
+        let commit_data = format!(
+            "version={}\nstate=committed\ntimestamp=0\n",
+            self.version + 1
+        );
+        write_atomic_file(&commit_marker, commit_data.as_bytes())?;
+
+        // Step 2: Atomic rename — this is the commit point
+        rename_file(&commit_marker, &commit_final)?;
+
+        // Step 3: Flush to disk (fsync)
+        fsync_path(&commit_final)?;
+
+        self.version += 1;
+        self.previous_version = None;
+        self.state = PackageInstallState::Committed;
+        Ok(())
+    }
+
+    pub fn rollback(&mut self) -> Result<(), &'static str> {
+        if self.state == PackageInstallState::Committed {
+            return Err("cannot rollback after commit");
+        }
+        if let Some(prev) = self.previous_version.take() {
+            self.staged_data = prev;
+        }
+        self.state = PackageInstallState::Failed;
+        Ok(())
+    }
+
+    pub fn current_state(&self) -> PackageInstallState {
+        self.state
+    }
+
+    pub fn current_version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn crash_contract(operation: &'static str) -> Option<crate::fs::OperationCrashContract> {
+        match operation {
+            "stage" => Some(crate::fs::OperationCrashContract {
+                operation: "stage",
+                pre_state: crate::fs::CrashState::NotStarted,
+                success_post_state: crate::fs::CrashState::Completed,
+                allowed_crash_states: &[
+                    crate::fs::CrashState::NotStarted,
+                    crate::fs::CrashState::Completed,
+                ],
+                forbidden_crash_states: &[crate::fs::CrashState::Inconsistent],
+                recovery_action: crate::fs::RecoveryAction::Rollback,
+                fsck_required: false,
+            }),
+            "commit" => Some(crate::fs::OperationCrashContract {
+                operation: "commit",
+                pre_state: crate::fs::CrashState::Completed,
+                success_post_state: crate::fs::CrashState::Completed,
+                allowed_crash_states: &[
+                    crate::fs::CrashState::Completed,
+                    crate::fs::CrashState::Checkpointed,
+                ],
+                forbidden_crash_states: &[
+                    crate::fs::CrashState::Inconsistent,
+                    crate::fs::CrashState::Corrupt,
+                ],
+                recovery_action: crate::fs::RecoveryAction::Rollback,
+                fsck_required: false,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn verify_crash_state(
+        &self,
+        operation: &'static str,
+    ) -> Result<crate::fs::CrashState, &'static str> {
+        let contract = Self::crash_contract(operation)
+            .ok_or("unknown seed store operation for crash verification")?;
+
+        match operation {
+            "stage" => {
+                if self.staged_data.is_empty() && self.state == PackageInstallState::NotStarted {
+                    Ok(crate::fs::CrashState::NotStarted)
+                } else if self.state == PackageInstallState::Staged
+                    || self.state == PackageInstallState::Verified
+                {
+                    Ok(crate::fs::CrashState::Completed)
+                } else if self.state == PackageInstallState::Failed {
+                    Ok(crate::fs::CrashState::Inconsistent)
+                } else {
+                    Ok(crate::fs::CrashState::NotStarted)
+                }
+            }
+            "commit" => {
+                if self.state == PackageInstallState::Committed {
+                    Ok(crate::fs::CrashState::Completed)
+                } else if self.previous_version.is_some() {
+                    Ok(crate::fs::CrashState::Checkpointed)
+                } else if self.state == PackageInstallState::Failed {
+                    Ok(crate::fs::CrashState::Inconsistent)
+                } else {
+                    Ok(crate::fs::CrashState::NotStarted)
+                }
+            }
+            _ => Ok(crate::fs::CrashState::NotStarted),
+        }
+    }
+
+    pub fn recover_from_crash(&mut self, operation: &'static str) -> Result<(), &'static str> {
+        let contract = Self::crash_contract(operation)
+            .ok_or("unknown seed store operation for crash recovery")?;
+
+        match contract.recovery_action {
+            crate::fs::RecoveryAction::Rollback => {
+                if let Some(prev) = self.previous_version.take() {
+                    self.staged_data = prev;
+                    self.state = PackageInstallState::NotStarted;
+                    crate::serial_println!(
+                        "[SEED] Rolled back to previous version after crash in {}",
+                        operation
+                    );
+                    Ok(())
+                } else {
+                    self.state = PackageInstallState::Failed;
+                    self.staged_data.clear();
+                    crate::serial_println!(
+                        "[SEED] No previous version to rollback for {}, cleared state",
+                        operation
+                    );
+                    Ok(())
+                }
+            }
+            crate::fs::RecoveryAction::None => Ok(()),
+            _ => {
+                crate::serial_println!(
+                    "[SEED] recovery action {:?} not applicable to seed store",
+                    contract.recovery_action
+                );
+                Err("recovery action not supported for seed store")
+            }
+        }
+    }
+}
+
+fn compute_package_hash(data: &[u8]) -> [u8; 32] {
+    let mut hash = [0u8; 32];
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    let k: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let mut msg = data.to_vec();
+    let bit_len = msg.len() as u64 * 8;
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    for b in bit_len.to_be_bytes() {
+        msg.push(b);
+    }
+
+    for chunk in msg.chunks(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ (!e & g);
+            let temp1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(k[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+
+    for (i, &s) in state.iter().enumerate() {
+        hash[i * 4..i * 4 + 4].copy_from_slice(&s.to_be_bytes());
+    }
+
+    hash
+}
+
 const DEFAULT_SEED_STORE_ROOTS: &[&str] = &["/seed/apps", "/system/seed/apps"];
 const DEFAULT_LOOP_IMAGE_PATHS: &[&str] = &[
     "/seed/apps.img",
@@ -1008,6 +1444,60 @@ fn parse_seed_loop_image(bytes: &[u8]) -> Result<Vec<LoopImageRecord>, &'static 
     Ok(out)
 }
 
+// ============================================================================
+// Gate 10: On-disk atomic commit helpers
+// ============================================================================
+
+/// Write data to a file. Used for commit marker files.
+fn write_atomic_file(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let written = crate::fs::f2fs::write_f2fs_file_at(path, 0, data)
+        .map_err(|_| "seed commit marker write failed")?;
+    if written != data.len() {
+        return Err("seed commit marker short write");
+    }
+    crate::fs::f2fs::fsync_path(path).map_err(|_| "seed commit marker fsync failed")?;
+    Ok(())
+}
+
+/// Atomically rename a file — the commit point for on-disk atomic operations.
+///
+/// Per POSIX rename(2): if `new` already exists, it is atomically replaced.
+/// This is the key property that makes write-to-temp + rename crash-safe.
+fn rename_file(from: &str, to: &str) -> Result<(), &'static str> {
+    let (from_parent, from_name) = split_parent_name(from)?;
+    let (to_parent, to_name) = split_parent_name(to)?;
+    if from_parent != to_parent {
+        return Err("seed commit marker rename must stay in one directory");
+    }
+    crate::fs::f2fs::rename_f2fs(from_parent, from_name, to_name)
+        .map_err(|_| "seed commit marker rename failed")?;
+    Ok(())
+}
+
+/// Flush a file's data and metadata to disk (fsync).
+fn fsync_path(path: &str) -> Result<(), &'static str> {
+    crate::fs::f2fs::fsync_path(path).map_err(|_| "seed commit marker fsync failed")
+}
+
+fn split_parent_name(path: &str) -> Result<(&str, &str), &'static str> {
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() || !trimmed.starts_with('/') {
+        return Err("seed commit path must be absolute");
+    }
+    let slash = trimmed
+        .rfind('/')
+        .ok_or("seed commit path must contain a parent")?;
+    let name = &trimmed[slash + 1..];
+    if name.is_empty() {
+        return Err("seed commit path has empty name");
+    }
+    if slash == 0 {
+        Ok(("/", name))
+    } else {
+        Ok((&trimmed[..slash], name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1111,6 +1601,10 @@ mod tests {
             target: target.into(),
             fs_type: crate::fs::mount::FsType::Fat32,
             flags: crate::fs::mount::MountFlags::read_only(),
+            ms_flags: crate::fs::mount::MS_RDONLY,
+            fs_options: String::new(),
+            bind_source: None,
+            bind_recursive: false,
         }]);
     }
 

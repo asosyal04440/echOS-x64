@@ -33,7 +33,7 @@
 //!           (len == 0 ise dosya sonuna kadar = u64::MAX)
 //! ```
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -58,12 +58,16 @@ pub const F_UNLCK: i32 = 2; // Kilidi kaldır
 pub const F_SETLK: i32 = 6; // Kilidi ayarla (bloklamayan)
 pub const F_SETLKW: i32 = 7; // Kilidi ayarla (bloklayan)
 pub const F_GETLK: i32 = 5; // Kilit bilgisini al
+/// OFD (open file description) lock commands (Linux 3.15+)
+pub const F_OFD_GETLK: i32 = 36;
+pub const F_OFD_SETLK: i32 = 37;
+pub const F_OFD_SETLKW: i32 = 38;
 
 // ============================================================================
 // DOSYA KİLİT YAPILARI
 // ============================================================================
 
-/// Bir dosya kilidi (POSIX fcntl stil)
+/// Bir dosya kilidi (POSIX fcntl stil / OFD)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileLock {
     /// Kilit türü (F_RDLCK, F_WRLCK, F_UNLCK)
@@ -74,8 +78,10 @@ pub struct FileLock {
     pub l_start: u64,
     /// Uzunluk (0 = dosya sonuna kadar)
     pub l_len: u64,
-    /// Kilidi tutan proses ID'si
+    /// Kilidi tutan proses ID'si (POSIX) veya fd (OFD)
     pub l_pid: u64,
+    /// true = OFD (open file description) lock, false = POSIX lock
+    pub is_ofd: bool,
 }
 
 impl FileLock {
@@ -86,13 +92,17 @@ impl FileLock {
             l_start,
             l_len,
             l_pid,
+            is_ofd: false,
         }
     }
 
     /// Bu kilidin başkasıyla çakışıp çakışmadığını kontrol eder
     pub fn conflicts_with(&self, other: &FileLock) -> bool {
-        // Farklı prosesler
-        if self.l_pid == other.l_pid {
+        // man fcntl_locking(2): OFD vs POSIX always conflict (even same process, same fd)
+        if self.is_ofd != other.is_ofd {
+            // One is OFD, other is POSIX → always conflict
+        } else if self.l_pid == other.l_pid {
+            // Same lock type (both POSIX or both OFD) AND same owner → compatible
             return false;
         }
 
@@ -159,6 +169,8 @@ pub struct FileLockManager {
     posix_locks: Mutex<BTreeMap<u64, Vec<FileLock>>>,
     /// Dosya tanımlayıcısına göre flock kilitleri
     flock_locks: Mutex<BTreeMap<u64, Vec<FlockLock>>>,
+    /// Wait-for graph: waiter_pid -> set of holder_pids (deadlock detection)
+    wait_for_graph: Mutex<BTreeMap<u64, BTreeSet<u64>>>,
     /// Toplam kilit sayısı
     total_locks: AtomicU64,
     /// Toplam çakışma sayısı
@@ -170,6 +182,7 @@ impl FileLockManager {
         Self {
             posix_locks: Mutex::new(BTreeMap::new()),
             flock_locks: Mutex::new(BTreeMap::new()),
+            wait_for_graph: Mutex::new(BTreeMap::new()),
             total_locks: AtomicU64::new(0),
             total_conflicts: AtomicU64::new(0),
         }
@@ -237,11 +250,11 @@ impl FileLockManager {
 
     /// Prosesin tüm kilitlerini serbest bırakır
     pub fn release_all_locks(&self, pid: u64) {
-        // POSIX kilitlerini serbest bırak
+        // POSIX kilitlerini serbest bırak (OFD kilitleri hariç)
         {
             let mut locks = self.posix_locks.lock();
             for (_, lock_list) in locks.iter_mut() {
-                lock_list.retain(|l| l.l_pid != pid);
+                lock_list.retain(|l| l.is_ofd || l.l_pid != pid);
             }
         }
 
@@ -254,6 +267,14 @@ impl FileLockManager {
         }
 
         crate::serial_println!("[FILELOCK] Released all locks for PID {}", pid);
+    }
+
+    /// Belirtilen open file description'a ait OFD kilitlerini serbest bırakır
+    pub fn release_ofd_locks(&self, fd: u64) {
+        let mut locks = self.posix_locks.lock();
+        for (_, lock_list) in locks.iter_mut() {
+            lock_list.retain(|l| !(l.is_ofd && l.l_pid == fd));
+        }
     }
 
     /// flock kilidi alır
@@ -312,6 +333,72 @@ impl FileLockManager {
         }
 
         false
+    }
+
+    /// F_SETLKW için deadlock tespiti: waiter_pid, holder_pid için bekliyorsa
+    /// ve bu bir cycle oluşturuyorsa true döner.
+    pub fn detect_deadlock(&self, waiter_pid: u64, inode: u64, lock: &FileLock) -> bool {
+        // OFD lock'lar için deadlock detection yok (man fcntl_locking(2))
+        if lock.is_ofd {
+            return false;
+        }
+        let locks = self.posix_locks.lock();
+        // Çakışan kilitleri tutan PID'leri bul
+        let holders: BTreeSet<u64> = locks.get(&inode).map(|existing| {
+            existing.iter()
+                .filter(|l| lock.conflicts_with(l))
+                .map(|l| l.l_pid)
+                .collect()
+        }).unwrap_or_default();
+
+        drop(locks);
+
+        // DFS: her holder'dan başlayarak wait-for graph'ı traverse et
+        let graph = self.wait_for_graph.lock();
+        let mut visited = BTreeSet::new();
+        let mut stack: Vec<u64> = holders.into_iter().collect();
+        while let Some(pid) = stack.pop() {
+            if pid == waiter_pid {
+                return true; // cycle: waiter kendini bekliyor
+            }
+            if !visited.insert(pid) {
+                continue;
+            }
+            if let Some(waiting_for) = graph.get(&pid) {
+                for &w in waiting_for {
+                    stack.push(w);
+                }
+            }
+        }
+        false
+    }
+
+    /// Wait-for graph'a edge ekler: waiter_pid, holder_pid'leri bekliyor
+    pub fn add_wait_edges(&self, waiter_pid: u64, inode: u64, lock: &FileLock) {
+        if lock.is_ofd {
+            return;
+        }
+        let locks = self.posix_locks.lock();
+        let holders: BTreeSet<u64> = locks.get(&inode).map(|existing| {
+            existing.iter()
+                .filter(|l| lock.conflicts_with(l))
+                .map(|l| l.l_pid)
+                .collect()
+        }).unwrap_or_default();
+        drop(locks);
+
+        let mut graph = self.wait_for_graph.lock();
+        graph.insert(waiter_pid, holders);
+    }
+
+    /// Wait-for graph'dan edge'leri kaldırır (kilit alındığında veya vazgeçildiğinde)
+    pub fn remove_wait_edges(&self, pid: u64) {
+        let mut graph = self.wait_for_graph.lock();
+        graph.remove(&pid);
+        // Diğer processlerin bu PID'i beklemesini de kaldır
+        for (_, holders) in graph.iter_mut() {
+            holders.remove(&pid);
+        }
     }
 }
 
@@ -398,10 +485,17 @@ pub fn sys_fcntl_lock(fd: i32, cmd: i32, lock: &mut FileLock) -> i32 {
         return -22; // EINVAL
     }
 
+    let is_ofd = cmd == F_OFD_GETLK || cmd == F_OFD_SETLK || cmd == F_OFD_SETLKW;
+    // man fcntl_locking(2): OFD commands require l_pid == 0
+    if is_ofd && lock.l_pid != 0 {
+        return -22; // EINVAL
+    }
+
     // Try to map fd -> path -> inode (simple path hash). Falls back to fd
     let inode = {
-        // Attempt to read path from global FD table
-        let table = crate::fs::GLOBAL_FD_TABLE.lock();
+        // Attempt to read path from current process's FD table (per-process)
+        let fd_arc = crate::fs::current_fd_table();
+        let table = fd_arc.lock();
         if let Some(file) = table.get(fd as usize) {
             // Simple djb2-style hash to produce a stable inode-like value
             let mut hash: u64 = 5381;
@@ -414,13 +508,29 @@ pub fn sys_fcntl_lock(fd: i32, cmd: i32, lock: &mut FileLock) -> i32 {
         }
     };
 
-    lock.l_pid = crate::task::scheduler::current_task_id() as u64;
-
-    match cmd {
+    // Set owner: OFD uses fd, POSIX uses PID
+    lock.is_ofd = is_ofd;
+    if is_ofd {
+        lock.l_pid = fd as u64;
+    } else {
+        lock.l_pid = crate::task::scheduler::current_task_id() as u64;
+    }
+    // OFD cmd'lerini POSIX eşdeğerlerine normalize et
+    let posix_cmd = match cmd {
+        F_OFD_GETLK => F_GETLK,
+        F_OFD_SETLK => F_SETLK,
+        F_OFD_SETLKW => F_SETLKW,
+        _ => cmd,
+    };
+    match posix_cmd {
         F_GETLK => {
             // Çakışan kilidi bul
             if let Some(conflict) = FILE_LOCK_MANAGER.get_conflicting_lock(inode, lock) {
                 *lock = conflict;
+                // man fcntl_locking(2): OFD conflicting lock → l_pid = -1
+                if lock.is_ofd {
+                    lock.l_pid = u64::MAX; // -1 as u64
+                }
             } else {
                 lock.l_type = F_UNLCK;
             }
@@ -429,52 +539,29 @@ pub fn sys_fcntl_lock(fd: i32, cmd: i32, lock: &mut FileLock) -> i32 {
         F_SETLK => {
             // Bloklamayan kilit ayarla
             match FILE_LOCK_MANAGER.acquire_posix_lock(inode, lock.clone()) {
-                Ok(()) => {
-                    crate::serial_println!(
-                        "[FCNTL] SETLK: fd={} type={} start={} len={}",
-                        fd,
-                        lock.l_type,
-                        lock.l_start,
-                        lock.l_len
-                    );
-                    0
-                }
+                Ok(()) => 0,
                 Err(FileLockError::Conflict) => -11, // EAGAIN
                 Err(_) => -22,                       // EINVAL
             }
         }
         F_SETLKW => {
-            // Bloklayan kilit ayarla
+            // Bloklayan kilit ayarla — önce deadlock kontrolü
+            if FILE_LOCK_MANAGER.detect_deadlock(lock.l_pid, inode, lock) {
+                return -35; // EDEADLK
+            }
+            FILE_LOCK_MANAGER.add_wait_edges(lock.l_pid, inode, lock);
             loop {
                 match FILE_LOCK_MANAGER.acquire_posix_lock(inode, lock.clone()) {
                     Ok(()) => {
-                        crate::serial_println!(
-                            "[FCNTL] SETLKW: fd={} type={} start={} len={}",
-                            fd,
-                            lock.l_type,
-                            lock.l_start,
-                            lock.l_len
-                        );
+                        FILE_LOCK_MANAGER.remove_wait_edges(lock.l_pid);
                         return 0;
                     }
                     Err(FileLockError::Conflict) => {
-                        // Kilitlenme (deadlock) kontrolü: eğer bekleme süresi
-                        // DEADLOCK_TIMEOUT_MS'i aştıysa EDEADLK döndür
-                        const DEADLOCK_TIMEOUT_MS: u64 = 5000;
-                        static WAIT_START: core::sync::atomic::AtomicU64 =
-                            core::sync::atomic::AtomicU64::new(0);
-                        let now = crate::task::scheduler::get_ticks() as u64;
-                        let start = WAIT_START.load(core::sync::atomic::Ordering::Relaxed);
-                        if start == 0 {
-                            WAIT_START.store(now, core::sync::atomic::Ordering::Relaxed);
-                        } else if now.saturating_sub(start) > DEADLOCK_TIMEOUT_MS {
-                            WAIT_START.store(0, core::sync::atomic::Ordering::Relaxed);
-                            crate::serial_println!("[FCNTL] Deadlock detected for fd={}", fd);
-                            return -35; // EDEADLK
-                        }
-                        crate::task::sleep(10);
+                        crate::task::scheduler::schedule();
+                        continue;
                     }
                     Err(_) => {
+                        FILE_LOCK_MANAGER.remove_wait_edges(lock.l_pid);
                         return -22; // EINVAL
                     }
                 }
@@ -496,6 +583,11 @@ pub fn init() {
 /// Prosesin tüm kilitlerini serbest bırakır (proses sonlandırıldığında çağrılır)
 pub fn release_process_locks(pid: u64) {
     FILE_LOCK_MANAGER.release_all_locks(pid);
+}
+
+/// OFD kilitlerini fd bazında serbest bırakır (fd kapatılırken çağrılır)
+pub fn release_ofd_locks(fd: u64) {
+    FILE_LOCK_MANAGER.release_ofd_locks(fd);
 }
 
 /// Dosya bölgesinin kilitli olup olmadığını kontrol eder (zorunlu kilitleme için)

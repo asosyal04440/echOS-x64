@@ -115,6 +115,9 @@ pub mod serial;
 /// Task scheduler ve context switch
 pub mod task;
 
+/// Zaman yardımcı fonksiyonları (timestamp, uyku)
+pub mod time;
+
 /// Komut satırı shell
 pub mod shell;
 
@@ -189,6 +192,9 @@ pub mod net;
 
 /// Donanım hızlandırmalı kriptografi (AES-NI, SHA-NI)
 pub mod crypto;
+
+/// Compression/decompression algorithms (DEFLATE, LZO1X, ZSTD)
+pub mod compression;
 
 pub mod elf;
 pub mod ironshim_app;

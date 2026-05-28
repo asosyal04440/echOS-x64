@@ -8021,6 +8021,8 @@ mod kernel32 {
                 task.cold.mode = crate::task::task::ExecutionMode::LegacyRing3;
                 task.cold.page_table = crate::task::scheduler::current_user_page_table();
                 task.cold.address_space = crate::task::scheduler::current_address_space();
+                // Per-process FD tablosu başlat — win32 user thread
+                task.init_fd_table();
             }
             task.cold.user_entry = Some(thread_bootstrap.entry_rip);
             task.cold.user_stack_top = Some(thread_bootstrap.user_stack_top);

@@ -4557,6 +4557,8 @@ pub fn spawn_process_task_from_payload(
     task.cold.user_entry = Some(user_image.entry_point);
     task.cold.user_stack_top = Some(user_image.stack_top);
     task.cold.win32 = Some(user_image.initial_thread);
+    // Per-process FD tablosu başlat — PE user process
+    task.init_fd_table();
     let task_id = task.id;
     PE_PENDING_LAUNCHES.lock().insert(task_id as u64, handle);
     let _ = tasking::scheduler::spawn_task(task);

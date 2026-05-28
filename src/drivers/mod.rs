@@ -161,6 +161,18 @@ pub mod pci_hotplug;
 /// DMA Ownership Contract — unified lifecycle, bounce buffer, cache coherency
 pub mod dma;
 
+/// GPT Partition Parser — UEFI Spec 2.10 GUID Partition Table
+pub mod gpt;
+
+/// MBR Partition Parser — Master Boot Record partition table
+pub mod mbr;
+
+/// qcow2 Image Parser — QEMU Copy-On-Write v2/v3 image format
+pub mod qcow2;
+
+/// Block I/O scheduler layer: mq-deadline + blk-mq multi-queue dispatch
+pub mod sched;
+
 // Sık kullanılan blok cihaz türlerini doğrudan dışa aktar
 pub use block::{BlockDevice, BlockDeviceError, BlockDeviceType};
 
@@ -245,9 +257,28 @@ pub mod linux {
     }
 
     /// Blok cihaz okuma/yazma arayüzü (disk soyutlama katmanı)
+    /// Deep web: Linux kernel include/linux/blkdev.h (REQ_PREFLUSH, REQ_FUA)
     pub trait BlockDevice: Send {
         fn read_sectors(&mut self, lba: u32, count: u8) -> Vec<u8>;
         fn write_sectors(&mut self, lba: u32, data: &[u8]) -> Result<(), ()>;
+
+        /// Aygıtın flush destekleyip desteklemediğini söyler
+        fn supports_flush(&self) -> bool {
+            false
+        }
+
+        /// Aygıtın FUA destekleyip desteklemediğini söyler
+        fn supports_fua(&self) -> bool {
+            false
+        }
+
+        fn flush(&mut self) -> Result<(), ()> {
+            if self.supports_flush() {
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
     }
 
     /// VirtIO blok cihazı sarmalayıcısı (QEMU sanal disk)
@@ -263,6 +294,10 @@ pub mod linux {
 
         fn write_sectors(&mut self, lba: u32, data: &[u8]) -> Result<(), ()> {
             AtaDrive::write_sectors(self, lba, data).map_err(|_| ())
+        }
+
+        fn flush(&mut self) -> Result<(), ()> {
+            AtaDrive::flush(self).map_err(|_| ())
         }
     }
 
@@ -372,19 +407,9 @@ pub mod linux {
     ///   MBR geçerliliği (sektör 0'ın son 2 byte'ı 0x55 0xAA olmalı) doğrulanır
     pub fn select_block_device() -> Result<Box<dyn BlockDevice>, LinuxDriverError> {
         let devices = list_devices();
-        crate::serial_println!("BLOCK DEV COUNT: {}", devices.len());
-        if devices.is_empty() {
-            crate::serial_println!("BLOCK DEV: no devices registered");
-        }
+        crate::debug::serial::trace_raw(format_args!("[BLK] device count: {}\n", devices.len()));
         for device in devices.iter() {
-            crate::serial_println!(
-                "DEBUG: Block scan device {} kind={:?} vendor={:04x} device={:04x} class={:02x}",
-                device.name,
-                device.kind,
-                device.vendor_id,
-                device.device_id,
-                device.class_code
-            );
+            crate::debug::serial::trace_raw(format_args!("[BLK] {} kind={:?} ven={:04x} dev={:04x}\n", device.name, device.kind, device.vendor_id, device.device_id));
         }
         let virtio_devices: Vec<&LinuxDevice> = devices
             .iter()
@@ -395,75 +420,24 @@ pub mod linux {
             })
             .collect();
         if virtio_devices.is_empty() {
-            crate::serial_println!("BLOCK DEVICE NOT FOUND: virtio block missing");
+            crate::debug::serial::trace_raw(format_args!("[BLK] virtio block not found, trying AHCI/NVMe/ATA\n"));
             return try_ata_block_device();
         }
-        crate::serial_println!("BLOCK DEVICE FOUND: {}", virtio_devices.len());
-        crate::serial_println!("TRYING TO INIT DRIVER for device...");
+        crate::debug::serial::trace_raw(format_args!("[BLK] virtio block found: {}\n", virtio_devices.len()));
         let mut probe = [0u8; BLOCK_SIZE];
         let virtio = match virtio_ffi::device() {
             Some(dev) => dev,
             None => {
-                crate::serial_println!("BLOCK DEVICE INIT FAILED: VirtIO not initialized");
+                crate::debug::serial::trace_raw(format_args!("[BLK] VirtIO FFI not initialized\n"));
                 return try_ata_block_device().map_err(|_| LinuxDriverError::NotFound);
             }
         };
-        crate::serial_println!("VIRTIO FFI: read sector=0 start");
         if let Err(err) = virtio.read_sector(0, &mut probe) {
-            crate::serial_println!(
-                "BLOCK DEVICE INIT FAILED: VirtIO probe read: {}",
-                err.as_str()
-            );
+            crate::debug::serial::trace_raw(format_args!("[BLK] VirtIO probe read failed: {}\n", err.as_str()));
             return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
         }
-        crate::serial_println!("VIRTIO FFI: read sector=0 done");
-        let mut backup = [0u8; BLOCK_SIZE];
-        let mut test = [0u8; BLOCK_SIZE];
-        let mut verify = [0u8; BLOCK_SIZE];
-        let test_lba = 1u64;
-        if let Err(err) = virtio.read_sector(test_lba, &mut backup) {
-            crate::serial_println!(
-                "BLOCK DEVICE INIT FAILED: VirtIO backup read lba={}: {}",
-                test_lba,
-                err.as_str()
-            );
-            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
-        }
-        for i in 0..BLOCK_SIZE {
-            test[i] = (i as u8) ^ 0xA5;
-        }
-        if let Err(err) = virtio.write_sector(test_lba, &test) {
-            crate::serial_println!(
-                "BLOCK DEVICE INIT FAILED: VirtIO write/read probe write lba={}: {}",
-                test_lba,
-                err.as_str()
-            );
-            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
-        }
-        if let Err(err) = virtio.read_sector(test_lba, &mut verify) {
-            crate::serial_println!(
-                "BLOCK DEVICE INIT FAILED: VirtIO write/read probe verify lba={}: {}",
-                test_lba,
-                err.as_str()
-            );
-            return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
-        }
-        if verify == test {
-            crate::serial_println!("VIRTIO FFI: write/read test OK lba={}", test_lba);
-        } else {
-            crate::serial_println!("VIRTIO FFI: write/read test FAILED lba={}", test_lba);
-        }
-        if let Err(err) = virtio.write_sector(test_lba, &backup) {
-            crate::serial_println!(
-                "VIRTIO FFI: restore skipped after probe failure lba={} err={}",
-                test_lba,
-                err.as_str()
-            );
-        }
-        crate::serial_println!("VIRTIO FFI: write/read test restore done lba={}", test_lba);
-        // MBR imzası: geleneksel MBR'nin son 2 byte'ı 0x55, 0xAA olmalı
         if probe[510] != 0x55 || probe[511] != 0xAA {
-            crate::serial_println!("BLOCK DEVICE INIT FAILED: MBR signature invalid");
+            crate::debug::serial::trace_raw(format_args!("[BLK] MBR signature invalid\n"));
             return try_ata_block_device().map_err(|_| LinuxDriverError::Io);
         }
         crate::serial_println!("BLOCK DEVICE MBR OK: 0x55AA");
@@ -474,27 +448,25 @@ pub mod linux {
     /// VirtIO bulunamazsa AHCI, NVMe, sonra ATA/IDE denetleyicisini dener.
     /// Sıralama: VirtIO -> AHCI -> NVMe -> ATA (en hızlıdan en yavaşa)
     fn try_ata_block_device() -> Result<Box<dyn BlockDevice>, LinuxDriverError> {
-        // Önce AHCI dene (SATA diskler için)
-        crate::serial_println!("BLOCK DEVICE FALLBACK: trying AHCI");
+        crate::debug::serial::trace_raw(format_args!("[BLK] fallback: trying AHCI\n"));
         match try_ahci_block_device() {
             Ok(dev) => {
-                crate::serial_println!("BLOCK DEVICE AHCI OK");
+                crate::debug::serial::trace_raw(format_args!("[BLK] AHCI OK\n"));
                 return Ok(dev);
             }
             Err(e) => {
-                crate::serial_println!("BLOCK DEVICE AHCI FAILED: {:?}", e);
+                crate::debug::serial::trace_raw(format_args!("[BLK] AHCI failed: {:?}\n", e));
             }
         }
 
-        // AHCI bulunamazsa NVMe dene
-        crate::serial_println!("BLOCK DEVICE FALLBACK: trying NVMe");
+        crate::debug::serial::trace_raw(format_args!("[BLK] fallback: trying NVMe\n"));
         match try_nvme_block_device() {
             Ok(dev) => {
-                crate::serial_println!("BLOCK DEVICE NVMe OK");
+                crate::debug::serial::trace_raw(format_args!("[BLK] NVMe OK\n"));
                 return Ok(dev);
             }
             Err(e) => {
-                crate::serial_println!("BLOCK DEVICE NVMe FAILED: {:?}", e);
+                crate::debug::serial::trace_raw(format_args!("[BLK] NVMe failed: {:?}\n", e));
             }
         }
 
@@ -586,22 +558,17 @@ pub mod linux {
 
     /// NVMe blok cihazı dener. Varsayılan controller ve nsid=1 kullanır.
     fn try_nvme_block_device() -> Result<Box<dyn BlockDevice>, LinuxDriverError> {
-        // NVMe subsystem init edilmiş mi ve controller var mı kontrol et
-        let nsid = 1u32; // Varsayılan namespace ID
-
-        // Namespace bilgisi alabilirsek, NVMe çalışıyor demektir
+        let nsid = 1u32;
+        crate::debug::serial::trace_raw(format_args!("[BLK] NVMe: probing namespace {}\n", nsid));
+        let ctrl_count = crate::drivers::nvme::controller_count();
+        crate::debug::serial::trace_raw(format_args!("[BLK] NVMe: controller count={}\n", ctrl_count));
         match crate::drivers::nvme::get_namespace_info(nsid) {
             Some((block_size, block_count, _capacity)) => {
-                crate::serial_println!(
-                    "NVMe: found namespace {} ({} blocks of {} bytes)",
-                    nsid,
-                    block_count,
-                    block_size
-                );
+                crate::debug::serial::trace_raw(format_args!("[BLK] NVMe: ns={} blocks={} size={}\n", nsid, block_count, block_size));
                 Ok(Box::new(NvmeBlockDeviceWrapper { nsid }))
             }
             None => {
-                crate::serial_println!("NVMe: no namespace found");
+                crate::debug::serial::trace_raw(format_args!("[BLK] NVMe: no namespace found\n"));
                 Err(LinuxDriverError::NotFound)
             }
         }
@@ -615,9 +582,16 @@ pub mod linux {
     impl BlockDevice for NvmeBlockDeviceWrapper {
         fn read_sectors(&mut self, lba: u32, count: u8) -> Vec<u8> {
             let mut buffer = vec![0u8; count as usize * BLOCK_SIZE];
+            crate::debug::serial::trace_raw(format_args!("[BLK] NVMe read_sectors: nsid={} lba={} count={}\n", self.nsid, lba, count));
             match crate::drivers::nvme::read(self.nsid, lba as u64, count as u16, &mut buffer) {
-                Ok(()) => buffer,
-                Err(_) => Vec::new(),
+                Ok(()) => {
+                    crate::debug::serial::trace_raw(format_args!("[BLK] NVMe read OK: {} bytes\n", buffer.len()));
+                    buffer
+                }
+                Err(e) => {
+                    crate::debug::serial::trace_raw(format_args!("[BLK] NVMe read failed: nsid={} lba={} err={:?}\n", self.nsid, lba, e));
+                    Vec::new()
+                }
             }
         }
 
@@ -626,7 +600,15 @@ pub mod linux {
                 return Err(());
             }
             let blocks = (data.len() / BLOCK_SIZE) as u16;
-            crate::drivers::nvme::write(self.nsid, lba as u64, blocks, data).map_err(|_| ())
+            crate::drivers::nvme::write(self.nsid, lba as u64, blocks, data).map_err(|e| {
+                crate::debug::serial::trace_raw(format_args!("[BLK] NVMe write failed: nsid={} lba={} err={:?}\n", self.nsid, lba, e));
+            })
+        }
+
+        fn flush(&mut self) -> Result<(), ()> {
+            crate::drivers::nvme::flush(self.nsid).map_err(|e| {
+                crate::debug::serial::trace_raw(format_args!("[BLK] NVMe flush failed: nsid={} err={:?}\n", self.nsid, e));
+            })
         }
     }
 
@@ -934,6 +916,11 @@ pub mod linux {
         register_driver(Box::new(Ps2MouseDriver));
         register_driver(Box::new(StoragePciDriver));
         register_driver(Box::new(XhciPciDriver));
+        // NVMe alt sistemini başlat (controller keşif + namespace discovery)
+        crate::debug::serial::trace_raw(format_args!("[DRV] NVMe subsystem init...\n"));
+        crate::drivers::nvme::init();
+        let ns_info = crate::drivers::nvme::get_namespace_info(1);
+        crate::debug::serial::trace_raw(format_args!("[DRV] NVMe namespace 1 info: {:?}\n", ns_info));
         // Probe+attach döngüsünü çalıştır ve başarılı bağlama sayısını döndür
         probe_and_attach()
     }

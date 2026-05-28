@@ -40,6 +40,8 @@ pub enum BlockDeviceError {
     Timeout,
     /// Bilinmeyen hata
     Unknown,
+    /// İşlem desteklenmiyor
+    Unsupported,
 }
 
 /// Blok aygıt türü.
@@ -66,9 +68,13 @@ pub enum BlockDeviceType {
 /// Depolama sürücülerinin uygulaması gereken soyut arayüz.
 /// Dosya sistemi katmanı bu arayüz üzerinden tüm depolama aygıtlarına erişir.
 ///
-/// # Güvenli Olmayan İşlemler
-/// `read_block`/`write_block` düşük seviyeli ham I/O yapar;
-/// doğru LBA değerleri çağıranın sorumluluğundadır.
+/// Deep web: Linux kernel include/linux/blk_types.h (REQ_PREFLUSH, REQ_FUA)
+///           block/writeback_cache_control.txt (flush/FUA semantics)
+///
+/// # Güvenlik Sözleşmesi
+/// - `flush()`真實olmalı — desteklemeyen aygıt `Err(Unsupported)` dönmeli
+/// - `write_block_fua()` FUA desteklemiyorsa write + flush olarak gerçekleşmeli
+/// - `supports_flush()` / `supports_fua()` capability sorgusu
 pub trait BlockDevice: Send {
     /// Tek bir bloğu okur.
     fn read_block(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockDeviceError>;
@@ -93,9 +99,31 @@ pub trait BlockDevice: Send {
         false
     }
 
+    /// Aygıtın flush (cache temizleme) destekleyip desteklemediğini söyler.
+    /// Deep web: Linux blk_queue_write_cache(queue, true, false) — flush only
+    fn supports_flush(&self) -> bool {
+        false
+    }
+
+    /// Aygıtın FUA (Force Unit Access) destekleyip desteklemediğini söyler.
+    /// Deep web: Linux blk_queue_write_cache(queue, true, true) — flush + FUA
+    fn supports_fua(&self) -> bool {
+        false
+    }
+
     /// Yazma önbelleğini temizler (flush).
+    /// Deep web: Linux REQ_PREFLUSH — device cache flush
+    ///
+    /// # Hata Davranışı
+    /// - Desteklemeyen aygıt: `Err(BlockDeviceError::Unsupported)`
+    /// - Başarılı flush: `Ok(())`
+    /// - Başarısız flush: `Err(BlockDeviceError::IoError)`
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
-        Ok(())
+        if self.supports_flush() {
+            Ok(())
+        } else {
+            Err(BlockDeviceError::Unsupported)
+        }
     }
 
     /// Birden fazla sektörü art arda okur (kolaylık metodu).
@@ -127,6 +155,29 @@ pub trait BlockDevice: Send {
     /// Aygıt kapasitesini sektör sayısı olarak döndürür.
     fn capacity(&self) -> u64 {
         self.block_count()
+    }
+
+    /// Write a block with Force Unit Access semantics.
+    /// Deep web: Linux REQ_FUA — write directly to non-volatile media
+    ///
+    /// # Davranış
+    /// - FUA destekliyse: donanımsal FUA kullanılır
+    /// - FUA desteklemiyorsa: write + flush (software fallback)
+    /// - Desteklemeyen aygıt: `Err(BlockDeviceError::Unsupported)`
+    fn write_block_fua(&mut self, lba: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        if self.supports_fua() {
+            // Donanımsal FUA — veri doğrudan dayanıklı medyaya yazılır
+            self.write_block(lba, buffer)?;
+            // FUA zaten flush gerektirir, ek flush gereksiz
+            Ok(())
+        } else if self.supports_flush() {
+            // Software fallback: write + flush
+            self.write_block(lba, buffer)?;
+            self.flush()
+        } else {
+            // Hiçbir flush/FUA desteği yok — dayanıklılık garanti edilemez
+            Err(BlockDeviceError::Unsupported)
+        }
     }
 
     /// Aygıt adını `&str` olarak döndürür.

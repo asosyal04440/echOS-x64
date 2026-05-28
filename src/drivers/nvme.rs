@@ -186,6 +186,7 @@ fn dma_buffer_phys(ptr: *const u8) -> Result<u64, NvmeError> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct NvmeCapabilities {
+    pub raw_cap: u64,               // Ham CAP register deÄŸeri
     pub max_queue_entries: u16,     // Maksimum kuyruk giriÅŸ sayÄ±sÄ±
     pub contiguous_queues: bool,    // Kuyruklar fiziksel olarak bitiÅŸik olmalÄ± mÄ±?
     pub arbitration_mechanisms: u8, // Desteklenen arbitrasyon bitmask (0=RR, 1=WRR, 2=vendor)
@@ -206,6 +207,7 @@ impl NvmeCapabilities {
         }
 
         NvmeCapabilities {
+            raw_cap: cap,
             max_queue_entries: ((cap >> CAP_MQES_SHIFT) & 0xFFFF) as u16 + 1, // 0-base'den 1-base'e
             contiguous_queues: ((cap >> CAP_CQR_SHIFT) & 1) != 0,
             arbitration_mechanisms: ((cap >> CAP_AMS_SHIFT) & 0x7) as u8,
@@ -471,6 +473,20 @@ impl NvmeCommand {
         cmd
     }
 
+    /// Yazma komutu + Force Unit Access (FUA bit = cdw12 bit 30)
+    ///
+    /// Per NVMe Base Spec rev 1.4a, Figure 99 (Write Command):
+    ///   cdw12 bit 30 = FUA — Force Unit Access
+    ///   cdw12 bit 31 = LR — Limited Retry
+    ///   cdw12 bits 15:00 = NLB — Number of Logical Blocks (0-based)
+    pub fn write_fua(cid: u16, nsid: u32, lba: u64, blocks: u16) -> Self {
+        let mut cmd = Self::new(OP_WRITE, cid, nsid);
+        cmd.cdw10 = lba as u32;
+        cmd.cdw11 = (lba >> 32) as u32;
+        cmd.cdw12 = ((blocks as u32) - 1) | (1u32 << 30);
+        cmd
+    }
+
     /// Flush komutu (OP_FLUSH): Ã¶nbelleÄŸi kalÄ±cÄ± depolamaya yaz
     pub fn flush(cid: u16, nsid: u32) -> Self {
         Self::new(OP_FLUSH, cid, nsid)
@@ -515,6 +531,25 @@ impl NvmeCommand {
         cmd
     }
 
+    /// Create I/O Completion Queue (OP_ADMIN_CREATE_CQ).
+    /// CDW10 stores QSIZE in bits 31:16 and CQID in bits 15:0.
+    pub fn create_io_cq(cid: u16, cqid: u16, size: u16) -> Self {
+        let mut cmd = Self::new(OP_ADMIN_CREATE_CQ, cid, 0);
+        cmd.cdw10 = ((size as u32 - 1) << 16) | cqid as u32;
+        cmd.cdw11 = 1; // PC=1 (physically contiguous)
+        cmd
+    }
+
+    /// Create I/O Submission Queue (OP_ADMIN_CREATE_SQ).
+    /// CDW10 stores QSIZE in bits 31:16 and SQID in bits 15:0.
+    /// CDW11 stores CQID in bits 31:16 and PC in bit 0.
+    pub fn create_io_sq(cid: u16, sqid: u16, cqid: u16, size: u16) -> Self {
+        let mut cmd = Self::new(OP_ADMIN_CREATE_SQ, cid, 0);
+        cmd.cdw10 = ((size as u32 - 1) << 16) | sqid as u32;
+        cmd.cdw11 = (cqid as u32) << 16 | 1; // CQID in upper 16 bits, PC=1
+        cmd
+    }
+
     /// PRP veri tampon adresini ayarlar.
     /// Tampon tek sayfaya sÄ±ÄŸÄ±yorsa prp1 yeterli; aksi takdirde prp2 gerekir.
     pub fn set_buffer(&mut self, addr: u64, len: usize) {
@@ -542,12 +577,12 @@ impl NvmeCommand {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct NvmeCompletion {
-    pub cid: u16,    // Tamamlanan komutun ID'si (SQE.cid ile eÅŸleÅŸmeli)
-    pub p: u16,      // Faz biti (bit 0); CQE geÃSection erliliÄŸini belirler
-    pub sqid: u16,   // Komutun geldiÄŸi Submission Queue ID
-    pub status: u16, // Durum alanÄ±: bit0=faz, bit1-14=status code, bit15=DNR
-    pub cdw0: u32,   // Komuta Ã¶zgÃ¼ tamamlama verisi (okumada LBA sayÄ±sÄ± vb.)
-    pub cdw1: u32,   // ZamanlanmÄ±ÅŸ alan
+    pub cdw0: u32,    // Komuta Ã¶zgÃ¼ tamamlama verisi (okumada LBA sayÄ±sÄ± vb.)
+    pub cdw1: u32,    // Reserved
+    pub sq_head: u16, // Submission queue head (controller tarafÄ±ndan gÃ¼ncellenir)
+    pub sq_id: u16,   // Submission Queue ID
+    pub cid: u16,     // Tamamlanan komutun ID'si (SQE.cid ile eÅŸleÅŸmeli)
+    pub status: u16,  // Durum alanÄ±: bit0=faz, bit1-14=status code, bit15=DNR
 }
 
 impl NvmeCompletion {
@@ -564,7 +599,7 @@ impl NvmeCompletion {
 
     /// Faz bitini dÃ¶ner (kuyruÄŸun yeni dÃ¶ngÃ¼de mi olduÄŸunu belirler)
     pub fn get_phase(&self) -> bool {
-        (self.p & 1) != 0
+        (self.status & 1) != 0
     }
 }
 
@@ -620,7 +655,7 @@ impl NvmeQueue {
             sq_tail: 0,
             sq_head: 0,
             cq_head: 0,
-            cq_phase: false,
+            cq_phase: true,
             sq_addr,
             cq_addr,
             sq_virt,
@@ -653,7 +688,7 @@ impl NvmeQueue {
         unsafe {
             let cq_ptr = self.cq_virt as *const NvmeCompletion;
             let entry = &*cq_ptr.add(self.cq_head as usize);
-            let phase = (entry.p & 1) != 0;
+            let phase = (entry.status & 1) != 0;
             if phase == self.cq_phase {
                 let completion = *entry;
                 self.cq_head = (self.cq_head + 1) % self.size;
@@ -850,6 +885,15 @@ impl NvmeController {
 
             // TÃ¼m namespace'leri keÅŸfet (nsid=1 den nn'e kadar)
             self.discover_namespaces()?;
+
+            // I/O kuyruklarÄ±nÄ± oluÅŸtur (SeaBIOS: namespace discovery'den SONRA)
+            if self.namespaces.is_empty() {
+                crate::debug::serial::trace_raw(format_args!(
+                    "[NVMe] Skipping I/O queue setup: no namespaces\n"
+                ));
+            } else {
+                self.setup_io_queue()?;
+            }
         }
 
         self.ready = true;
@@ -922,13 +966,11 @@ impl NvmeController {
     /// MSI (Message Signaled Interrupt) kesmesini yapÄ±landÄ±rÄ±r.
     /// MSI baÅŸarÄ±sÄ±z olursa polling moduna dÃ¼ÅŸÃ¼lÃ¼r.
     unsafe fn setup_interrupts(&mut self) -> Result<(), NvmeError> {
-        // Sistem geneli MSI vektÃ¶rÃ¼ tahsis et
         let vector = crate::interrupts::allocate_msi_vector(nvme_irq_handler)
             .ok_or(NvmeError::FeatureNotSupported)?;
 
         self.irq_vector = Some(vector);
 
-        // PCI MSI konfigÃ¼rasyonunu yaz (Message Address + Message Data)
         let apic_id = crate::cpu::smp::current_cpu_id() as u32;
         if !crate::drivers::pci::configure_pci_interrupt(
             self.bus,
@@ -946,45 +988,163 @@ impl NvmeController {
         Ok(())
     }
 
+    unsafe fn setup_io_queue(&mut self) -> Result<(), NvmeError> {
+        // Use matching SQ/CQ indices (NVMe spec: doorbell registers are paired by index)
+        let io_sqid = 1u16;
+        let io_cqid = 1u16;
+
+        // Queue size: min(MQES+1, PAGE_SIZE/entry_size)
+        let mqes = self.capabilities.max_queue_entries as u32;
+        let max_cq_entries = PAGE_SIZE / 16; // CQE = 16 bytes
+        let max_sq_entries = PAGE_SIZE / 64; // SQE = 64 bytes
+        let io_size = ((mqes + 1)
+            .min(max_cq_entries as u32)
+            .min(max_sq_entries as u32)) as u16;
+
+        crate::debug::serial::trace_raw(format_args!(
+            "[NVMe] Setting up I/O queue (sqid={}, cqid={}, size={}, mqes={})\n",
+            io_sqid, io_cqid, io_size, mqes
+        ));
+
+        // Doorbell stride: 4 << (DSTRD)
+        let dstrd = (self.capabilities.raw_cap >> 32) & 0xF;
+        let doorbell_stride = 4u64 << dstrd;
+
+        // Allocate physically contiguous buffer for I/O CQ
+        let cq_bytes = io_size as usize * 16; // CQE = 16 bytes
+        let cq_phys = crate::memory::alloc_phys(cq_bytes).ok_or(NvmeError::DataTransferError)?;
+        let cq_virt = crate::memory::active_physical_offset() + cq_phys;
+        core::ptr::write_bytes(cq_virt as *mut u8, 0, cq_bytes);
+
+        // Create I/O CQ
+        let cid = self.get_cid();
+        let mut cq_cmd = NvmeCommand::create_io_cq(cid, io_cqid, io_size);
+        cq_cmd.prp1 = cq_phys;
+        let completion = self.submit_admin_command(&cq_cmd)?;
+        if !completion.is_success() {
+            crate::debug::serial::trace_raw(format_args!(
+                "[NVMe] Create I/O CQ failed: status={}\n",
+                completion.get_status()
+            ));
+            return Err(NvmeError::ControllerError);
+        }
+        crate::debug::serial::trace_raw(format_args!("[NVMe] I/O CQ created OK\n"));
+
+        // Allocate physically contiguous buffer for I/O SQ
+        let sq_bytes = io_size as usize * 64; // SQE = 64 bytes
+        let sq_phys = crate::memory::alloc_phys(sq_bytes).ok_or(NvmeError::DataTransferError)?;
+        let sq_virt = crate::memory::active_physical_offset() + sq_phys;
+        core::ptr::write_bytes(sq_virt as *mut u8, 0, sq_bytes);
+
+        // Create I/O SQ
+        let cid = self.get_cid();
+        let mut sq_cmd = NvmeCommand::create_io_sq(cid, io_sqid, io_cqid, io_size);
+        sq_cmd.prp1 = sq_phys;
+        let completion = self.submit_admin_command(&sq_cmd)?;
+        if !completion.is_success() {
+            crate::debug::serial::trace_raw(format_args!(
+                "[NVMe] Create I/O SQ failed: status={}\n",
+                completion.get_status()
+            ));
+            return Err(NvmeError::ControllerError);
+        }
+        crate::debug::serial::trace_raw(format_args!("[NVMe] I/O SQ created OK\n"));
+
+        // Calculate doorbell offsets: base=0x1000, sq_db = base + 2*sqid*stride, cq_db = base + (2*cqid+1)*stride
+        let sq_db = 0x1000u64 + (2 * io_sqid as u64) * doorbell_stride;
+        let cq_db = 0x1000u64 + (2 * io_cqid as u64 + 1) * doorbell_stride;
+
+        let io_queue = NvmeQueue {
+            sqid: io_sqid,
+            cqid: io_cqid,
+            size: io_size,
+            sq_tail: 0,
+            sq_head: 0,
+            cq_head: 0,
+            cq_phase: true,
+            sq_addr: sq_phys,
+            cq_addr: cq_phys,
+            sq_virt,
+            cq_virt,
+            sq_db,
+            cq_db,
+            mmio_base: self.mmio_base,
+        };
+        self.io_queues.push(io_queue);
+
+        Ok(())
+    }
+
     /// Identify Controller komutu gÃ¶nderir; denetleyici kimliÄŸini doldurur.
     /// 4KB tampon tahsis edilerek Admin Queue'ya gÃ¶nderilir.
     unsafe fn identify_controller(&mut self) -> Result<(), NvmeError> {
-        // 4KB fiziksel tampon tahsis et (Identify tamponu iÃSection in sayfa hizalÄ± gerekir)
         let buffer_phys =
             crate::memory::alloc_phys(PAGE_SIZE).ok_or(NvmeError::DataTransferError)?;
         let buffer_virt = (crate::memory::active_physical_offset() + buffer_phys) as *mut u8;
         core::ptr::write_bytes(buffer_virt, 0, PAGE_SIZE);
 
-        // Identify Controller komutu: CNS=1 denetleyici tanÄ±mÄ± ister
         let cid = self.get_cid();
         let mut cmd = NvmeCommand::identify(cid, 1, 0);
         cmd.set_buffer(buffer_phys, PAGE_SIZE);
 
-        // Admin kuyruÄŸuna gÃ¶nder ve tamamlanmasÄ±nÄ± bekle
         self.submit_admin_command(&cmd)?;
 
-        // Tampon iÃSection eriÄŸini NvmeIdentifyController yapÄ±sÄ±na dÃ¶nÃ¼ÅŸtÃ¼r
         let idata = &*(buffer_virt as *const NvmeIdentifyController);
         self.identify = Some(*idata);
+
+        // NN (namespace count) is at offset 0x17C per NVMe spec.
+        // The struct layout may have padding issues, so read directly from buffer.
+        let nn_direct = core::ptr::read_unaligned(buffer_virt.add(0x17C) as *const u32);
+        crate::debug::serial::trace_raw(format_args!(
+            "[NVMe] Identify Controller: nn(struct)={} nn(direct@0x17C)={}\n",
+            idata.nn, nn_direct
+        ));
 
         Ok(())
     }
 
-    /// TÃ¼m namespace'leri keÅŸfeder; kapasitesi sÄ±fÄ±rdan bÃ¼yÃ¼k olanlarÄ± kaydeder
     unsafe fn discover_namespaces(&mut self) -> Result<(), NvmeError> {
-        let nn = self.identify.map(|i| i.nn).unwrap_or(0); // Toplam namespace sayÄ±sÄ±
+        // NN is at offset 0x17C in Identify Controller data
+        let nn = self
+            .identify
+            .map(|i| {
+                // Read nn directly from the identify buffer at spec offset 0x17C
+                let buf = &i as *const NvmeIdentifyController as *const u8;
+                core::ptr::read_unaligned(buf.add(0x17C) as *const u32)
+            })
+            .unwrap_or(0);
 
-        for nsid in 1..=nn {
-            if let Ok(ns) = self.identify_namespace(nsid) {
-                if ns.ncap > 0 {
-                    // KullanÄ±labilir kapasitesi olan namespace
-                    self.namespaces.insert(nsid, ns);
-                    crate::serial_println!(
-                        "[NVMe] Namespace {}: {} blocks, {} bytes/block",
-                        nsid,
-                        ns.get_block_count(),
-                        ns.get_block_size()
-                    );
+        crate::debug::serial::trace_raw(format_args!("[NVMe] discover_namespaces: nn={}\n", nn));
+
+        // If nn is 0, try nsid=1 anyway (some controllers don't report nn correctly)
+        let max_nsid = if nn > 0 { nn } else { 1 };
+
+        for nsid in 1..=max_nsid {
+            crate::debug::serial::trace_raw(format_args!(
+                "[NVMe] identify_namespace(nsid={})...\n",
+                nsid
+            ));
+            match self.identify_namespace(nsid) {
+                Ok(ns) => {
+                    crate::debug::serial::trace_raw(format_args!(
+                        "[NVMe] nsid={} ncap={} nsze={} nlbaf={} flbas={}\n",
+                        nsid, ns.ncap, ns.nsze, ns.nlbaf, ns.flbas
+                    ));
+                    if ns.ncap > 0 {
+                        self.namespaces.insert(nsid, ns);
+                        crate::serial_println!(
+                            "[NVMe] Namespace {}: {} blocks, {} bytes/block",
+                            nsid,
+                            ns.get_block_count(),
+                            ns.get_block_size()
+                        );
+                    }
+                }
+                Err(e) => {
+                    crate::debug::serial::trace_raw(format_args!(
+                        "[NVMe] identify_namespace(nsid={}) failed: {:?}\n",
+                        nsid, e
+                    ));
                 }
             }
         }
@@ -992,7 +1152,6 @@ impl NvmeController {
         Ok(())
     }
 
-    /// Belirli bir namespace'i tanÄ±mlar (Identify CNS=0)
     unsafe fn identify_namespace(&mut self, nsid: u32) -> Result<NvmeIdentifyNamespace, NvmeError> {
         let buffer_phys =
             crate::memory::alloc_phys(PAGE_SIZE).ok_or(NvmeError::DataTransferError)?;
@@ -1000,12 +1159,14 @@ impl NvmeController {
         core::ptr::write_bytes(buffer_virt, 0, PAGE_SIZE);
 
         let cid = self.get_cid();
-        let mut cmd = NvmeCommand::identify(cid, 0, nsid); // CNS=0: namespace bilgisi
+        let mut cmd = NvmeCommand::identify(cid, 0, nsid);
         cmd.set_buffer(buffer_phys, PAGE_SIZE);
 
-        self.submit_admin_command(&cmd)?;
+        let completion = self.submit_admin_command(&cmd)?;
+        if !completion.is_success() {
+            return Err(NvmeError::InvalidNamespace);
+        }
 
-        // Fiziksel belleÄŸi NvmeIdentifyNamespace yapÄ±sÄ±na kopyala
         let nsdata = *(buffer_virt as *const NvmeIdentifyNamespace);
         Ok(nsdata)
     }
@@ -1039,7 +1200,7 @@ impl NvmeController {
             let cq_entry = &*cq_ptr.add(queue.cq_head as usize);
 
             // Faz bitini kontrol et: eÅŸleÅŸiyorsa bu CQE yeni (iÅŸlenmemiÅŸ)
-            let phase = (cq_entry.p & 1) != 0;
+            let phase = (cq_entry.status & 1) != 0;
             if phase == queue.cq_phase {
                 let completion = *cq_entry; // CQE'yi kopyala
 
@@ -1074,6 +1235,53 @@ impl NvmeController {
             }
 
             // MSI modundaysa kesme worker'Ä±nÄ± uyandÄ±r
+            if let Some(vector) = self.irq_vector {
+                crate::interrupts::kick_irq_worker();
+            }
+        }
+    }
+
+    unsafe fn submit_io_command(&mut self, cmd: &NvmeCommand) -> Result<NvmeCompletion, NvmeError> {
+        let queue = self.io_queues.first_mut().ok_or(NvmeError::NotReady)?;
+
+        let sq_ptr = queue.sq_virt as *mut NvmeCommand;
+        let sq_entry = &mut *sq_ptr.add(queue.sq_tail as usize);
+        *sq_entry = *cmd;
+
+        core::sync::atomic::fence(Ordering::SeqCst);
+
+        let db_ptr = (self.mmio_base as usize + queue.sq_db as usize) as *mut u32;
+        let new_tail = (queue.sq_tail + 1) % queue.size;
+        core::ptr::write_volatile(db_ptr, new_tail as u32);
+        queue.sq_tail = new_tail;
+
+        let start = crate::task::scheduler::get_ticks();
+        loop {
+            let cq_ptr = queue.cq_virt as *const NvmeCompletion;
+            let cq_entry = &*cq_ptr.add(queue.cq_head as usize);
+
+            let phase = (cq_entry.status & 1) != 0;
+            if phase == queue.cq_phase {
+                let completion = *cq_entry;
+
+                queue.cq_head = (queue.cq_head + 1) % queue.size;
+
+                let cdb_addr = (self.mmio_base as usize + queue.cq_db as usize) as *mut u32;
+                core::ptr::write_volatile(cdb_addr, queue.cq_head as u32);
+
+                if queue.cq_head == 0 {
+                    queue.cq_phase = !queue.cq_phase;
+                }
+
+                return Ok(completion);
+            }
+
+            if crate::task::scheduler::get_ticks() as u64 - start as u64
+                > self.timeout_ms as u64 / 10
+            {
+                return Err(NvmeError::Timeout);
+            }
+
             if let Some(vector) = self.irq_vector {
                 crate::interrupts::kick_irq_worker();
             }
@@ -1130,8 +1338,6 @@ impl NvmeController {
         cid
     }
 
-    /// Namespace'ten blok okur.
-    /// lba: baÅŸlangÄ±ÃSection  sektÃ¶rÃ¼, blocks: okunacak sektÃ¶r sayÄ±sÄ±
     pub fn read(
         &mut self,
         nsid: u32,
@@ -1143,15 +1349,41 @@ impl NvmeController {
             return Err(NvmeError::NotReady);
         }
 
+        // SeaBIOS approach: use physically contiguous bounce buffer
+        let buffer_phys =
+            crate::memory::alloc_phys(buffer.len()).ok_or(NvmeError::DataTransferError)?;
+        let buffer_virt = (crate::memory::active_physical_offset() + buffer_phys) as *mut u8;
+
+        crate::debug::serial::trace_raw(format_args!(
+            "[NVMe] READ: phys={:#x} virt={:#x} len={}\n",
+            buffer_phys,
+            buffer_virt as usize,
+            buffer.len()
+        ));
+
         let cid = self.get_cid();
         let mut cmd = NvmeCommand::read(cid, nsid, lba, blocks);
-
-        // Tampon fiziksel adresini PRP alanÄ±na yaz
-        let buffer_phys = dma_buffer_phys(buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, buffer.len());
 
+        crate::debug::serial::trace_raw(format_args!(
+            "[NVMe] READ: prp1={:#x} prp2={:#x}\n",
+            cmd.prp1, cmd.prp2
+        ));
+
         unsafe {
-            self.submit_admin_command(&cmd)?;
+            let completion = self.submit_io_command(&cmd)?;
+            if !completion.is_success() {
+                crate::debug::serial::trace_raw(format_args!(
+                    "[NVMe] READ failed: nsid={} lba={} blocks={} status={}\n",
+                    nsid,
+                    lba,
+                    blocks,
+                    completion.get_status()
+                ));
+                return Err(NvmeError::DataTransferError);
+            }
+            // Copy from bounce buffer to user buffer
+            core::ptr::copy_nonoverlapping(buffer_virt, buffer.as_mut_ptr(), buffer.len());
         }
 
         Ok(())
@@ -1169,14 +1401,67 @@ impl NvmeController {
             return Err(NvmeError::NotReady);
         }
 
+        // SeaBIOS approach: use physically contiguous bounce buffer
+        let buffer_phys =
+            crate::memory::alloc_phys(buffer.len()).ok_or(NvmeError::DataTransferError)?;
+        let buffer_virt = (crate::memory::active_physical_offset() + buffer_phys) as *mut u8;
+
+        unsafe {
+            // Copy user data to bounce buffer
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), buffer_virt, buffer.len());
+        }
+
         let cid = self.get_cid();
         let mut cmd = NvmeCommand::write(cid, nsid, lba, blocks);
-
-        let buffer_phys = dma_buffer_phys(buffer.as_ptr())?;
         cmd.set_buffer(buffer_phys, buffer.len());
 
         unsafe {
-            self.submit_admin_command(&cmd)?;
+            let completion = self.submit_io_command(&cmd)?;
+            if !completion.is_success() {
+                crate::debug::serial::trace_raw(format_args!(
+                    "[NVMe] WRITE failed: nsid={} lba={} blocks={} status={}\n",
+                    nsid,
+                    lba,
+                    blocks,
+                    completion.get_status()
+                ));
+                return Err(NvmeError::DataTransferError);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write with Force Unit Access — data reaches non-volatile media before returning.
+    /// Uses the FUA bit in the NVMe write command (cdw12 bit 30) instead of write+flush.
+    pub fn write_fua(
+        &mut self,
+        nsid: u32,
+        lba: u64,
+        blocks: u16,
+        buffer: &[u8],
+    ) -> Result<(), NvmeError> {
+        if !self.ready {
+            return Err(NvmeError::NotReady);
+        }
+
+        let buffer_phys =
+            crate::memory::alloc_phys(buffer.len()).ok_or(NvmeError::DataTransferError)?;
+        let buffer_virt = (crate::memory::active_physical_offset() + buffer_phys) as *mut u8;
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(buffer.as_ptr(), buffer_virt, buffer.len());
+        }
+
+        let cid = self.get_cid();
+        let mut cmd = NvmeCommand::write_fua(cid, nsid, lba, blocks);
+        cmd.set_buffer(buffer_phys, buffer.len());
+
+        unsafe {
+            let completion = self.submit_io_command(&cmd)?;
+            if !completion.is_success() {
+                return Err(NvmeError::DataTransferError);
+            }
         }
 
         Ok(())
@@ -1192,7 +1477,15 @@ impl NvmeController {
         let cmd = NvmeCommand::flush(cid, nsid);
 
         unsafe {
-            self.submit_admin_command(&cmd)?;
+            let completion = self.submit_io_command(&cmd)?;
+            if !completion.is_success() {
+                crate::debug::serial::trace_raw(format_args!(
+                    "[NVMe] FLUSH failed: nsid={} status={}\n",
+                    nsid,
+                    completion.get_status()
+                ));
+                return Err(NvmeError::DataTransferError);
+            }
         }
 
         Ok(())
@@ -1582,7 +1875,7 @@ pub fn discover_nvme_controllers() -> Vec<NvmeController> {
 
 /// NVMe alt sistemini baÅŸlatÄ±r: keÅŸif + iniziyelizasyon
 pub fn init() {
-    crate::serial_println!("[NVMe] Initializing NVMe subsystem...");
+    crate::debug::serial::trace_raw(format_args!("[NVMe] Initializing NVMe subsystem...\n"));
 
     let controllers = discover_nvme_controllers();
     let mut nvme_ctrls = NVME_CONTROLLERS.lock();
@@ -1593,12 +1886,24 @@ pub fn init() {
         }
     }
 
-    crate::serial_println!("[NVMe] Found {} controllers", nvme_ctrls.len());
+    crate::debug::serial::trace_raw(format_args!(
+        "[NVMe] Found {} controllers, {} with namespaces\n",
+        nvme_ctrls.len(),
+        nvme_ctrls
+            .iter()
+            .filter(|c| !c.namespaces.is_empty())
+            .count()
+    ));
 }
 
 /// VarsayÄ±lan (ilk) denetleyiciyi dÃ¶ner; yoksa None
 pub fn default_controller() -> Option<NvmeController> {
     NVME_CONTROLLERS.lock().first().cloned()
+}
+
+/// NVMe controller sayÄ±sÄ±nÄ± dÃ¶ner
+pub fn controller_count() -> usize {
+    NVME_CONTROLLERS.lock().len()
 }
 
 /// VarsayÄ±lan denetleyiciden blok okur
@@ -1728,19 +2033,20 @@ pub fn create_io_queue(
         core::ptr::write_bytes(cq_virt, 0, cq_pages * PAGE_SIZE);
 
         // Admin komutuyla Completion Queue oluÅŸtur:
-        // cdw10: QSIZE(0-base) | QID<<16 ; cdw11: PC (Physically Contiguous) = 1
+        // CDW10: QSIZE(0-base) in bits 31:16 and CQID in bits 15:0.
         let mut cmd = NvmeCommand::new(OP_ADMIN_CREATE_CQ, controller.get_cid(), 0);
         cmd.prp1 = cq_phys;
-        cmd.cdw10 = ((size - 1) as u32) | ((qid as u32) << 16); // QSIZE | QID
+        cmd.cdw10 = ((size - 1) as u32) << 16 | qid as u32;
         cmd.cdw11 = 1; // Fiziksel bitiÅŸik, kesme yok
 
         controller.submit_admin_command(&cmd)?;
 
         // Admin komutuyla Submission Queue oluÅŸtur:
-        // cdw11: PC=1 | CQID<<16 (bu SQ'nun hangi CQ'ya raporlanacaÄŸÄ±)
+        // CDW10: QSIZE(0-base) in bits 31:16 and SQID in bits 15:0.
+        // CDW11: PC=1 and CQID in bits 31:16.
         let mut cmd = NvmeCommand::new(OP_ADMIN_CREATE_SQ, controller.get_cid(), 0);
         cmd.prp1 = sq_phys;
-        cmd.cdw10 = ((size - 1) as u32) | ((qid as u32) << 16);
+        cmd.cdw10 = ((size - 1) as u32) << 16 | qid as u32;
         cmd.cdw11 = 1 | ((qid as u32) << 16); // PC=1, CQID=qid
 
         controller.submit_admin_command(&cmd)?;
@@ -1753,8 +2059,8 @@ pub fn create_io_queue(
             size,
             sq_phys,
             cq_phys,
-            sq_phys,
-            cq_phys,
+            sq_virt as u64,
+            cq_virt as u64,
             controller.mmio_base,
             db_stride,
         ));
@@ -1822,7 +2128,31 @@ impl BlockDevice for NvmeBlockDevice {
             .map_err(|_| BlockDeviceError::IoError)
     }
 
-    /// Volatile write cache'i temizler; gÃ¼ÃSection  kesintisi Ã¶ncesi ÃSection aÄŸrÄ±lmalÄ±dÄ±r
+    /// Force Unit Access write — uses NVMe FUA bit for single-command persistence.
+    fn write_block_fua(&mut self, lba: u64, buffer: &[u8]) -> Result<(), BlockDeviceError> {
+        let mut controllers = NVME_CONTROLLERS.lock();
+        let ctrl = controllers
+            .get_mut(self.controller_idx)
+            .ok_or(BlockDeviceError::DeviceNotFound)?;
+
+        let blocks = (buffer.len() / self.block_size as usize) as u16;
+        ctrl.write_fua(self.nsid, lba, blocks.max(1), buffer)
+            .map_err(|_| BlockDeviceError::IoError)
+    }
+
+    /// NVMe: FLUSH komutu ile volatile write cache'i temizler
+    /// Deep web: Linux kernel drivers/nvme/host/core.c nvme_setup_flush()
+    fn supports_flush(&self) -> bool {
+        true // NVMe her zaman flush destekler
+    }
+
+    /// NVMe: FUA bit'i ile write komutu gönderir
+    /// Deep web: Linux kernel drivers/nvme/host/core.c nvme_setup_write()
+    fn supports_fua(&self) -> bool {
+        true // NVMe donanımsal FUA destekler
+    }
+
+    /// Volatile write cache'i temizler; güvenlik kesintisi öncesi yapılmalıdır
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
         let mut controllers = NVME_CONTROLLERS.lock();
         let ctrl = controllers
@@ -2261,9 +2591,9 @@ impl NvmeAsyncBlockDevice {
             entry,
             NvmeCompletion {
                 cid,
-                p: phase,
-                sqid: 1,
-                status,
+                status: phase as u16,
+                sq_head: 0,
+                sq_id: 1,
                 cdw0: bytes,
                 cdw1: 0,
             },
@@ -2631,6 +2961,60 @@ mod tests {
         let dstrd = (cap >> CAP_DSTRD_SHIFT) & 0xF;
         assert_eq!(dstrd, 2);
         assert_eq!(4 << dstrd, 16); // doorbell stride in bytes
+    }
+
+    #[test]
+    fn nvme_completion_layout_matches_spec_dw_order() {
+        assert_eq!(core::mem::size_of::<NvmeCompletion>(), 16);
+        assert_eq!(core::mem::align_of::<NvmeCompletion>(), 4);
+
+        let entry = core::mem::MaybeUninit::<NvmeCompletion>::uninit();
+        let base = entry.as_ptr() as usize;
+        unsafe {
+            assert_eq!(
+                core::ptr::addr_of!((*entry.as_ptr()).cdw0) as usize - base,
+                0
+            );
+            assert_eq!(
+                core::ptr::addr_of!((*entry.as_ptr()).cdw1) as usize - base,
+                4
+            );
+            assert_eq!(
+                core::ptr::addr_of!((*entry.as_ptr()).sq_head) as usize - base,
+                8
+            );
+            assert_eq!(
+                core::ptr::addr_of!((*entry.as_ptr()).sq_id) as usize - base,
+                10
+            );
+            assert_eq!(
+                core::ptr::addr_of!((*entry.as_ptr()).cid) as usize - base,
+                12
+            );
+            assert_eq!(
+                core::ptr::addr_of!((*entry.as_ptr()).status) as usize - base,
+                14
+            );
+        }
+    }
+
+    #[test]
+    fn nvme_create_io_queue_cdw_fields_are_spec_ordered() {
+        let cq = NvmeCommand::create_io_cq(7, 1, 64);
+        assert_eq!(cq.cdw10, (63u32 << 16) | 1);
+        assert_eq!(cq.cdw11, 1);
+
+        let sq = NvmeCommand::create_io_sq(8, 1, 1, 64);
+        assert_eq!(sq.cdw10, (63u32 << 16) | 1);
+        assert_eq!(sq.cdw11, (1u32 << 16) | 1);
+    }
+
+    #[test]
+    fn nvme_queue_initial_completion_phase_expects_first_controller_inversion() {
+        let queue = NvmeQueue::new(1, 1, 64, 0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 4);
+        assert!(queue.cq_phase);
+        assert_eq!(queue.sq_db, 0x1000 + 2 * 4);
+        assert_eq!(queue.cq_db, 0x1000 + 3 * 4);
     }
 
     #[test]

@@ -667,6 +667,7 @@ mod tests {
                 name: String::from("/apps/demo"),
                 size: 8,
                 is_dir: false,
+                is_symlink: false,
                 mode: 0o644,
                 uid: 0,
                 gid: 0,

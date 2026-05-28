@@ -4,8 +4,20 @@ fn main() {
         return;
     }
 
+    link_msvc_crt_for_curated_c();
     build_sqlite();
     build_lua();
+}
+
+fn link_msvc_crt_for_curated_c() {
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+
+    println!("cargo:rustc-link-lib=ucrt");
+    println!("cargo:rustc-link-lib=vcruntime");
+    println!("cargo:rustc-link-lib=legacy_stdio_definitions");
+    println!("cargo:rustc-link-lib=oldnames");
 }
 
 fn build_sqlite() {

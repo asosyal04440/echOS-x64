@@ -32,6 +32,7 @@ pub mod seccomp;
 pub mod simics_gate;
 pub mod spectre;
 pub mod tpm;
+pub mod tuf;
 pub mod users;
 
 /// KASLR — Kernel Address Space Layout Randomization + Manifest İmzalama

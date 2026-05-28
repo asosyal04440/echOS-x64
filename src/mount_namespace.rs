@@ -197,6 +197,7 @@ impl MountNamespace {
         // Propagation flags'ı kontrol et
         if flags & MS_SHARED != 0 {
             entry.propagation = MountPropagation::Shared;
+            entry.peer_group = NEXT_PEER_GROUP_ID.fetch_add(1, Ordering::Relaxed);
         } else if flags & MS_SLAVE != 0 {
             entry.propagation = MountPropagation::Slave;
         } else if flags & MS_UNBINDABLE != 0 {
@@ -208,10 +209,21 @@ impl MountNamespace {
         if let Some(parent) = parent_target {
             if let Some(parent_entry) = self.mounts.get(&parent) {
                 entry.parent_id = parent_entry.mount_id;
+                // Slave mount inherits peer group from parent
+                if entry.propagation == MountPropagation::Slave && parent_entry.peer_group > 0 {
+                    entry.peer_group = parent_entry.peer_group;
+                }
             }
         }
 
         self.mounts.insert(String::from(target), entry);
+
+        // Propagation: Shared mount'ı peer group'daki diğer namespace'lere yay
+        if let Some(entry) = self.mounts.get(target) {
+            if entry.propagation == MountPropagation::Shared {
+                self.propagate_mount_event(target, true);
+            }
+        }
 
         crate::serial_println!(
             "[MountNS:{}] mount {} -> {} (type={}, flags=0x{:x})",
@@ -225,11 +237,44 @@ impl MountNamespace {
         Ok(mount_id)
     }
 
+    /// Propagate a mount/umount event to peer group members in other namespaces.
+    fn propagate_mount_event(&self, target: &str, is_mount: bool) {
+        let namespaces = MOUNT_NAMESPACES.lock();
+        let entry = match self.mounts.get(target) {
+            Some(e) => e,
+            None => return,
+        };
+        let peer_group = entry.peer_group;
+        if peer_group == 0 {
+            return;
+        }
+        for (_, ns) in namespaces.iter() {
+            if ns.ns_id == self.ns_id {
+                continue;
+            }
+            for (other_target, other_entry) in &ns.mounts {
+                if other_entry.peer_group == peer_group {
+                    // Inject event: this namespace's mount propagation
+                    crate::serial_println!(
+                        "[MountNS] propagate {} {} -> {} to ns {}",
+                        if is_mount { "mount" } else { "umount" },
+                        target,
+                        other_target,
+                        ns.ns_id
+                    );
+                }
+            }
+        }
+    }
+
     /// Mount noktasını kaldırır
     pub fn umount(&mut self, target: &str) -> Result<(), &'static str> {
         if target == "/" {
             return Err("Cannot unmount root filesystem");
         }
+
+        // Propagate umount event to peer group before removal
+        self.propagate_mount_event(target, false);
 
         self.mounts.remove(target).ok_or("Mount point not found")?;
 
@@ -306,6 +351,8 @@ impl MountNamespace {
 // ============================================================================
 
 static NEXT_MOUNT_NS_ID: AtomicU32 = AtomicU32::new(1);
+/// Next peer group ID for mount propagation
+static NEXT_PEER_GROUP_ID: AtomicU32 = AtomicU32::new(1);
 
 lazy_static::lazy_static! {
     /// Tüm mount namespace'ler

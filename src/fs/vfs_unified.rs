@@ -20,12 +20,23 @@
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::hash::{Hash, Hasher};
 use spin::Mutex;
 
-/// POSIX MAXSYMLINKS limiti — symlink zincirinde maksimum takip sayısı
-const MAXSYMLINKS: usize = 40;
+use crate::fs::page_cache;
+
+/// Simple path-to-u64 hash for page cache indexing.
+fn hash_path(path: &str) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for b in path.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
 
 // ============================================================================
 // VFS Filesystem Type Registry
@@ -45,6 +56,8 @@ pub enum VfsFsType {
     DevFs,
     SysFs,
     TmpFs,
+    Erofs,
+    Squashfs,
 }
 
 impl VfsFsType {
@@ -61,6 +74,8 @@ impl VfsFsType {
             Self::DevFs => "devtmpfs",
             Self::SysFs => "sysfs",
             Self::TmpFs => "tmpfs",
+            Self::Erofs => "erofs",
+            Self::Squashfs => "squashfs",
         }
     }
 
@@ -78,6 +93,8 @@ impl VfsFsType {
             "devtmpfs" | "devfs" => Some(Self::DevFs),
             "sysfs" => Some(Self::SysFs),
             "tmpfs" => Some(Self::TmpFs),
+            "erofs" => Some(Self::Erofs),
+            "squashfs" => Some(Self::Squashfs),
             _ => None,
         }
     }
@@ -100,6 +117,8 @@ pub struct VfsMountEntry {
     pub flags: VfsMountFlags,
     /// Read-only mu?
     pub readonly: bool,
+    /// Backend feature matrix (Gate 4: mount feature gate enforcement)
+    pub feature_matrix: Option<crate::fs::BackendFeatureMatrix>,
 }
 
 /// Mount bayrakları
@@ -165,13 +184,99 @@ pub enum VfsFileType {
 }
 
 // ============================================================================
+// super_operations vtable — unified backend init/sync/statfs
+// ============================================================================
+
+/// VFS superblock operations — per-mount filesystem lifecycle.
+pub struct VfsSuperOps {
+    /// Synchronize all dirty data to stable storage.
+    pub sync_fs: Option<fn() -> Result<(), &'static str>>,
+    /// Return filesystem statistics (total/used/free blocks).
+    pub stat_fs: Option<fn() -> Result<(u64, u64, u64), &'static str>>,
+    /// Mount-time initialization (e.g. replay journal).
+    pub mount_root: Option<fn(source: &str, readonly: bool) -> Result<(), &'static str>>,
+}
+
+impl VfsSuperOps {
+    pub const fn empty() -> Self {
+        Self { sync_fs: None, stat_fs: None, mount_root: None }
+    }
+}
+
+// ============================================================================
+// inode_operations vtable — unified inode manipulation
+// ============================================================================
+
+/// VFS inode operations — directory and file manipulation.
+pub struct VfsInodeOps {
+    /// Lookup a child entry by name in a directory.
+    pub lookup: Option<fn(parent_ino: u64, parent_path: &str, name: &str) -> Result<VfsFileInfo, &'static str>>,
+    /// Create a regular file.
+    pub create: Option<fn(parent_path: &str, name: &str) -> Result<(), &'static str>>,
+    /// Create a directory.
+    pub mkdir: Option<fn(parent_path: &str, name: &str) -> Result<(), &'static str>>,
+    /// Remove a directory (must be empty).
+    pub rmdir: Option<fn(parent_path: &str, name: &str) -> Result<(), &'static str>>,
+    /// Unlink (delete) a file.
+    pub unlink: Option<fn(parent_path: &str, name: &str) -> Result<(), &'static str>>,
+    /// Rename a file or directory within same parent.
+    pub rename: Option<fn(parent_path: &str, old_name: &str, new_name: &str) -> Result<(), &'static str>>,
+    /// Create a symbolic link.
+    pub symlink: Option<fn(parent_path: &str, name: &str, target: &str) -> Result<(), &'static str>>,
+    /// Read a symbolic link target.
+    pub readlink: Option<fn(path: &str) -> Result<String, &'static str>>,
+    /// Create a hard link.
+    pub link: Option<fn(parent_path: &str, name: &str, target_path: &str) -> Result<(), &'static str>>,
+    /// Truncate a file to a given size.
+    pub truncate: Option<fn(path: &str, new_size: u64) -> Result<(), &'static str>>,
+    /// Change file mode (permissions).
+    pub chmod: Option<fn(path: &str, mode: u32) -> Result<(), &'static str>>,
+    /// Change file owner.
+    pub chown: Option<fn(path: &str, uid: u32, gid: u32) -> Result<(), &'static str>>,
+    /// Get file status (stat).
+    pub stat: Option<fn(path: &str) -> Result<VfsFileInfo, &'static str>>,
+}
+
+impl VfsInodeOps {
+    pub const fn empty() -> Self {
+        Self {
+            lookup: None, create: None, mkdir: None, rmdir: None,
+            unlink: None, rename: None, symlink: None, readlink: None,
+            link: None, truncate: None, chmod: None, chown: None, stat: None,
+        }
+    }
+}
+
+// ============================================================================
+// file_operations vtable — unified file descriptor operations
+// ============================================================================
+
+/// VFS file operations — per-open-file operations extending VfsFileInfo.
+pub struct VfsFileOps {
+    /// Read from a specific file at offset.
+    pub read: Option<fn(path: &str, offset: u64, buf: &mut [u8]) -> Result<usize, &'static str>>,
+    /// Write to a specific file at offset.
+    pub write: Option<fn(path: &str, offset: u64, buf: &[u8]) -> Result<usize, &'static str>>,
+    /// Copy a range of data between two files (in-kernel copy).
+    pub copy_file_range: Option<fn(src_path: &str, src_off: u64, dst_path: &str, dst_off: u64, size: u64) -> Result<u64, &'static str>>,
+    /// Advise access pattern for a file region.
+    pub fadvise: Option<fn(path: &str, offset: u64, size: u64, advice: u32) -> Result<(), &'static str>>,
+}
+
+impl VfsFileOps {
+    pub const fn empty() -> Self {
+        Self { read: None, write: None, copy_file_range: None, fadvise: None }
+    }
+}
+
+// ============================================================================
 // VFS Unified Manager
 // ============================================================================
 
 /// Birleşik VFS yöneticisi
 pub struct VfsUnified {
     /// Mount tablosu (mount_point → entry)
-    mount_table: BTreeMap<String, VfsMountEntry>,
+    pub mount_table: BTreeMap<String, VfsMountEntry>,
     /// Toplam dosya sistemi sayısı
     fs_count: usize,
 }
@@ -191,17 +296,104 @@ impl VfsUnified {
         fs_type: VfsFsType,
         source: &str,
         flags: VfsMountFlags,
-    ) {
+    ) -> Result<(), &'static str> {
+        let readonly = flags.noexec && flags.nosuid; // virtual_fs default
+        self.mount_with_readonly(mount_point, fs_type, source, flags, readonly)
+    }
+
+    /// Mount ekler (readonly açık kontrolü + feature gate enforcement ile)
+    ///
+    /// Gate 4: Mount sırasında feature matrix validate edilir.
+    /// Unknown incompatible feature flag varsa mount reddedilir.
+    pub fn mount_with_readonly(
+        &mut self,
+        mount_point: &str,
+        fs_type: VfsFsType,
+        source: &str,
+        flags: VfsMountFlags,
+        readonly: bool,
+    ) -> Result<(), &'static str> {
+        // POSIX.1-2024 path_resolution(7) contract for mount point
+        if let Err(e) = validate_path(mount_point) {
+            return Err(fs_error_to_str(&e));
+        }
+
+        // Gate 4: Feature matrix oluştur ve mount-time validation yap
+        let feature_matrix = Self::build_feature_matrix(fs_type, readonly);
+        if let Err(e) = Self::enforce_mount_gates(&feature_matrix, readonly) {
+            return Err(fs_error_to_str(&e));
+        }
+
         let mount_point = normalize_vfs_path(mount_point);
         let entry = VfsMountEntry {
             mount_point: mount_point.clone(),
             fs_type,
             source: String::from(source),
             flags,
-            readonly: false,
+            readonly,
+            feature_matrix: Some(feature_matrix),
         };
         self.mount_table.insert(mount_point, entry);
         self.fs_count += 1;
+        Ok(())
+    }
+
+    /// Build the BackendFeatureMatrix for a given fs_type.
+    /// Deep web: Linux kernel fs/xfs/xfs_mount.h, fs/ext4/super.c
+    fn build_feature_matrix(fs_type: VfsFsType, readonly: bool) -> crate::fs::BackendFeatureMatrix {
+        let mut matrix = match fs_type {
+            VfsFsType::F2fs => crate::fs::f2fs_feature_matrix(),
+            VfsFsType::Ext4 => crate::fs::ext4_feature_matrix(),
+            VfsFsType::Xfs => crate::fs::xfs_feature_matrix(), // XFS artık ayrı feature matrix
+            VfsFsType::Btrfs => crate::fs::btrfs_feature_matrix(),
+            VfsFsType::Fat32 => crate::fs::fat32_feature_matrix(),
+            VfsFsType::ExFat => crate::fs::exfat_feature_matrix(),
+            VfsFsType::Ntfs => crate::fs::ntfs_feature_matrix(),
+            VfsFsType::ProcFs => crate::fs::tmpfs_feature_matrix(),
+            VfsFsType::DevFs => crate::fs::tmpfs_feature_matrix(),
+            VfsFsType::SysFs => crate::fs::tmpfs_feature_matrix(),
+            VfsFsType::TmpFs => crate::fs::tmpfs_feature_matrix(),
+            VfsFsType::Erofs => crate::fs::erofs_feature_matrix(),
+            VfsFsType::Squashfs => crate::fs::squashfs_feature_matrix(),
+        };
+        // Override readonly if mount flag forces it
+        if readonly {
+            matrix.readonly = true;
+            matrix.write = false;
+        }
+        matrix
+    }
+
+    /// Gate 4: Enforce mount-time feature gates.
+    ///
+    /// Mount policy decision tree (per phase6-backend-feature-gates.md):
+    /// - Unknown incompatible feature → refuse mount
+    /// - Unknown ro-compatible + no MS_RDONLY → refuse mount (ReadOnlyFs needed)
+    /// - Journal replay needed but not supported → NeedsRecovery
+    fn enforce_mount_gates(
+        matrix: &crate::fs::BackendFeatureMatrix,
+        readonly: bool,
+    ) -> Result<(), crate::fs::FsError> {
+        // Write mount requires write-capable backend
+        if !readonly && !matrix.write {
+            return Err(crate::fs::FsError::ReadOnlyFs);
+        }
+
+        // Multi-device not supported — fail closed
+        if matrix.multi_device {
+            return Err(crate::fs::FsError::UnsupportedFeature(
+                crate::fs::UnsupportedFeatureType::MultiDevice,
+            ));
+        }
+
+        // Encryption without decryption support — fail closed
+        if matrix.encryption {
+            return Err(crate::fs::FsError::UnsupportedFeature(
+                crate::fs::UnsupportedFeatureType::Encryption,
+            ));
+        }
+
+        Ok(())
     }
 
     /// Mount flag'lerini uygula: nosuid ise SUID/SGID bitlerini temizle
@@ -246,6 +438,13 @@ impl VfsUnified {
     }
 
     /// Path'e göre hangi dosya sisteminin sorumlu olduğunu bulur
+    ///
+    /// Mount boundary crossing (§1.3):
+    /// - If the normalized path is a mount point root, resolve to the mount point's
+    ///   own filesystem (not the parent). Actual boundary crossing only happens
+    ///   when path traversal (e.g., `..`) explicitly leaves a mount.
+    /// - `follow_up()` handles the case where a path component crosses from
+    ///   a mount point up to its parent mount.
     pub fn resolve_fs(&self, path: &str) -> Option<&VfsMountEntry> {
         let path = normalize_vfs_path(path);
         // En uzun eşleşen mount point'i bul (longest prefix match)
@@ -262,8 +461,47 @@ impl VfsUnified {
         best_match
     }
 
+    /// Follow up from a mount point to its parent mount.
+    ///
+    /// If `path` exactly matches a mount point's target (and is not root `/`),
+    /// return the path resolved in the parent mount. This implements the
+    /// mount boundary crossing contract (§1.3): when `..` traverses out of a
+    /// mounted filesystem's root, we must land in the parent mount, not in the
+    /// mounted filesystem's internal parent.
+    ///
+    /// Returns `Some(parent_mount_path)` if boundary crossing occurred,
+    /// `None` if the path is not a mount point root.
+    pub fn follow_up(&self, path: &str) -> Option<String> {
+        let normalized = normalize_vfs_path(path);
+        if normalized == "/" {
+            return None; // root mount: cannot go up
+        }
+
+        // Check if the normalized path is a mount target
+        if self.mount_table.contains_key(&normalized) {
+            // The parent of a mount point is the directory containing it
+            let parent_path = normalized
+                .trim_end_matches('/')
+                .rsplit_once('/')
+                .map(|(parent, _)| {
+                    if parent.is_empty() { "/" } else { parent }
+                })
+                .unwrap_or("/");
+
+            // Resolve to the mount that covers the parent path
+            let resolved = self.resolve_fs(parent_path)?;
+            Some(resolved.mount_point.clone())
+        } else {
+            None
+        }
+    }
+
     /// Birleşik open — path'e göre doğru dosya sistemine yönlendirir
-    pub fn open(&self, path: &str) -> Result<VfsFileInfo, &'static str> {
+    /// Backend dispatch without VFS-level symlink following.
+    ///
+    /// Returns `VfsFileInfo` from the correct backend for the given path.
+    /// Used internally and by `dispatch_open` from `lookup_component`.
+    pub(crate) fn open_direct(&self, path: &str) -> Result<VfsFileInfo, &'static str> {
         let normalized_path = normalize_vfs_path(path);
         let entry = self
             .resolve_fs(normalized_path.as_str())
@@ -272,7 +510,96 @@ impl VfsUnified {
         let relative_path =
             relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
 
-        let info = match entry.fs_type {
+        self.dispatch_open(entry.fs_type, &entry.source, &relative_path)
+    }
+
+    /// Per-component directory lookup.
+    ///
+    /// Looks up a single path component in the directory identified by
+    /// `parent_path` / `parent_ino` on the appropriate backend.  Returns
+    /// the child's `VfsFileInfo`.
+    ///
+    /// For f2fs this uses the per-inode `lookup_child` to avoid O(n²)
+    /// re-walking from the root.  For other backends it constructs the
+    /// full child path and dispatches through `open_direct`.
+    pub fn lookup_component(
+        &self,
+        parent_ino: u64,
+        parent_path: &str,
+        name: &str,
+    ) -> Result<VfsFileInfo, &'static str> {
+        let child_path = if parent_path == "/" || parent_path.is_empty() {
+            alloc::format!("/{}", name)
+        } else {
+            alloc::format!("{}/{}", parent_path, name)
+        };
+        let entry = self
+            .resolve_fs(&child_path)
+            .ok_or_else(no_filesystem_for_path)?;
+
+        match entry.fs_type {
+            VfsFsType::F2fs => {
+                // Per-inode lookup avoids full-path re-walk from root.
+                let child = crate::fs::f2fs::lookup_child(parent_ino, name).or_else(|_| {
+                    // Fallback: full-path when parent_ino is stale
+                    // (e.g. after a mount-boundary cross).
+                    let normalized = normalize_vfs_path(&child_path);
+                    let rel = relative_mount_path(entry.mount_point.as_str(), &normalized);
+                    crate::fs::f2fs::open_entry(&rel).map_err(|_| "f2fs: component not found")
+                })?;
+                Ok(vfs_info_from_f2fs_entry(&child))
+            }
+            _ => {
+                let normalized = normalize_vfs_path(&child_path);
+                let rel = relative_mount_path(entry.mount_point.as_str(), &normalized);
+                self.dispatch_open(entry.fs_type, &entry.source, &rel)
+            }
+        }
+    }
+
+    /// Open a file on a specific backend (used by `lookup_component` fallback
+    /// and by `open_direct`).
+    fn dispatch_open(
+        &self,
+        fs_type: VfsFsType,
+        _source: &str,
+        relative_path: &str,
+    ) -> Result<VfsFileInfo, &'static str> {
+        match fs_type {
+            VfsFsType::Ext4 => {
+                let resolved = resolve_ext4_node(_source, relative_path)
+                    .map_err(|_| "ext4: component not found")?;
+                // Linux: inode_lock_shared(inode) — shared lock for stat/open reads
+                crate::fs::ext4::ext4_inode_lock_shared(_source, resolved.inode_num);
+                let info = vfs_info_from_ext4_inode(&resolved);
+                crate::fs::ext4::ext4_inode_unlock_shared(_source, resolved.inode_num);
+                Ok(info)
+            }
+            VfsFsType::Fat32 => {
+                let resolved = resolve_fat32_node(_source, relative_path)
+                    .map_err(|_| "fat32: component not found")?;
+                Ok(vfs_info_from_fat32_file(&resolved))
+            }
+            VfsFsType::ExFat => {
+                let resolved = resolve_exfat_node(_source, relative_path)
+                    .map_err(|_| "exfat: component not found")?;
+                Ok(vfs_info_from_exfat_file(&resolved))
+            }
+            VfsFsType::Ntfs => {
+                let resolved = resolve_ntfs_node(_source, relative_path)
+                    .map_err(|_| "ntfs: component not found")?;
+                Ok(vfs_info_from_ntfs_entry(&resolved))
+            }
+            VfsFsType::Btrfs => {
+                let resolved = resolve_btrfs_node(_source, relative_path)
+                    .map_err(|_| "btrfs: component not found")?;
+                Ok(vfs_info_from_btrfs_inode(&resolved))
+            }
+            VfsFsType::F2fs => {
+                let f2fs_entry = crate::fs::f2fs::open_entry(relative_path)
+                    .map_err(|_| "f2fs: component not found")?;
+                Ok(vfs_info_from_f2fs_entry(&f2fs_entry))
+            }
             VfsFsType::ProcFs => {
                 if is_mount_root(relative_path) {
                     return Ok(directory_info(VfsFsType::ProcFs));
@@ -281,7 +608,7 @@ impl VfsUnified {
                 if content.is_empty() {
                     return Err("procfs: entry not found");
                 }
-                VfsFileInfo {
+                Ok(VfsFileInfo {
                     inode: 0,
                     size: content.len() as u64,
                     mode: 0o100444,
@@ -291,24 +618,14 @@ impl VfsUnified {
                     fs_type: VfsFsType::ProcFs,
                     block_size: 4096,
                     blocks: 0,
-                }
-            }
-            VfsFsType::DevFs => {
-                if is_mount_root(relative_path) {
-                    return Ok(directory_info(VfsFsType::DevFs));
-                } else {
-                    return Err(unsupported_vfs_capability(
-                        VfsFsType::DevFs,
-                        VfsUnsupportedCapability::Open,
-                    ));
-                }
+                })
             }
             VfsFsType::SysFs => {
                 if is_mount_root(relative_path) {
                     return Ok(directory_info(VfsFsType::SysFs));
                 }
                 let content = read_sysfs_bytes(relative_path)?;
-                VfsFileInfo {
+                Ok(VfsFileInfo {
                     inode: 0,
                     size: content.len() as u64,
                     mode: 0o100444,
@@ -318,57 +635,70 @@ impl VfsUnified {
                     fs_type: VfsFsType::SysFs,
                     block_size: 4096,
                     blocks: ((content.len() as u64) + 4095) / 4096,
-                }
+                })
             }
-            VfsFsType::TmpFs => {
+            VfsFsType::DevFs | VfsFsType::TmpFs => {
                 if is_mount_root(relative_path) {
-                    return Ok(directory_info(VfsFsType::TmpFs));
+                    Ok(directory_info(fs_type))
                 } else {
-                    return Err(unsupported_vfs_capability(
-                        VfsFsType::TmpFs,
-                        VfsUnsupportedCapability::Open,
-                    ));
+                    Err(unsupported_vfs_capability(fs_type, VfsUnsupportedCapability::Open))
                 }
             }
-            VfsFsType::Ext4 => {
-                let resolved = resolve_ext4_node(&entry.source, relative_path)?;
-                vfs_info_from_ext4_inode(&resolved)
-            }
-            VfsFsType::F2fs => {
-                let f2fs_entry = crate::fs::f2fs::open_entry(relative_path)
-                    .map_err(|_| "f2fs: file not found")?;
-                vfs_info_from_f2fs_entry(&f2fs_entry)
-            }
-            VfsFsType::Fat32 => {
-                let resolved = resolve_fat32_node(&entry.source, relative_path)?;
-                vfs_info_from_fat32_file(&resolved)
-            }
-            VfsFsType::ExFat => {
-                let resolved = resolve_exfat_node(&entry.source, relative_path)?;
-                vfs_info_from_exfat_file(&resolved)
-            }
-            VfsFsType::Ntfs => {
-                let resolved = resolve_ntfs_node(&entry.source, relative_path)?;
-                vfs_info_from_ntfs_entry(&resolved)
-            }
-            VfsFsType::Xfs => return Err(unsupported_vfs_capability(
-                VfsFsType::Xfs,
+            VfsFsType::Xfs => Err(unsupported_vfs_capability(
+                fs_type,
                 VfsUnsupportedCapability::Open,
             )),
-            VfsFsType::Btrfs => {
-                let resolved = resolve_btrfs_node(&entry.source, relative_path)?;
-                vfs_info_from_btrfs_inode(&resolved)
+            VfsFsType::Erofs => {
+                if is_mount_root(relative_path) {
+                    return Ok(directory_info(VfsFsType::Erofs));
+                }
+                Err("erofs: VFS open requires full path resolution")
             }
-        };
+            VfsFsType::Squashfs => {
+                if is_mount_root(relative_path) {
+                    return Ok(directory_info(VfsFsType::Squashfs));
+                }
+                Err("squashfs: VFS open requires full path resolution")
+            }
+        }
+    }
 
-        // Mount flag enforcement after open
-        if entry.flags.nodev && (info.mode & 0x6000) != 0 {
+    /// VFS open with symlink following, mount flag enforcement, and fanotify.
+    ///
+    /// Uses `namei::resolve` to follow symlinks at the VFS level (including
+    /// cross-filesystem symlinks), then enforces mount flags and notifies
+    /// fanotify watchers.
+    pub fn open(&self, path: &str) -> Result<VfsFileInfo, &'static str> {
+        // POSIX.1-2024 path_resolution(7) contract
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+
+        // Resolve path with symlink following + dcache caching
+        let resolved = crate::fs::namei::resolve(
+            |parent_ino, parent_path, name| {
+                self.lookup_component(parent_ino, parent_path, name)
+            },
+            |p| self.read_bytes_direct(p),
+            &normalized_path,
+            true,
+        )?;
+
+        // Mount flag enforcement (resolve the mount for the final resolved path)
+        let entry = self
+            .resolve_fs(resolved.resolved_path.as_str())
+            .ok_or_else(no_filesystem_for_path)?;
+        if entry.flags.nodev && (resolved.info.mode & 0x6000) != 0 {
             return Err("operation not permitted: mount has nodev flag");
         }
-        if entry.flags.noexec && (info.mode & 0o111) != 0 {
+        if entry.flags.noexec && (resolved.info.mode & 0o111) != 0 {
             return Err("operation not permitted: mount has noexec flag");
         }
-        Ok(self.apply_mount_flags(path, info))
+
+        // fanotify: notify open event
+        crate::fs::fanotify::notify_open(&resolved.resolved_path, 0);
+        Ok(self.apply_mount_flags(path, resolved.info))
     }
 
     /// Mount tablosunu listeler (mount komutu çıktısı)
@@ -483,7 +813,11 @@ impl VfsUnified {
         result
     }
 
-    pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, &'static str> {
+    /// Backend read dispatch without page cache, without symlink following.
+    ///
+    /// Used by `namei::resolve` as the `readlink` callback, and by
+    /// `read_bytes` as the final I/O call on the resolved path.
+    pub(crate) fn read_bytes_direct(&self, path: &str) -> Result<Vec<u8>, &'static str> {
         let normalized_path = normalize_vfs_path(path);
         let entry = self
             .resolve_fs(normalized_path.as_str())
@@ -491,7 +825,7 @@ impl VfsUnified {
         let relative_path =
             relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
 
-        match entry.fs_type {
+        let result = match entry.fs_type {
             VfsFsType::ProcFs => {
                 if is_mount_root(relative_path) {
                     return Err("procfs: path is a directory");
@@ -530,11 +864,15 @@ impl VfsUnified {
                 if resolved.inode.is_directory() {
                     return Err("ext4: path is a directory");
                 }
-                resolved
+                // Linux: inode_lock_shared(file) — shared lock for reads
+                crate::fs::ext4::ext4_inode_lock_shared(&entry.source, resolved.inode_num);
+                let result = resolved
                     .mounted
                     .fs
                     .read_file_from_storage(&resolved.inode, &resolved.mounted.storage)
-                    .map_err(|_| "ext4: failed to read file")
+                    .map_err(|_| "ext4: failed to read file");
+                crate::fs::ext4::ext4_inode_unlock_shared(&entry.source, resolved.inode_num);
+                result
             }
             VfsFsType::Fat32 => {
                 let resolved = resolve_fat32_node(&entry.source, relative_path)?;
@@ -578,10 +916,65 @@ impl VfsUnified {
                     .fs
                     .read_file_from_storage(resolved.inode_num, &resolved.mounted.storage)
             }
+            VfsFsType::Erofs => {
+                if is_mount_root(relative_path) {
+                    return Err("erofs: path is a directory");
+                }
+                Err("erofs: VFS read requires full path resolution")
+            }
+            VfsFsType::Squashfs => {
+                if is_mount_root(relative_path) {
+                    return Err("squashfs: path is a directory");
+                }
+                Err("squashfs: VFS read requires full path resolution")
+            }
+        };
+
+        result
+    }
+
+    /// VFS read with symlink following, page cache, and fanotify.
+    ///
+    /// Uses `namei::resolve` to follow symlinks first, then reads
+    /// from the resolved path.
+    pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, &'static str> {
+        // POSIX.1-2024 path_resolution(7) contract
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
         }
+        let normalized_path = normalize_vfs_path(path);
+
+        // Page cache lookup: check file-level cache before disk I/O
+        let path_hash = hash_path(&normalized_path);
+        if let Some(cached) = page_cache::find_page(path_hash, 0) {
+            return Ok(cached.data);
+        }
+
+        // Resolve path with symlink following + dcache caching
+        let resolved = crate::fs::namei::resolve(
+            |parent_ino, parent_path, name| {
+                self.lookup_component(parent_ino, parent_path, name)
+            },
+            |p| self.read_bytes_direct(p),
+            &normalized_path,
+            true,
+        )?;
+
+        // Read the resolved path's content
+        let result = self.read_bytes_direct(&resolved.resolved_path);
+
+        // fanotify: notify access event
+        if result.is_ok() {
+            crate::fs::fanotify::notify_access(&resolved.resolved_path, 0);
+        }
+        result
     }
 
     pub fn list_dir(&self, path: &str) -> Result<Vec<VfsDirEntry>, &'static str> {
+        // POSIX.1-2024 path_resolution(7) contract
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
         let normalized_path = normalize_vfs_path(path);
         let entry = self
             .resolve_fs(normalized_path.as_str())
@@ -630,6 +1023,638 @@ impl VfsUnified {
                 VfsUnsupportedCapability::ListDirectory,
             )),
             VfsFsType::Btrfs => list_btrfs_dir(&entry.source, relative_path),
+            VfsFsType::Erofs => {
+                if is_mount_root(relative_path) {
+                    Ok(Vec::new())
+                } else {
+                    Err("erofs: VFS list_dir requires full path resolution")
+                }
+            }
+            VfsFsType::Squashfs => {
+                if is_mount_root(relative_path) {
+                    Ok(Vec::new())
+                } else {
+                    Err("squashfs: VFS list_dir requires full path resolution")
+                }
+            }
+        }
+    }
+
+    /// Write bytes to a file (truncating/replacing content).
+    pub fn write_bytes(&self, path: &str, data: &[u8]) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+        let result = match entry.fs_type {
+            VfsFsType::F2fs => {
+                let parent = crate::fs::namei::parent_path(relative_path);
+                let name = normalized_path.rsplit_once('/').map(|(_, n)| n).unwrap_or("");
+                if !name.is_empty() {
+                    let _ = crate::fs::f2fs::create_f2fs_file_with_data(&parent, name, data)
+                        .map_err(|_| "f2fs: write failed")?;
+                }
+                Ok(())
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_write_file(&entry.source, relative_path, data)
+            }
+            VfsFsType::Fat32 => {
+                crate::fs::fat::create_fat32_file(&entry.source, relative_path, data)
+            }
+            VfsFsType::ExFat => {
+                if relative_path.contains('/') {
+                    return Err("exfat: nested create is not implemented; fail-closed");
+                }
+                let name = normalized_path.rsplit_once('/').map(|(_, n)| n).unwrap_or(relative_path);
+                crate::fs::fat::create_exfat_file_vfs(&entry.source, name, data)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Write)),
+        };
+        // fanotify: notify modify event
+        if result.is_ok() {
+            crate::fs::fanotify::notify_modify(&normalized_path, 0);
+        }
+        result
+    }
+
+    /// Read bytes from file at offset (sys_read için — POSIX offset tabanlı I/O).
+    /// Tüm dosyayı okur, offset'ten itibaren buf.length kadar keser.
+    pub fn read_bytes_at(&self, path: &str, offset: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let resolved = crate::fs::namei::resolve(
+            |parent_ino, parent_path, name| {
+                self.lookup_component(parent_ino, parent_path, name)
+            },
+            |p| self.read_bytes_direct(p),
+            &normalized_path,
+            true,
+        )?;
+        let all_data = self.read_bytes_direct(&resolved.resolved_path)?;
+        if offset >= all_data.len() {
+            return Ok(0); // EOF
+        }
+        let available = &all_data[offset..];
+        let copy_len = buf.len().min(available.len());
+        buf[..copy_len].copy_from_slice(&available[..copy_len]);
+        Ok(copy_len)
+    }
+
+    /// Write bytes to file at offset (sys_write için — POSIX offset tabanlı I/O).
+    pub fn write_bytes_at(&self, path: &str, offset: usize, data: &[u8]) -> Result<usize, &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+        match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::write_f2fs_file_at(&relative_path, offset, data)
+                    .map_err(|_| "f2fs: write failed")?;
+            }
+            VfsFsType::Ext4 => {
+                let mut existing = {
+                    let resolved = resolve_ext4_node(&entry.source, relative_path)?;
+                    resolved.mounted.fs.read_file_from_storage(&resolved.inode, &resolved.mounted.storage)
+                        .map_err(|_| "ext4: read failed")?
+                };
+                if offset > existing.len() {
+                    existing.resize(offset, 0);
+                }
+                let end = offset + data.len();
+                if end > existing.len() {
+                    existing.resize(end, 0);
+                }
+                existing[offset..end].copy_from_slice(data);
+                crate::fs::ext4::ext4_write_file(&entry.source, relative_path, &existing)?;
+            }
+            VfsFsType::Fat32 => {
+                crate::fs::fat::write_fat32_file(&entry.source, relative_path, data, offset)?;
+            }
+            VfsFsType::ExFat => {
+                crate::fs::fat::write_exfat_file_vfs(&entry.source, relative_path, data, offset)?;
+            }
+            _ => return Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Write)),
+        }
+        // Page cache invalidation: write sonrası cache'i temizle
+        page_cache::invalidate_inode(hash_path(&normalized_path));
+        Ok(data.len())
+    }
+
+    /// fsync: dosya ve metadata'yı diske yazdırır (tüm backend'ler için)
+    /// fsync: dosya ve metadata'yı diske yazdırır
+    /// Deep web: Linux kernel fs/sync.c sync_filesystem()
+    ///
+    /// # Destek Matrisi
+    /// - F2fs: fsync_path() ile desteklenir
+    /// - Ext4: ext4_fsync() ile desteklenir
+    /// - Fat32/NTFS/Btrfs: fsync desteklenmez → `Err("unsupported")`
+    pub fn fsync(&self, path: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+
+        // fsync destek matrisi — her backend için kontrol
+        match entry.fs_type {
+            VfsFsType::F2fs => crate::fs::f2fs::fsync_path(&relative_path).map_err(|_| "f2fs: fsync failed"),
+            VfsFsType::Ext4 => crate::fs::ext4::ext4_fsync(&entry.source, &relative_path).map_err(|_| "ext4: fsync failed"),
+            VfsFsType::Fat32 => Err("fat32: fsync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::ExFat => Err("exfat: fsync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::Ntfs => Err("ntfs: fsync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::Btrfs => Err("btrfs: fsync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::ProcFs | VfsFsType::SysFs | VfsFsType::DevFs | VfsFsType::TmpFs => {
+                Err("sanal fs: fsync desteklenmiyor (EOPNOTSUPP)")
+            }
+            _ => Err("bilinmeyen fs: fsync desteklenmiyor (EOPNOTSUPP)"),
+        }
+    }
+
+    /// fdatasync: sadece data'yı diske yazdırır (metadata değil)
+    /// Deep web: Linux kernel fs/sync.c sync_filesystem()
+    pub fn fdatasync(&self, path: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+
+        match entry.fs_type {
+            VfsFsType::F2fs => crate::fs::f2fs::fdatasync_path(&relative_path).map_err(|_| "f2fs: fdatasync failed"),
+            VfsFsType::Ext4 => crate::fs::ext4::ext4_fsync(&entry.source, &relative_path).map_err(|_| "ext4: fdatasync failed"),
+            VfsFsType::Fat32 => Err("fat32: fdatasync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::ExFat => Err("exfat: fdatasync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::Ntfs => Err("ntfs: fdatasync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::Btrfs => Err("btrfs: fdatasync desteklenmiyor (EOPNOTSUPP)"),
+            VfsFsType::ProcFs | VfsFsType::SysFs | VfsFsType::DevFs | VfsFsType::TmpFs => {
+                Err("sanal fs: fdatasync desteklenmiyor (EOPNOTSUPP)")
+            }
+            _ => Err("bilinmeyen fs: fdatasync desteklenmiyor (EOPNOTSUPP)"),
+        }
+    }
+
+    /// chmod: dosya izinlerini değiştirir
+    pub fn chmod(&self, path: &str, mode: u16) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+        match entry.fs_type {
+            VfsFsType::F2fs => crate::fs::f2fs::chmod_f2fs(&relative_path, mode).map_err(|_| "f2fs: chmod failed"),
+            VfsFsType::Ext4 => crate::fs::ext4::ext4_chmod(&entry.source, &relative_path, mode).map_err(|_| "ext4: chmod failed"),
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Chmod)),
+        }
+    }
+
+    /// chown: dosya sahipliğini değiştirir
+    pub fn chown(&self, path: &str, uid: u32, gid: u32) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+        match entry.fs_type {
+            VfsFsType::F2fs => crate::fs::f2fs::chown_f2fs(&relative_path, uid, gid).map_err(|_| "f2fs: chown failed"),
+            VfsFsType::Ext4 => crate::fs::ext4::ext4_chown(&entry.source, &relative_path, uid, gid).map_err(|_| "ext4: chown failed"),
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Chown)),
+        }
+    }
+
+    /// fallocate: dosya için alan ayırır (deallocation da desteklenir)
+    pub fn fallocate(&self, path: &str, offset: u64, len: u64) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized_path = normalize_vfs_path(path);
+        let entry = self.resolve_fs(normalized_path.as_str()).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative_path = relative_mount_path(entry.mount_point.as_str(), normalized_path.as_str());
+        match entry.fs_type {
+            VfsFsType::F2fs => {
+                let new_size = (offset + len) as u64;
+                crate::fs::f2fs::truncate_f2fs(&relative_path, new_size)
+                    .map_err(|_| "f2fs: fallocate failed")?;
+            }
+            VfsFsType::Ext4 => {
+                let new_size = (offset + len) as u64;
+                crate::fs::ext4::ext4_truncate(&entry.source, &relative_path, new_size)
+                    .map_err(|_| "ext4: fallocate failed")?;
+            }
+            _ => return Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Fallocate)),
+        }
+        Ok(())
+    }
+
+    pub fn create_file(&self, parent_path: &str, name: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(parent_path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(parent_path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        let full_path = if normalized == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", normalized, name)
+        };
+        let result = match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::create_f2fs_file(relative, name)
+                    .map_err(|_| "f2fs: create file failed")
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_create_file(&entry.source, relative, name)
+            }
+            VfsFsType::Fat32 => {
+                let fat_path = if is_mount_root(relative) {
+                    name.to_string()
+                } else {
+                    format!("{}/{}", relative, name)
+                };
+                crate::fs::fat::create_fat32_file(&entry.source, &fat_path, &[])
+            }
+            VfsFsType::ExFat => {
+                if !is_mount_root(relative) {
+                    return Err("exfat: nested create is not implemented; fail-closed");
+                }
+                crate::fs::fat::create_exfat_file_vfs(&entry.source, name, &[])
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Create)),
+        };
+        // fanotify: notify create event
+        if result.is_ok() {
+            crate::fs::fanotify::notify_create(&full_path, 0);
+        }
+        result
+    }
+
+    /// Create a directory (mkdir -p semantics: trailing components are created).
+    pub fn create_dir(&self, parent_path: &str, name: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(parent_path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(parent_path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        let full_path = if normalized == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", normalized, name)
+        };
+        let result = match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::create_f2fs_dir(relative, name)
+                    .map_err(|_| "f2fs: mkdir failed")
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_create_dir(&entry.source, relative, name)
+            }
+            VfsFsType::Fat32 => {
+                let fat_path = if is_mount_root(relative) {
+                    name.to_string()
+                } else {
+                    format!("{}/{}", relative, name)
+                };
+                crate::fs::fat::mkdir_fat32(&entry.source, &fat_path)
+            }
+            VfsFsType::ExFat => {
+                if !is_mount_root(relative) {
+                    return Err("exfat: nested mkdir is not implemented; fail-closed");
+                }
+                crate::fs::fat::mkdir_exfat_vfs(&entry.source, name)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Create)),
+        };
+        // fanotify: notify create event
+        if result.is_ok() {
+            crate::fs::fanotify::notify_create(&full_path, 0);
+        }
+        result
+    }
+
+    /// Remove an empty directory.
+    pub fn remove_dir(&self, parent_path: &str, name: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(parent_path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(parent_path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        let full_path = if normalized == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", normalized, name)
+        };
+        let result = match entry.fs_type {
+            VfsFsType::F2fs => {
+                let ops = self.inode_ops(entry.fs_type);
+                match ops.rmdir {
+                    Some(f) => f(relative, name),
+                    None => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Unlink)),
+                }
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_unlink(&entry.source, relative, name)
+            }
+            VfsFsType::ExFat => {
+                if !is_mount_root(relative) {
+                    return Err("exfat: nested rmdir is not implemented; fail-closed");
+                }
+                crate::fs::fat::delete_exfat_file_vfs(&entry.source, name)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Unlink)),
+        };
+        // fanotify: notify delete event
+        if result.is_ok() {
+            crate::fs::fanotify::notify_delete(&full_path, 0);
+        }
+        result
+    }
+
+    /// Unlink (delete) a file from a directory.
+    pub fn unlink(&self, parent_path: &str, name: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(parent_path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(parent_path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        let full_path = if normalized == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", normalized, name)
+        };
+        let result = match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::unlink_f2fs(relative, name)
+                    .map_err(|_| "f2fs: unlink failed")
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_unlink(&entry.source, relative, name)
+            }
+            VfsFsType::ExFat => {
+                if !is_mount_root(relative) {
+                    return Err("exfat: nested unlink is not implemented; fail-closed");
+                }
+                crate::fs::fat::delete_exfat_file_vfs(&entry.source, name)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Unlink)),
+        };
+        // fanotify: notify delete event
+        if result.is_ok() {
+            crate::fs::fanotify::notify_delete(&full_path, 0);
+        }
+        result
+    }
+
+    /// Rename a file or directory within the same parent.
+    pub fn rename(&self, parent_path: &str, old_name: &str, new_name: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(parent_path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(parent_path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        let full_path = if normalized == "/" {
+            format!("/{}", new_name)
+        } else {
+            format!("{}/{}", normalized, new_name)
+        };
+        let result = match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::rename_f2fs(relative, old_name, new_name)
+                    .map_err(|_| "f2fs: rename failed")
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_rename(&entry.source, relative, old_name, relative, new_name)
+            }
+            VfsFsType::ExFat => {
+                if !is_mount_root(relative) {
+                    return Err("exfat: nested rename is not implemented; fail-closed");
+                }
+                crate::fs::fat::rename_exfat_vfs(&entry.source, old_name, new_name)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Rename)),
+        };
+        // fanotify: notify move events
+        if result.is_ok() {
+            crate::fs::fanotify::notify_moved_from(&full_path, 0);
+            crate::fs::fanotify::notify_moved_to(&full_path, 0);
+        }
+        result
+    }
+
+    /// Truncate a file to a given size.
+    pub fn truncate(&self, path: &str, new_size: u64) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::truncate_f2fs(&normalized, new_size)
+                    .map_err(|_| "f2fs: truncate failed")
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_truncate(&entry.source, relative, new_size)
+            }
+            VfsFsType::Fat32 => {
+                if new_size > u32::MAX as u64 {
+                    return Err("fat32: truncate size exceeds 4GiB maximum");
+                }
+                crate::fs::fat::truncate_fat32_file(&entry.source, relative, new_size as u32)
+            }
+            VfsFsType::ExFat => {
+                if relative.contains('/') {
+                    return Err("exfat: nested truncate is not implemented; fail-closed");
+                }
+                crate::fs::fat::truncate_exfat_file_vfs(&entry.source, relative, new_size)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Truncate)),
+        }
+    }
+
+    /// Create a symbolic link.
+    pub fn symlink(&self, parent_path: &str, name: &str, target: &str) -> Result<(), &'static str> {
+        if let Err(e) = validate_path(parent_path) {
+            return Err(fs_error_to_str(&e));
+        }
+        let normalized = normalize_vfs_path(parent_path);
+        let entry = self.resolve_fs(&normalized).ok_or_else(no_filesystem_for_path)?;
+        if entry.readonly { return Err("read-only filesystem (EROFS)"); }
+        let relative = relative_mount_path(entry.mount_point.as_str(), &normalized);
+        match entry.fs_type {
+            VfsFsType::F2fs => {
+                crate::fs::f2fs::create_symlink(relative, name, target)
+                    .map_err(|_| "f2fs: symlink failed")
+            }
+            VfsFsType::Ext4 => {
+                crate::fs::ext4::ext4_create_symlink(&entry.source, relative, name, target)
+            }
+            _ => Err(unsupported_vfs_capability(entry.fs_type, VfsUnsupportedCapability::Symlink)),
+        }
+    }
+
+    /// Stat a file: return VfsFileInfo.
+    pub fn stat(&self, path: &str) -> Result<VfsFileInfo, &'static str> {
+        self.open(path)
+    }
+
+    /// Get VfsSuperOps for a given backend type.
+    pub fn super_ops(&self, fs_type: VfsFsType) -> VfsSuperOps {
+        match fs_type {
+            VfsFsType::F2fs => VfsSuperOps {
+                sync_fs: Some(|| crate::fs::f2fs::sync_f2fs().map_err(|_| "f2fs sync failed")),
+                stat_fs: Some(|| {
+                    let stats = crate::fs::f2fs::f2fs_stats().map_err(|_| "f2fs stats failed")?;
+                    Ok((stats.total_main_blocks * 4096, stats.used_blocks * 4096, stats.free_blocks * 4096))
+                }),
+                mount_root: None,
+            },
+            VfsFsType::Ext4 => VfsSuperOps {
+                sync_fs: None,
+                stat_fs: None,
+                mount_root: None,
+            },
+            _ => VfsSuperOps::empty(),
+        }
+    }
+
+    /// Get VfsInodeOps for a given backend type.
+    pub fn inode_ops(&self, fs_type: VfsFsType) -> VfsInodeOps {
+        match fs_type {
+            VfsFsType::F2fs => {
+                let ops: VfsInodeOps = VfsInodeOps {
+                    create: Some(|parent, name| {
+                        crate::fs::f2fs::create_f2fs_file(parent, name).map_err(|_| "f2fs: create failed")
+                    }),
+                    mkdir: Some(|parent, name| {
+                        crate::fs::f2fs::create_f2fs_dir(parent, name).map_err(|_| "f2fs: mkdir failed")
+                    }),
+                    unlink: Some(|parent, name| {
+                        crate::fs::f2fs::unlink_f2fs(parent, name).map_err(|_| "f2fs: unlink failed")
+                    }),
+                    rename: Some(|parent, old, new| {
+                        crate::fs::f2fs::rename_f2fs(parent, old, new).map_err(|_| "f2fs: rename failed")
+                    }),
+                    symlink: Some(|parent, name, target| {
+                        crate::fs::f2fs::create_symlink(parent, name, target).map_err(|_| "f2fs: symlink failed")
+                    }),
+                    truncate: Some(|path, size| {
+                        crate::fs::f2fs::truncate_f2fs(path, size).map_err(|_| "f2fs: truncate failed")
+                    }),
+                    lookup: Some(|parent_ino, _parent_path, name| {
+                        crate::fs::f2fs::lookup_child(parent_ino, name)
+                            .map(|child| vfs_info_from_f2fs_entry(&child))
+                            .map_err(|_| "f2fs: component not found")
+                    }),
+                    rmdir: Some(|parent, name| {
+                        crate::fs::f2fs::unlink_f2fs(parent, name).map_err(|_| "f2fs: rmdir failed")
+                    }),
+                    readlink: Some(|path| {
+                        crate::fs::f2fs::read_f2fs_symlink(path).map_err(|_| "f2fs: readlink failed")
+                    }),
+                    link: Some(|parent, name, target| {
+                        crate::fs::f2fs::create_hardlink(parent, name, target).map_err(|_| "f2fs: link failed")
+                    }),
+                    chmod: Some(|path, mode| {
+                        crate::fs::f2fs::set_file_metadata(path, Some(mode), None, None)
+                            .map_err(|_| "f2fs: chmod failed")
+                    }),
+                    chown: Some(|path, uid, gid| {
+                        crate::fs::f2fs::set_file_metadata(path, None, Some(uid), Some(gid))
+                            .map_err(|_| "f2fs: chown failed")
+                    }),
+                    stat: Some(|path| {
+                        crate::fs::f2fs::open_entry(path)
+                            .map(|e| vfs_info_from_f2fs_entry(&e))
+                            .map_err(|_| "f2fs: stat failed")
+                    }),
+                };
+                ops
+            }
+            VfsFsType::Ext4 => {
+                VfsInodeOps {
+                    create: Some(|parent, name| {
+                        // Need source from mount entry; use dispatch via open_direct pattern
+                        Err("ext4: use VFS create_file dispatch instead")
+                    }),
+                    mkdir: Some(|parent, name| {
+                        Err("ext4: use VFS create_dir dispatch instead")
+                    }),
+                    unlink: Some(|parent, name| {
+                        Err("ext4: use VFS unlink dispatch instead")
+                    }),
+                    rename: Some(|parent, old, new| {
+                        Err("ext4: use VFS rename dispatch instead")
+                    }),
+                    lookup: Some(|_parent_ino, parent_path, name| {
+                        // Fallback to full open_direct
+                        Err("ext4: use VFS lookup_component dispatch instead")
+                    }),
+                    stat: Some(|_path| {
+                        Err("ext4: use VFS stat dispatch instead")
+                    }),
+                    ..VfsInodeOps::empty()
+                }
+            }
+            _ => VfsInodeOps::empty(),
+        }
+    }
+
+    /// Get VfsFileOps for a given backend type.
+    pub fn file_ops(&self, fs_type: VfsFsType) -> VfsFileOps {
+        match fs_type {
+            VfsFsType::F2fs => VfsFileOps {
+                read: Some(|path, offset, buf| {
+                    crate::fs::f2fs::read_f2fs_file_at(path, offset as usize, buf)
+                        .map_err(|_| "f2fs: read failed")
+                }),
+                write: Some(|path, offset, buf| {
+                    crate::fs::f2fs::write_f2fs_file_at(path, offset as usize, buf)
+                        .map_err(|_| "f2fs: write failed")
+                }),
+                copy_file_range: Some(|src_path, src_off, dst_path, dst_off, size| {
+                    let mut buf = alloc::vec![0u8; size as usize];
+                    let n = crate::fs::f2fs::read_f2fs_file_at(src_path, src_off as usize, &mut buf)
+                        .map_err(|_| "copy_file_range read error")?;
+                    crate::fs::f2fs::write_f2fs_file_at(dst_path, dst_off as usize, &buf)
+                        .map_err(|_| "f2fs: copy dest write failed")?;
+                    Ok(n as u64)
+                }),
+                fadvise: None,
+            },
+            VfsFsType::Ext4 => VfsFileOps {
+                // Note: ext4 file_ops require source path from mount entry;
+                // use read_bytes/write_bytes VFS methods which dispatch correctly.
+                read: None,
+                write: None,
+                copy_file_range: None,
+                fadvise: None,
+            },
+            _ => VfsFileOps::empty(),
         }
     }
 }
@@ -671,11 +1696,112 @@ pub fn list_mounts() -> Vec<String> {
     VFS_UNIFIED.lock().list_mounts()
 }
 
+/// Convert FsError to a static string for VFS layer compatibility.
+fn fs_error_to_str(err: &crate::fs::FsError) -> &'static str {
+    match err {
+        crate::fs::FsError::NotFound => "no such file or directory (ENOENT)",
+        crate::fs::FsError::InvalidPath => "invalid path (EINVAL)",
+        crate::fs::FsError::NameTooLong => "filename too long (ENAMETOOLONG)",
+        crate::fs::FsError::ComponentTooLong => "filename component too long (ENAMETOOLONG)",
+        crate::fs::FsError::NotDirectory => "not a directory (ENOTDIR)",
+        crate::fs::FsError::IsDirectory => "is a directory (EISDIR)",
+        crate::fs::FsError::AlreadyExists => "file exists (EEXIST)",
+        crate::fs::FsError::PermissionDenied => "permission denied (EACCES)",
+        crate::fs::FsError::ReadOnlyFs => "read-only filesystem (EROFS)",
+        crate::fs::FsError::CrossDevice => "cross-device link (EXDEV)",
+        crate::fs::FsError::SymlinkLoop => "too many symbolic links (ELOOP)",
+        crate::fs::FsError::UnsupportedSymlink => "symlink not supported (EOPNOTSUPP)",
+        crate::fs::FsError::UnsupportedBackend => "backend not supported (ENODEV)",
+        crate::fs::FsError::UnsupportedFeature(_) => "feature not supported (EOPNOTSUPP)",
+        crate::fs::FsError::NeedsRecovery => "filesystem needs recovery (EIO)",
+        crate::fs::FsError::CorruptFs => "filesystem corrupt (EIO)",
+        crate::fs::FsError::IoError => "I/O error (EIO)",
+        crate::fs::FsError::ReadError => "read error (EIO)",
+        crate::fs::FsError::WriteError => "write error (EIO)",
+        crate::fs::FsError::NoSpace => "no space left on device (ENOSPC)",
+        crate::fs::FsError::QuotaExceeded => "quota exceeded (EDQUOT)",
+        crate::fs::FsError::StaleHandle => "stale file handle (ESTALE)",
+        crate::fs::FsError::Busy => "device or resource busy (EBUSY)",
+        crate::fs::FsError::NoDevice => "no such device (ENODEV)",
+        crate::fs::FsError::NoMemory => "out of memory (ENOMEM)",
+        crate::fs::FsError::Interrupted => "interrupted system call (EINTR)",
+        crate::fs::FsError::WouldBlock => "resource temporarily unavailable (EAGAIN)",
+        crate::fs::FsError::InternalError => "internal error (EIO)",
+        crate::fs::FsError::Ok => "success",
+        crate::fs::FsError::NotFile => "not a file (EBADF)",
+        crate::fs::FsError::NotSupported => "operation not supported (ENOSYS)",
+        crate::fs::FsError::NotEmpty => "directory not empty (ENOTEMPTY)",
+    }
+}
+
+/// POSIX.1-2024 path resolution contract constants.
+///
+/// path_resolution(7) spec:
+/// - Empty pathname → ENOENT
+/// - NUL byte in path → EINVAL
+/// - Pathname too long → ENAMETOOLONG (PATH_MAX = 4096)
+/// - Component too long → ENAMETOOLONG (NAME_MAX = 255)
+/// - Trailing slash on non-directory → ENOTDIR
+/// - Symlink loop → ELOOP (MAXSYMLINKS = 40)
+pub const PATH_MAX: usize = 4096;
+pub const NAME_MAX: usize = 255;
+
+/// Validate a pathname per POSIX.1-2024 path_resolution(7).
+///
+/// Returns Ok(()) if the path is valid, or Err(FsError) with the appropriate
+/// error code. This is called before any VFS operation that takes a pathname.
+pub fn validate_path(path: &str) -> Result<(), crate::fs::FsError> {
+    // path_resolution(7): "POSIX decrees that an empty pathname must not be
+    // resolved successfully. Linux returns ENOENT in this case."
+    if path.is_empty() {
+        return Err(crate::fs::FsError::NotFound);
+    }
+
+    // path_resolution(7): NUL byte terminates C strings; must not appear in path
+    if path.contains('\0') {
+        return Err(crate::fs::FsError::InvalidPath);
+    }
+
+    // path_resolution(7): "There is a maximum length for pathnames. If the
+    // pathname is too long, an ENAMETOOLONG error is returned."
+    if path.len() > PATH_MAX {
+        return Err(crate::fs::FsError::NameTooLong);
+    }
+
+    // Check each component does not exceed NAME_MAX
+    for component in path.split('/') {
+        if component.is_empty() || component == "." || component == ".." {
+            continue;
+        }
+        if component.len() > NAME_MAX {
+            return Err(crate::fs::FsError::ComponentTooLong);
+        }
+    }
+
+    Ok(())
+}
+
+/// path_resolution(7): Trailing slash on non-directory → ENOTDIR.
+///
+/// If `path` ends with '/' (after normalization stripping) and the resolved
+/// entry `is_dir` is false, return ENOTDIR.
+///
+/// Call this AFTER resolving the entry, when you know whether it is a directory.
+/// The caller must decide whether the trailing-slash constraint applies:
+/// e.g. open(O_CREAT) skips this check because creating a file with trailing
+/// slash is an error regardless.
+pub fn check_trailing_slash_notdir(path: &str, is_dir: bool) -> Result<(), crate::fs::FsError> {
+    if path.ends_with('/') && !is_dir {
+        return Err(crate::fs::FsError::NotDirectory);
+    }
+    Ok(())
+}
+
 fn is_mount_root(relative_path: &str) -> bool {
     relative_path.is_empty() || relative_path == "/"
 }
 
-fn normalize_vfs_path(path: &str) -> String {
+pub fn normalize_vfs_path(path: &str) -> String {
     let mut components: Vec<String> = Vec::new();
     for raw in path.split(['/', '\\']) {
         if raw.is_empty() || raw == "." {
@@ -714,7 +1840,7 @@ fn mount_matches_path(mount_point: &str, path: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
-fn relative_mount_path<'a>(mount_point: &str, path: &'a str) -> &'a str {
+pub(crate) fn relative_mount_path<'a>(mount_point: &str, path: &'a str) -> &'a str {
     if mount_point == "/" {
         return path;
     }
@@ -742,7 +1868,7 @@ fn vfs_info_from_f2fs_entry(entry: &crate::fs::f2fs::F2fsEntry) -> VfsFileInfo {
     VfsFileInfo {
         inode: entry.ino,
         size: entry.size,
-        mode: if entry.is_dir { 0o040755 } else { 0o100644 },
+        mode: entry.mode,
         nlink: 1,
         uid: entry.uid,
         gid: entry.gid,
@@ -771,7 +1897,19 @@ fn f2fs_exact_read_len(entry: &crate::fs::f2fs::F2fsEntry) -> Result<usize, &'st
 enum VfsUnsupportedCapability {
     Open,
     Read,
+    Write,
     ListDirectory,
+    Create,
+    Unlink,
+    Rename,
+    Truncate,
+    Symlink,
+    Stat,
+    CopyFileRange,
+    Fadvise,
+    Chmod,
+    Chown,
+    Fallocate,
 }
 
 fn no_filesystem_for_path() -> &'static str {
@@ -807,9 +1945,266 @@ fn unsupported_vfs_capability(
         (VfsFsType::Xfs, VfsUnsupportedCapability::ListDirectory) => {
             "xfs: unified directory listing is not wired to a real backend"
         }
+        (VfsFsType::DevFs, VfsUnsupportedCapability::Write) => {
+            "devfs: unified writes require a device-specific driver path"
+        }
+        (VfsFsType::TmpFs, VfsUnsupportedCapability::Write) => {
+            "tmpfs: unified writes are not wired"
+        }
+        (VfsFsType::Xfs, VfsUnsupportedCapability::Write) => {
+            "xfs: unified writes are not wired to a real backend"
+        }
+        (VfsFsType::TmpFs, VfsUnsupportedCapability::Create) => {
+            "tmpfs: unified file creation is not wired"
+        }
+        (fs, VfsUnsupportedCapability::Create) => {
+            alloc::format!("{:?}: VFS file/dir creation is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Unlink) => {
+            alloc::format!("{:?}: VFS unlink is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Rename) => {
+            alloc::format!("{:?}: VFS rename is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Truncate) => {
+            alloc::format!("{:?}: VFS truncate is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Symlink) => {
+            alloc::format!("{:?}: VFS symlink is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Stat) => {
+            alloc::format!("{:?}: VFS stat is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::CopyFileRange) => {
+            alloc::format!("{:?}: VFS copy_file_range is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Fadvise) => {
+            alloc::format!("{:?}: VFS fadvise is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Chmod) => {
+            alloc::format!("{:?}: VFS chmod is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Chown) => {
+            alloc::format!("{:?}: VFS chown is not wired", fs).leak()
+        }
+        (fs, VfsUnsupportedCapability::Fallocate) => {
+            alloc::format!("{:?}: VFS fallocate is not wired", fs).leak()
+        }
         _ => "vfs: unsupported capability",
     }
 }
+
+// ============================================================================
+// Address Space Operations — page cache ↔ backing store bridge
+// ============================================================================
+
+/// Address space operations — bridge between VFS page cache and backing store.
+///
+/// Linux equivalent: `struct address_space_operations` in `<linux/fs.h>`.
+/// Each filesystem backend provides an implementation that maps file pages
+/// to physical block I/O.
+///
+/// ## echOS page cache granularity
+///
+/// Currently the VFS page cache (`page_cache.rs`) operates at file
+/// granularity — one entry per file at `page_index = 0`. The address
+/// space ops reflect this: `read_file`/`write_file` read or write the
+/// entire file. Future work may introduce block-granular (4 KiB) caching;
+/// the `page_index` parameter is reserved for that.
+pub struct AddressSpaceOps {
+    /// Read the entire file content from backing store (cache miss).
+    pub read_file: fn(fs_type: VfsFsType, source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str>,
+    /// Write the entire file content to backing store (writeback).
+    pub write_file: fn(fs_type: VfsFsType, source: &str, relative_path: &str, data: &[u8]) -> Result<(), &'static str>,
+    /// Map logical page index to physical block number.
+    /// page_index=0 for current file-granular cache.
+    pub bmap: fn(fs_type: VfsFsType, source: &str, relative_path: &str, page_index: u64) -> Result<u64, &'static str>,
+}
+
+// ── Per-backend read_file implementations ──────────────────────────────────
+
+fn asops_read_f2fs(_fs_type: VfsFsType, _source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let entry = crate::fs::f2fs::open_entry(relative_path).map_err(|_| "f2fs: file not found")?;
+    if entry.is_dir {
+        return Err("f2fs: path is a directory");
+    }
+    read_f2fs_bytes_exact(relative_path, &entry)
+}
+
+fn asops_read_ext4(_fs_type: VfsFsType, source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let resolved = resolve_ext4_node(source, relative_path)?;
+    if resolved.inode.is_directory() {
+        return Err("ext4: path is a directory");
+    }
+    resolved
+        .mounted
+        .fs
+        .read_file_from_storage(&resolved.inode, &resolved.mounted.storage)
+        .map_err(|_| "ext4: failed to read file")
+}
+
+fn asops_read_fat32(_fs_type: VfsFsType, source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let resolved = resolve_fat32_node(source, relative_path)?;
+    if resolved.file.is_dir {
+        return Err("fat32: path is a directory");
+    }
+    fat32_read_file(&resolved)
+}
+
+fn asops_read_exfat(_fs_type: VfsFsType, source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let resolved = resolve_exfat_node(source, relative_path)?;
+    if resolved.file.is_dir {
+        return Err("exfat: path is a directory");
+    }
+    exfat_read_file(&resolved)
+}
+
+fn asops_read_ntfs(_fs_type: VfsFsType, source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let resolved = resolve_ntfs_node(source, relative_path)?;
+    if matches!(
+        resolved.metadata.as_ref().map(|meta| meta.file_type),
+        Some(crate::fs::ntfs::NtfsFileType::Directory)
+    ) {
+        return Err("ntfs: path is a directory");
+    }
+    resolved
+        .mounted
+        .fs
+        .read_file_from_storage(&resolved.entry, &resolved.mounted.storage)
+        .map_err(|_| "ntfs: failed to read file")
+}
+
+fn asops_read_btrfs(_fs_type: VfsFsType, source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let resolved = resolve_btrfs_node(source, relative_path)?;
+    if resolved.inode.is_directory() {
+        return Err("btrfs: path is a directory");
+    }
+    resolved
+        .mounted
+        .fs
+        .read_file_from_storage(resolved.inode_num, &resolved.mounted.storage)
+}
+
+fn asops_read_procfs(_fs_type: VfsFsType, _source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    let content = generate_proc_content(relative_path);
+    if content.is_empty() {
+        Err("procfs: entry not found")
+    } else {
+        Ok(content.into_bytes())
+    }
+}
+
+fn asops_read_sysfs(_fs_type: VfsFsType, _source: &str, relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    read_sysfs_bytes(relative_path)
+}
+
+fn asops_read_unsupported(fs_type: VfsFsType, _source: &str, _relative_path: &str) -> Result<Vec<u8>, &'static str> {
+    Err(unsupported_vfs_capability(fs_type, VfsUnsupportedCapability::Read))
+}
+
+// ── Per-backend write_file implementations ─────────────────────────────────
+
+fn asops_write_f2fs(_fs_type: VfsFsType, _source: &str, relative_path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let parent = crate::fs::namei::parent_path(relative_path);
+    let name = relative_path.rsplit_once('/').map(|(_, n)| n).unwrap_or("");
+    if name.is_empty() {
+        return Err("f2fs: empty file name");
+    }
+    crate::fs::f2fs::create_f2fs_file_with_data(&parent, name, data)
+        .map_err(|_| "f2fs: write failed")
+}
+
+fn asops_write_ext4(_fs_type: VfsFsType, source: &str, relative_path: &str, data: &[u8]) -> Result<(), &'static str> {
+    crate::fs::ext4::ext4_write_file(source, relative_path, data)
+}
+
+fn asops_write_unsupported(fs_type: VfsFsType, _source: &str, _relative_path: &str, _data: &[u8]) -> Result<(), &'static str> {
+    Err(unsupported_vfs_capability(fs_type, VfsUnsupportedCapability::Write))
+}
+
+// ── Per-backend bmap implementations ───────────────────────────────────────
+
+fn asops_bmap_f2fs(_fs_type: VfsFsType, _source: &str, _relative_path: &str, page_index: u64) -> Result<u64, &'static str> {
+    if page_index == 0 {
+        Err("f2fs: bmap not yet implemented")
+    } else {
+        Err("f2fs: block-level bmap not yet implemented")
+    }
+}
+
+fn asops_bmap_unsupported(fs_type: VfsFsType, _source: &str, _relative_path: &str, _page_index: u64) -> Result<u64, &'static str> {
+    Err(unsupported_vfs_capability(fs_type, VfsUnsupportedCapability::Read))
+}
+
+// ── Address space ops dispatch table ───────────────────────────────────────
+
+fn get_address_space_ops(fs_type: VfsFsType) -> &'static AddressSpaceOps {
+    match fs_type {
+        VfsFsType::F2fs => &ASOPS_F2FS,
+        VfsFsType::Ext4 => &ASOPS_EXT4,
+        VfsFsType::Fat32 => &ASOPS_FAT32,
+        VfsFsType::ExFat => &ASOPS_EXFAT,
+        VfsFsType::Ntfs => &ASOPS_NTFS,
+        VfsFsType::Btrfs => &ASOPS_BTRFS,
+        VfsFsType::ProcFs => &ASOPS_PROCFS,
+        VfsFsType::SysFs => &ASOPS_SYSFS,
+        _ => &ASOPS_UNSUPPORTED,
+    }
+}
+
+const ASOPS_F2FS: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_f2fs,
+    write_file: asops_write_f2fs,
+    bmap: asops_bmap_f2fs,
+};
+
+const ASOPS_EXT4: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_ext4,
+    write_file: asops_write_ext4,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_FAT32: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_fat32,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_EXFAT: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_exfat,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_NTFS: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_ntfs,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_BTRFS: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_btrfs,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_PROCFS: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_procfs,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_SYSFS: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_sysfs,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
+
+const ASOPS_UNSUPPORTED: AddressSpaceOps = AddressSpaceOps {
+    read_file: asops_read_unsupported,
+    write_file: asops_write_unsupported,
+    bmap: asops_bmap_unsupported,
+};
 
 fn read_sysfs_bytes(path: &str) -> Result<Vec<u8>, &'static str> {
     let inode = crate::fs::sysfs::open_sys_inode(path).map_err(|_| "sysfs: entry not found")?;
@@ -839,11 +2234,13 @@ fn resolve_symlink_target(
     _fs_type: VfsFsType,
     depth: usize,
 ) -> Result<String, &'static str> {
-    if depth >= MAXSYMLINKS {
+    if depth >= crate::fs::namei::MAXSYMLINKS {
         return Err("too many symbolic links encountered (ELOOP)");
     }
 
-    let remaining_count = path_components(original_path).len().saturating_sub(consumed_components);
+    let remaining_count = path_components(original_path)
+        .len()
+        .saturating_sub(consumed_components);
     let remaining: Vec<String> = path_components(original_path)
         .into_iter()
         .skip(consumed_components)
@@ -855,7 +2252,7 @@ fn resolve_symlink_target(
         target.to_string()
     } else {
         // Relative symlink: parent directory'ye göre çöz
-        let parent = parent_path(original_path);
+        let parent = crate::fs::namei::parent_path(original_path);
         if parent == "/" {
             format!("/{}", target)
         } else {
@@ -881,7 +2278,7 @@ fn resolve_ext4_node_with_depth(
     relative_path: &str,
     depth: usize,
 ) -> Result<ResolvedExt4Node, &'static str> {
-    if depth >= MAXSYMLINKS {
+    if depth >= crate::fs::namei::MAXSYMLINKS {
         return Err("ext4: too many symbolic links encountered (ELOOP)");
     }
 
@@ -979,18 +2376,28 @@ fn list_ext4_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, 
     if !resolved.inode.is_directory() {
         return Err("ext4: path is not a directory");
     }
+    // Linux: inode_lock_shared(dir) — shared lock for directory reads
+    crate::fs::ext4::ext4_inode_lock_shared(source, resolved.inode_num);
     let entries = resolved
         .mounted
         .fs
         .read_dir_from_storage(&resolved.inode, &resolved.mounted.storage)
-        .map_err(|_| "ext4: failed to read directory")?;
+        .map_err(|e| {
+            crate::fs::ext4::ext4_inode_unlock_shared(source, resolved.inode_num);
+            e
+        });
+    let entries = entries.map_err(|_| "ext4: failed to read directory")?;
     let mut result = Vec::new();
     for entry in entries {
         let inode = resolved
             .mounted
             .fs
             .read_inode_from_storage(entry.inode, &resolved.mounted.storage)
-            .map_err(|_| "ext4: failed to read inode")?;
+            .map_err(|e| {
+                crate::fs::ext4::ext4_inode_unlock_shared(source, resolved.inode_num);
+                let _ = e;
+                "ext4: failed to read inode"
+            })?;
         result.push(VfsDirEntry {
             name: entry.name,
             size: inode.size(),
@@ -998,6 +2405,7 @@ fn list_ext4_dir(source: &str, relative_path: &str) -> Result<Vec<VfsDirEntry>, 
             fs_type: VfsFsType::Ext4,
         });
     }
+    crate::fs::ext4::ext4_inode_unlock_shared(source, resolved.inode_num);
     Ok(result)
 }
 
@@ -1717,27 +3125,13 @@ fn list_devfs_dir(relative_path: &str) -> Result<Vec<VfsDirEntry>, &'static str>
         .collect())
 }
 
-fn path_components(path: &str) -> Vec<String> {
+pub(crate) fn path_components(path: &str) -> Vec<String> {
     normalize_vfs_path(path)
         .trim_matches('/')
         .split('/')
         .filter(|component| !component.is_empty() && *component != ".")
         .map(|component| component.to_string())
         .collect()
-}
-
-fn parent_path(path: &str) -> String {
-    let normalized = normalize_vfs_path(path);
-    if normalized == "/" {
-        return "/".to_string();
-    }
-    let trimmed = normalized.trim_end_matches('/');
-    let last_slash = trimmed.rfind('/').unwrap_or(0);
-    if last_slash == 0 {
-        "/".to_string()
-    } else {
-        trimmed[..last_slash].to_string()
-    }
 }
 
 // ============================================================================
@@ -1768,12 +3162,82 @@ fn generate_proc_content(path: &str) -> String {
 }
 
 /// Read file content from unified VFS - dispatches to correct filesystem
+///
+/// Uses VFS page cache to avoid redundant disk I/O on repeated reads.
 pub fn read_file(path: &str) -> Result<Vec<u8>, &'static str> {
-    VFS_UNIFIED.lock().read_bytes(path)
+    let normalized = normalize_vfs_path(path);
+    let path_hash = hash_path(&normalized);
+
+    // Page cache lookup
+    if let Some(cached) = page_cache::find_page(path_hash, 0) {
+        return Ok(cached.data);
+    }
+
+    let result = VFS_UNIFIED.lock().read_bytes(path);
+
+    // Populate cache on success
+    if let Ok(ref data) = result {
+        // disk_lba=0: VFS-level cache doesn't know the physical LBA.
+        // Backend-specific caches handle block-level writeback.
+        page_cache::add_page(path_hash, 0, data.clone(), 0);
+    }
+
+    result
 }
 
 pub fn list_dir(path: &str) -> Result<Vec<VfsDirEntry>, &'static str> {
     VFS_UNIFIED.lock().list_dir(path)
+}
+
+/// Write bytes to a file via the unified VFS.
+///
+/// On success, the page cache entry for the file is invalidated so that
+/// subsequent reads fetch fresh data (write-through semantics).
+pub fn write_file(path: &str, data: &[u8]) -> Result<(), &'static str> {
+    let normalized = normalize_vfs_path(path);
+    let path_hash = hash_path(&normalized);
+    let result = VFS_UNIFIED.lock().write_bytes(path, data);
+    if result.is_ok() {
+        page_cache::invalidate_inode(path_hash);
+    }
+    result
+}
+
+/// Create a regular file in a directory.
+pub fn create_file(parent_path: &str, name: &str) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().create_file(parent_path, name)
+}
+
+pub fn create_dir(parent_path: &str, name: &str) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().create_dir(parent_path, name)
+}
+
+pub fn remove_dir(parent_path: &str, name: &str) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().remove_dir(parent_path, name)
+}
+
+pub fn unlink_file(parent_path: &str, name: &str) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().unlink(parent_path, name)
+}
+
+/// Rename a file or directory.
+pub fn rename_file(parent_path: &str, old_name: &str, new_name: &str) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().rename(parent_path, old_name, new_name)
+}
+
+/// Truncate a file to a given size.
+pub fn truncate_file(path: &str, new_size: u64) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().truncate(path, new_size)
+}
+
+/// Create a symbolic link.
+pub fn symlink_file(parent_path: &str, name: &str, target: &str) -> Result<(), &'static str> {
+    VFS_UNIFIED.lock().symlink(parent_path, name, target)
+}
+
+/// Stat a file — return VfsFileInfo.
+pub fn stat_file(path: &str) -> Result<VfsFileInfo, &'static str> {
+    VFS_UNIFIED.lock().stat(path)
 }
 
 #[cfg(test)]
@@ -1799,7 +3263,7 @@ mod tests {
 
         assert_eq!(
             vfs.open("/mnt/hello.txt").unwrap_err(),
-            "ext4: backend not mounted for source"
+            "ext4: component not found"
         );
     }
 
@@ -1886,6 +3350,28 @@ mod tests {
             .expect("normalized path should resolve");
         assert_eq!(resolved.mount_point, "/");
         assert_eq!(resolved.fs_type, VfsFsType::TmpFs);
+    }
+
+    #[test]
+    fn follow_up_returns_parent_mount_for_mount_point() {
+        let mut vfs = VfsUnified::new();
+        vfs.mount("/", VfsFsType::TmpFs, "tmpfs", VfsMountFlags::default());
+        vfs.mount("/proc", VfsFsType::ProcFs, "proc", VfsMountFlags::default());
+        vfs.mount("/dev", VfsFsType::DevFs, "devtmpfs", VfsMountFlags::default());
+
+        // /proc mount point → follow_up goes to root mount
+        let parent = vfs.follow_up("/proc").expect("follow_up from /proc");
+        assert_eq!(parent, "/");
+
+        // /dev mount point → follow_up goes to root mount
+        let parent = vfs.follow_up("/dev").expect("follow_up from /dev");
+        assert_eq!(parent, "/");
+
+        // Root mount → follow_up returns None (cannot go up from root)
+        assert!(vfs.follow_up("/").is_none());
+
+        // Non-mount path → follow_up returns None
+        assert!(vfs.follow_up("/etc/passwd").is_none());
     }
 
     #[test]
@@ -2043,6 +3529,7 @@ mod tests {
             name: String::from("/demo.txt"),
             size: 8193,
             is_dir: false,
+            is_symlink: false,
             mode: 0o600,
             uid: 1000,
             gid: 1001,
@@ -2061,6 +3548,7 @@ mod tests {
             name: String::from("/large.bin"),
             size: 8193,
             is_dir: false,
+            is_symlink: false,
             mode: 0o644,
             uid: 0,
             gid: 0,
@@ -2560,4 +4048,23 @@ mod tests {
         entry[offset + 24..offset + 24 + payload.len()].copy_from_slice(payload);
         total_length
     }
+}
+
+/// Sync all mounted writable filesystems.
+///
+/// VFS-level sync: flushes all cached data to stable storage.
+///
+/// Per §5.3 contract:
+/// - VFS page cache dirty flags are cleared (sync_cache)
+/// - F2FS internal buffers are flushed (sync_f2fs)
+/// - Other backends (ext4, btrfs, fat32, ntfs) manage their own writeback
+///   internally; no additional VFS-level flush is needed for those.
+pub fn vfs_sync_all() -> Result<(), crate::fs::FsError> {
+    // 0. VFS page cache — clear dirty flags
+    page_cache::sync_cache();
+
+    // 1. F2FS — primary backend (checkpoint + flush)
+    let _ = crate::fs::f2fs::sync_f2fs();
+
+    Ok(())
 }

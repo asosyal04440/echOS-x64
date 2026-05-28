@@ -292,6 +292,9 @@ pub struct TaskColdData {
     /// PCID (Process Context Identifier) — TLB flush optimization.
     /// 0 = kernel PCID, 1..4095 = user task PCID'leri.
     pub pcid: u16,
+    /// Per-process FD tablosu — her process kendi dosya tanımlayıcı tablosunu tutar
+    /// None ise global FD tablosu kullanılır (geriye dönük uyumluluk)
+    pub fd_table: Option<Arc<Mutex<crate::fs::FileDescriptorTable>>>,
     /// Üst süreç PID'si — fork()/clone() ile oluşturulmuş ise set edilir
     pub parent_pid: Option<TaskId>,
     /// Alt süreç PID listesi — fork ile oluşturulan çocuklar
@@ -422,6 +425,7 @@ impl Task {
                 is_background: false,
                 signals: Arc::new(SignalHandlers::new()),
                 pcid: 0, // 0 = kernel PCID (NativeRust tasks)
+                fd_table: None, // İlk açılışta global FD tablosu kullanılır
                 parent_pid: None,
                 children: Vec::new(),
                 rseq: RseqState::default(),
@@ -460,6 +464,26 @@ impl Task {
     }
     pub fn mode(&self) -> ExecutionMode {
         self.cold.mode
+    }
+
+    /// Per-process FD tablosunu başlat — Linux: copy_process() → copy_files()
+    ///
+    /// Eğer task'ın zaten bir FD tablosu varsa (Some),nothing yapar.
+    /// Yoksa (None) yeni bir tablo oluşturur ve `fd_table` alanına yerleştirir.
+    /// Bu fonksiyon fork/clone ve user task oluşturma sırasında çağrılır.
+    pub fn init_fd_table(&mut self) {
+        if self.cold.fd_table.is_none() {
+            use alloc::sync::Arc;
+            use spin::Mutex;
+            self.cold.fd_table = Some(Arc::new(Mutex::new(
+                crate::fs::FileDescriptorTable::new()
+            )));
+        }
+    }
+
+    /// Task'ın mevcut FD tablosunu döndürür (varsa)
+    pub fn get_fd_table(&self) -> Option<Arc<Mutex<crate::fs::FileDescriptorTable>>> {
+        self.cold.fd_table.clone()
     }
 
     // Diğer cold field'lara doğrudan `task.cold.xxx` ile erişilir.

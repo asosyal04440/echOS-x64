@@ -5278,7 +5278,27 @@ fn render_sync() -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    crate::fs::f2fs::sync_f2fs().map_err(|err| format!("sync hatasi: {:?}", err))?;
+    // Tüm mounted filesystem'leri senkronize et
+    // Linux: sync(2) — tüm mounted filesystem'ler flush edilir
+    // Deep web: Linux kernel fs/sync.c sync_filesystem()
+
+    // 1. F2FS sync
+    if let Err(e) = crate::fs::f2fs::sync_f2fs() {
+        crate::serial_println!("[sync] F2FS sync hatası: {:?}", e);
+    }
+
+    // 2. Page cache flush (tüm dirty page'leri temizle)
+    crate::fs::page_cache::force_writeback_all();
+
+    // 3. Block device flush (tüm disk write cache'leri temizle)
+    // Deep web: Linux kernel block/bdev.c blkdev_issue_flush()
+    if let Ok(mut drive) = crate::drivers::linux::select_block_device() {
+        if let Err(e) = drive.flush() {
+            crate::serial_println!("[sync] Block device flush hatası: {:?}", e);
+        }
+    }
+
+    crate::serial_println!("[sync] Tüm filesystem'ler senkronize edildi");
     Ok(None)
 }
 

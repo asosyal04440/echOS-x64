@@ -41,6 +41,271 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 // ============================================================================
+// FS WATCH KEY AND EVENT (Wave 5.6 Notification Semantics)
+// ============================================================================
+
+/// Watch kind for filesystem event classification.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum WatchKind {
+    Inode,
+    Mount,
+    Directory,
+}
+
+/// Unique key identifying a filesystem watch target across namespaces.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FsWatchKey {
+    pub namespace_id: u64,
+    pub mount_id: u64,
+    pub inode_id: u64,
+    pub generation: u64,
+    /// What kind of object is being watched (inode, mount, directory)
+    pub watch_kind: WatchKind,
+    /// Snapshot of the path at watch creation time
+    pub watched_path_snapshot: String,
+}
+
+/// Error classification for filesystem notification events.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FsErrorClass {
+    IoError,
+    PermissionDenied,
+    NoSpace,
+    WatchOverflow,
+    WatchRemoved,
+}
+
+/// A filesystem notification event with ordering and identity guarantees.
+#[derive(Clone, Debug)]
+pub struct FsEvent {
+    pub seq_no: u64,
+    pub watch_key: Option<FsWatchKey>,
+    pub parent_key: Option<FsWatchKey>,
+    pub cookie: u32,
+    pub name_snapshot: String,
+    pub old_name_snapshot: Option<String>,
+    pub new_name_snapshot: Option<String>,
+    pub is_dir: bool,
+    pub error_class: Option<FsErrorClass>,
+    pub mask: u32,
+    pub wd: i32,
+}
+
+impl FsEvent {
+    pub fn new(wd: i32, mask: u32, cookie: u32, name: &str) -> Self {
+        Self {
+            seq_no: next_seq(),
+            watch_key: None,
+            parent_key: None,
+            cookie,
+            name_snapshot: String::from(name),
+            old_name_snapshot: None,
+            new_name_snapshot: None,
+            is_dir: false,
+            error_class: None,
+            mask,
+            wd,
+        }
+    }
+
+    pub fn with_error(wd: i32, mask: u32, error: FsErrorClass) -> Self {
+        Self {
+            seq_no: next_seq(),
+            watch_key: None,
+            parent_key: None,
+            cookie: 0,
+            name_snapshot: String::new(),
+            old_name_snapshot: None,
+            new_name_snapshot: None,
+            is_dir: false,
+            error_class: Some(error),
+            mask,
+            wd,
+        }
+    }
+}
+
+// Monotonic sequence counter for FsEvent ordering.
+static FS_EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+fn next_seq() -> u64 {
+    FS_EVENT_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+// ============================================================================
+// RENAME COOKIE MATCHING (Task 5.6.3)
+// ============================================================================
+
+/// Generates unique non-zero cookies for rename event pairing.
+pub fn next_cookie() -> u32 {
+    static COOKIE: AtomicU32 = AtomicU32::new(1);
+    loop {
+        let val = COOKIE.fetch_add(1, Ordering::Relaxed);
+        if val != 0 {
+            return val;
+        }
+    }
+}
+
+/// Pairs IN_MOVED_FROM / IN_MOVED_TO events by their shared cookie value.
+///
+/// Only events with non-zero cookies are considered. Each cookie produces at
+/// most one pair; unpaired events are silently dropped from the result.
+pub fn match_rename_events(events: &[FsEvent]) -> Vec<(FsEvent, FsEvent)> {
+    let mut moved_from: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut moved_to: BTreeMap<u32, usize> = BTreeMap::new();
+
+    for (i, ev) in events.iter().enumerate() {
+        if ev.cookie == 0 {
+            continue;
+        }
+        if (ev.mask & IN_MOVED_FROM) != 0 {
+            moved_from.entry(ev.cookie).or_insert(i);
+        }
+        if (ev.mask & IN_MOVED_TO) != 0 {
+            moved_to.entry(ev.cookie).or_insert(i);
+        }
+    }
+
+    let mut pairs = Vec::new();
+    for (cookie, &from_idx) in &moved_from {
+        if let Some(&to_idx) = moved_to.get(cookie) {
+            pairs.push((events[from_idx].clone(), events[to_idx].clone()));
+        }
+    }
+
+    pairs.sort_by_key(|(a, _)| a.seq_no);
+    pairs
+}
+
+// ============================================================================
+// EVENT QUEUE WITH OVERFLOW AND COALESCING (Task 5.6.4)
+// ============================================================================
+
+/// Configurable FIFO event queue with overflow detection and coalescing.
+///
+/// # Ordering Guarantees (§6.3)
+///
+/// 1. **In-order delivery per inode** — Events for the same inode are
+///    delivered in the order they were generated. The `seq_no` field is
+///    monotonic across all events in a single FsEventQueue.
+/// 2. **Parent before child** — When a directory operation affects both a
+///    parent and child (e.g., delete), the parent IN_DELETE event is
+///    dispatched before the child IN_DELETE_SELF event.
+/// 3. **Rename atomicity** — `IN_MOVED_FROM` and `IN_MOVED_TO` share the
+///    same `cookie` for matching. They are NOT guaranteed to be consecutive
+///    in the queue; other events may appear between them. Callers must use
+///    the cookie for pair matching.
+/// 4. **Coalescing** — Consecutive identical events (same wd, mask, cookie,
+///    name) are coalesced into one. This is consistent with Linux inotify(7)
+///    behavior: "If successive output inotify events ... are identical ...
+///    then they are coalesced into a single event if the older event has not
+///    yet been read."
+/// 5. **Overflow** — When the queue is full, the oldest event is evicted and
+///    an `IN_Q_OVERFLOW` event (wd=-1) is injected at the tail.
+pub struct FsEventQueue {
+    events: Vec<FsEvent>,
+    max_size: usize,
+    overflow_pending: bool,
+}
+
+impl FsEventQueue {
+    pub const DEFAULT_MAX_SIZE: usize = 4096;
+
+    pub fn new(max_size: usize) -> Self {
+        Self {
+            events: Vec::with_capacity(max_size),
+            max_size,
+            overflow_pending: false,
+        }
+    }
+
+    pub fn with_default_max() -> Self {
+        Self::new(Self::DEFAULT_MAX_SIZE)
+    }
+
+    /// Push an event. Returns the dropped event if the queue was full.
+    ///
+    /// When the queue is full the oldest event is evicted and an
+    /// IN_Q_OVERFLOW event is injected at the tail. The caller receives
+    /// the evicted event as `Err(dropped)`.
+    pub fn push(&mut self, event: FsEvent) -> Result<(), FsEvent> {
+        if self.events.len() >= self.max_size {
+            let dropped = self.events.remove(0);
+            if !self.overflow_pending {
+                self.overflow_pending = true;
+                let overflow_ev = FsEvent::new(-1, IN_Q_OVERFLOW, 0, "");
+                self.events.push(overflow_ev);
+            }
+            return Err(dropped);
+        }
+
+        self.events.push(event);
+        Ok(())
+    }
+
+    /// Pop the oldest event from the queue.
+    pub fn pop(&mut self) -> Option<FsEvent> {
+        if self.events.is_empty() {
+            return None;
+        }
+        let ev = self.events.remove(0);
+        if (ev.mask & IN_Q_OVERFLOW) != 0 {
+            self.overflow_pending = false;
+        }
+        Some(ev)
+    }
+
+    /// Current number of events in the queue.
+    pub fn len(&self) -> usize {
+        self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
+
+    /// Coalesce consecutive identical events and drain the entire queue.
+    ///
+    /// Two events are considered identical when they share the same `wd`,
+    /// `mask`, and `name_snapshot`. The coalesced event keeps the highest
+    /// `seq_no` and the latest `cookie` (non-zero preferred).
+    pub fn coalesce_and_drain(&mut self) -> Vec<FsEvent> {
+        if self.events.is_empty() {
+            return Vec::new();
+        }
+
+        let mut drained = core::mem::take(&mut self.events);
+        self.overflow_pending = false;
+
+        let mut result: Vec<FsEvent> = Vec::with_capacity(drained.len());
+
+        for event in drained.drain(..) {
+            if let Some(last) = result.last_mut() {
+                if last.wd == event.wd
+                    && last.mask == event.mask
+                    && last.name_snapshot == event.name_snapshot
+                {
+                    if event.cookie != 0 {
+                        last.cookie = event.cookie;
+                    }
+                    if event.seq_no > last.seq_no {
+                        last.seq_no = event.seq_no;
+                    }
+                    if event.error_class.is_some() {
+                        last.error_class = event.error_class;
+                    }
+                    continue;
+                }
+            }
+            result.push(event);
+        }
+
+        result
+    }
+}
+
+// ============================================================================
 // INOTIFY SABİTLERİ
 // ============================================================================
 
@@ -67,9 +332,33 @@ pub const IN_IGNORED: u32 = 0x00008000; // İzleyici kaldırıldı
 pub const IN_ISDIR: u32 = 0x40000000; // Olay bir dizinde oluştu
 pub const IN_ONESHOT: u32 = 0x80000000; // Tek sefer olay gönder
 
+/// Convenience macro: all events that can be monitored.
+///
+/// inotify(7) spec: "The IN_ALL_EVENTS macro is defined as a bit mask of all
+/// of the above events."
+pub const IN_ALL_EVENTS: u32 = IN_ACCESS
+    | IN_MODIFY
+    | IN_ATTRIB
+    | IN_CLOSE_WRITE
+    | IN_CLOSE_NOWRITE
+    | IN_OPEN
+    | IN_MOVED_FROM
+    | IN_MOVED_TO
+    | IN_CREATE
+    | IN_DELETE
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF;
+
 /// inotify başlatma bayrakları
 pub const IN_CLOEXEC: i32 = 0x02000000; // exec sonrası kapat
 pub const IN_NONBLOCK: i32 = 0x00004000; // Engellemesiz mod
+
+/// inotify_add_watch mask flag'leri
+pub const IN_DONT_FOLLOW: u32 = 0x02000000; // Symbolic link'i takip etme
+pub const IN_EXCL_UNLINK: u32 = 0x04000000; // Unlink sonrası event üretme
+pub const IN_MASK_ADD: u32 = 0x20000000; // Mevcut maskeye ekle
+pub const IN_ONLYDIR: u32 = 0x01000000; // Sadece dizin ise izle
+pub const IN_MASK_CREATE: u32 = 0x10000000; // Sadece yeni watch oluştur
 
 /// Instance başına maksimum izleyici sayısı
 pub const INOTIFY_MAX_WATCHES: usize = 8192;
@@ -104,16 +393,20 @@ impl InotifyEvent {
             wd,
             mask,
             cookie,
-            name_len: name.len() as u32,
+            name_len: if name.is_empty() {
+                0
+            } else {
+                (name.len() + 1) as u32
+            },
             name: String::from(name),
         }
     }
 
     /// Calculate total event size (for read buffer)
     pub fn size(&self) -> usize {
-        // struct size + name (aligned to sizeof(long))
+        // struct size + name + null terminator (aligned to sizeof(long))
         let base = core::mem::size_of::<InotifyEventRaw>();
-        let name_len = self.name.len();
+        let name_len = self.name.len() + 1; // +1 for null terminator
         let padding = (8 - (name_len % 8)) % 8;
         base + name_len + padding
     }
@@ -599,11 +892,12 @@ pub fn sys_inotify_read(fd: i32, buf: &mut [u8]) -> i32 {
             None => break,
         };
 
+        let name_with_null = event.name.len() + 1; // includes null terminator
         let raw = InotifyEventRaw {
             wd: event.wd,
             mask: event.mask,
             cookie: event.cookie,
-            name_len: event.name_len,
+            name_len: name_with_null as u32,
         };
 
         // Copy raw struct
@@ -621,14 +915,14 @@ pub fn sys_inotify_read(fd: i32, buf: &mut [u8]) -> i32 {
         buf[offset..offset + raw_bytes.len()].copy_from_slice(raw_bytes);
         offset += raw_bytes.len();
 
-        // Copy name
-        let name_bytes = event.name.as_bytes();
-        if offset + name_bytes.len() <= buf.len() {
-            buf[offset..offset + name_bytes.len()].copy_from_slice(name_bytes);
-            offset += name_bytes.len();
+        // Copy name + null terminator
+        if offset + name_with_null <= buf.len() {
+            buf[offset..offset + event.name.len()].copy_from_slice(event.name.as_bytes());
+            buf[offset + event.name.len()] = 0; // null terminator
+            offset += name_with_null;
 
-            // Align to 8 bytes
-            let padding = (8 - (name_bytes.len() % 8)) % 8;
+            // Align to 8 bytes (padding after null terminator)
+            let padding = (8 - (name_with_null % 8)) % 8;
             for i in 0..padding {
                 if offset + i < buf.len() {
                     buf[offset + i] = 0;
@@ -1051,13 +1345,64 @@ pub fn notify_store_write_path(path: &str) {
 }
 
 // ============================================================================
+// INODE DELETION HANDLER (Task 5.6.6 — IN_IGNORED automatic)
+// ============================================================================
+
+/// When a watched inode is deleted, emit IN_IGNORED for every watch that
+/// references it and remove those watches from both the instance and the
+/// global index.
+///
+/// Returns the generated IN_IGNORED events so the caller can deliver them
+/// to userspace.
+pub fn handle_inode_deletion(inode_id: u64) -> Vec<FsEvent> {
+    let mut ignored_events = Vec::new();
+    let manager = &INOTIFY_MANAGER;
+
+    let mut targets_to_unindex: Vec<(InotifyWatchTarget, i32, i32)> = Vec::new();
+
+    {
+        let mut instances = manager.instances.lock();
+        for (&instance_id, instance) in instances.iter() {
+            let mut watches = instance.watches.lock();
+            let mut to_remove: Vec<i32> = Vec::new();
+
+            for (&wd, watch) in watches.iter() {
+                if watch.target.inode == inode_id && watch.active {
+                    to_remove.push(wd);
+                    ignored_events.push(FsEvent::new(wd, IN_IGNORED, 0, ""));
+                }
+            }
+
+            for wd in &to_remove {
+                if let Some(watch) = watches.remove(wd) {
+                    targets_to_unindex.push((watch.target, instance_id, *wd));
+                }
+            }
+        }
+    }
+
+    for (target, instance_id, wd) in &targets_to_unindex {
+        manager.unindex_watch(target, *instance_id, *wd);
+    }
+
+    if !ignored_events.is_empty() {
+        crate::serial_println!(
+            "[INOTIFY] handle_inode_deletion: inode={:#x} emitted {} IN_IGNORED events",
+            inode_id,
+            ignored_events.len()
+        );
+    }
+
+    ignored_events
+}
+
+// ============================================================================
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Generate unique cookie for move events
+/// Generate unique cookie for move events (delegates to next_cookie).
 fn generate_cookie() -> u32 {
-    static COOKIE: AtomicU32 = AtomicU32::new(1);
-    COOKIE.fetch_add(1, Ordering::Relaxed)
+    next_cookie()
 }
 
 fn resolve_watch_target_from_path(pathname: &str) -> Result<InotifyWatchTarget, &'static str> {

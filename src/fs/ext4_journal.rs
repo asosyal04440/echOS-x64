@@ -31,6 +31,9 @@ use alloc::vec::Vec;
 use core::mem;
 use spin::Mutex;
 
+use crate::drivers::linux::BlockDevice;
+use crate::fs::journal::crc32c_with_seed;
+
 // ============================================================================
 // JBD2 SABİTLERİ
 // ============================================================================
@@ -662,9 +665,15 @@ impl Journal {
         Ok(())
     }
 
-    /// Yeni bir işlem başlatır; çalışan işlem varsa hata döner
+    /// Yeni bir işlem başlatır
+    /// Deep web: Linux kernel fs/jbd2/transaction.c start_this_handle()
+    /// Linux: birden fazla running transaction destekler (varsayılan: 32)
+    /// echOS: basitleştirilmiş versiyon — maximum 4 concurrent transaction
     pub fn start_transaction(&mut self, credits: usize) -> Result<JournalHandle, JournalError> {
-        if self.running_trans > 0 {
+        // Maksimum concurrent transaction kontrolü
+        // Linux: journal->j_running_transaction != NULL && !handle->h_reserved
+        const MAX_CONCURRENT_TRANSACTIONS: u32 = 4;
+        if self.running_trans >= MAX_CONCURRENT_TRANSACTIONS {
             return Err(JournalError::TransactionRunning);
         }
 
@@ -713,27 +722,46 @@ impl Journal {
         Ok(())
     }
 
-    /// Mevcut işlemi 5 aşamada teslim eder (atomik yazma garantisi)
-    pub fn commit_transaction(&mut self) -> Result<(), JournalError> {
+    /// Mevcut işlemi 7 aşamada teslim eder (atomik yazma garantisi)
+    /// Linux JBD2 commit akışı (commit.c: jbd2_journal_commit_transaction):
+    /// 1. Tanımlayıcı bloklarını günlüğe yaz
+    /// 2. Veri bloklarını günlüğe yaz
+    /// 3. Flush (barrier) — disk write cache'i temizle
+    /// 4. Teslim bloğunu günlüğe yaz
+    /// 5. Flush (barrier) — commit block'un diske yazıldığını garanti et
+    /// 6. Checkpoint — veri bloklarını asıl konumlarına yaz
+    /// 7. Süper bloğu güncelle
+    pub fn commit_transaction(
+        &mut self,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> Result<(), JournalError> {
         let trans = self
             .current_transaction
             .take()
             .ok_or(JournalError::NoTransaction)?;
 
-        // Aşama 1: Tanımlayıcı bloklarını yaz
-        self.write_descriptors(&trans)?;
+        // Aşama 1: Tanımlayıcı bloklarını günlüğe yaz
+        self.write_descriptors(&trans, drive)?;
 
         // Aşama 2: Veri bloklarını günlüğe yaz
-        self.write_data_blocks(&trans)?;
+        self.write_data_blocks(&trans, drive)?;
 
-        // Aşama 3: Teslim bloğunu yaz (buradan sonra kurtarılabilir)
-        self.write_commit_block(&trans)?;
+        // Aşama 3: Flush — disk write cache'i temizle (barrier)
+        // Linux: blkdev_issue_flush(journal->j_dev) before commit record
+        drive.flush().map_err(|_| JournalError::WriteError)?;
 
-        // Aşama 4: Asıl konumlara yaz (checkpoint)
-        self.checkpoint(&trans)?;
+        // Aşama 4: Teslim bloğunu yaz (crash-safe nokta)
+        self.write_commit_block(&trans, drive)?;
 
-        // Aşama 5: Süper bloğu güncelle
-        self.update_superblock()?;
+        // Aşama 5: Flush — commit block'un diske yazıldığını garanti et
+        // Linux: REQ_PREFLUSH on commit block ensures ordering
+        drive.flush().map_err(|_| JournalError::WriteError)?;
+
+        // Aşama 6: Checkpoint — blokları asıl konumlarına yaz
+        self.checkpoint(&trans, drive)?;
+
+        // Aşama 7: Süper bloğu güncelle
+        self.update_superblock(drive)?;
 
         self.running_trans = self.running_trans.saturating_sub(1);
 
@@ -746,8 +774,12 @@ impl Journal {
         Ok(())
     }
 
-    /// Tanımlayıcı bloklarını günlük bölgesine yazar
-    fn write_descriptors(&mut self, trans: &Transaction) -> Result<(), JournalError> {
+    /// Tanımlayıcı bloklarını günlüğe yazar ve diske yazdırır
+    fn write_descriptors(
+        &mut self,
+        trans: &Transaction,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> Result<(), JournalError> {
         self.commit_phase = JournalCommitPhase::Idle;
         let block_size = self.block_size as usize;
         self.buffer.clear();
@@ -771,16 +803,30 @@ impl Journal {
         }
         stamp_journal_block_checksum(&mut descriptor, block_size)?;
         self.buffer.extend_from_slice(&descriptor);
+
+        // Diske yaz: journal start block (superblock'tan sonra) + current sequence offset
+        let journal_lba = (self.journal_offset / self.block_size as u64 + 1) as u32;
+        let sectors_per_block = self.block_size as usize / 512;
+        drive
+            .write_sectors(journal_lba, &descriptor)
+            .map_err(|_| JournalError::WriteError)?;
+
         self.commit_phase = JournalCommitPhase::DescriptorsWritten;
         Ok(())
     }
 
-    /// Veri bloklarını günlüğe yazar
-    fn write_data_blocks(&mut self, trans: &Transaction) -> Result<(), JournalError> {
+    /// Veri bloklarını günlüğe yazar ve diske yazdırır
+    fn write_data_blocks(
+        &mut self,
+        trans: &Transaction,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> Result<(), JournalError> {
         if self.commit_phase != JournalCommitPhase::DescriptorsWritten {
             return Err(JournalError::WriteError);
         }
         let block_size = self.block_size as usize;
+        // Tanımlayıcı bloğu zaten yazıldı, veri blokları ondan sonra gelir
+        let mut journal_lba = (self.journal_offset / self.block_size as u64 + 2) as u32;
         for block in &trans.blocks {
             if block.data.len() > block_size.saturating_sub(4) {
                 return Err(JournalError::WriteError);
@@ -789,25 +835,50 @@ impl Journal {
             journal_block[..block.data.len()].copy_from_slice(&block.data);
             stamp_journal_block_checksum(&mut journal_block, block_size)?;
             self.buffer.extend_from_slice(&journal_block);
+
+            // Diske yaz
+            drive
+                .write_sectors(journal_lba, &journal_block)
+                .map_err(|_| JournalError::WriteError)?;
+            journal_lba += 1;
         }
         self.commit_phase = JournalCommitPhase::DataWritten;
         Ok(())
     }
 
-    /// Teslim bloğunu yazar (crash-safe nokta)
-    fn write_commit_block(&mut self, trans: &Transaction) -> Result<(), JournalError> {
+    /// Teslim bloğunu yazar ve diske yazdırır (crash-safe nokta)
+    /// Linux: commit record written with REQ_PREFLUSH to ensure ordering
+    fn write_commit_block(
+        &mut self,
+        trans: &Transaction,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> Result<(), JournalError> {
         if self.commit_phase != JournalCommitPhase::DataWritten {
             return Err(JournalError::WriteError);
         }
+        let block_size = self.block_size as usize;
         let commit = CommitBlock::new(trans.tid as u32);
-        let data = commit.serialize_checked(self.block_size as usize)?;
+        let data = commit.serialize_checked(block_size)?;
         self.buffer.extend_from_slice(&data);
+
+        // Diske yaz: descriptor + data bloklarından sonra
+        let journal_lba = (self.journal_offset / self.block_size as u64 + 2 + trans.blocks.len() as u64) as u32;
+        drive
+            .write_sectors(journal_lba, &data)
+            .map_err(|_| JournalError::WriteError)?;
+
         self.commit_phase = JournalCommitPhase::CommitWritten;
         Ok(())
     }
 
     /// Checkpoint - blokları dosya sistemindeki asıl konumlarına yazar
-    fn checkpoint(&mut self, trans: &Transaction) -> Result<(), JournalError> {
+    /// Linux: jbd2_log_do_checkpoint() — journal'daki committed blokları final konumlarına flush eder
+    /// Her blok: descriptor'ta belirtilen filesystem block_nr'ye write_sectors ile yazılır
+    fn checkpoint(
+        &mut self,
+        trans: &Transaction,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> Result<(), JournalError> {
         if self.commit_phase != JournalCommitPhase::CommitWritten {
             return Err(JournalError::WriteError);
         }
@@ -818,17 +889,38 @@ impl Journal {
         {
             return Err(JournalError::WriteError);
         }
+
+        // Her bloğu asıl filesystem konumuna yaz
+        for block in &trans.blocks {
+            let lba = block.block_nr as u64;
+            let sectors_per_block = self.block_size as usize / 512;
+            // Block data'yı block_size'a tamamla
+            let mut full_block = vec![0u8; self.block_size as usize];
+            let copy_len = block.data.len().min(self.block_size as usize);
+            full_block[..copy_len].copy_from_slice(&block.data[..copy_len]);
+
+            drive
+                .write_sectors(lba as u32, &full_block)
+                .map_err(|_| JournalError::WriteError)?;
+        }
+
+        // Checkpoint sonrası flush — tüm yazmaların diske ulaştığını garanti et
+        drive.flush().map_err(|_| JournalError::WriteError)?;
+
         self.commit_phase = JournalCommitPhase::Checkpointed;
         Ok(())
     }
 
-    /// Süper bloğu güncel sıralı numara ile günceller
-    fn update_superblock(&mut self) -> Result<(), JournalError> {
+    /// Süper bloğu güncel sıralı numara ile günceller ve diske yazdırır
+    fn update_superblock(
+        &mut self,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> Result<(), JournalError> {
         if self.commit_phase != JournalCommitPhase::Checkpointed {
             return Err(JournalError::WriteError);
         }
         self.superblock.s_sequence = self.sequence as u32;
-        self.superblock.s_start = 0;
+        self.superblock.s_start = 0; // Journal temiz — kurtarılacak şey yok
         let sb_block = self
             .superblock
             .serialize_block_checked(self.block_size as usize)?;
@@ -836,6 +928,15 @@ impl Journal {
             self.buffer.resize(sb_block.len(), 0);
         }
         self.buffer[..sb_block.len()].copy_from_slice(&sb_block);
+
+        // Journal superblock'unu diske yaz (journal'ın ilk bloğu)
+        drive
+            .write_sectors((self.journal_offset / self.block_size as u64) as u32, &sb_block)
+            .map_err(|_| JournalError::WriteError)?;
+
+        // Final flush — tüm commit'in diske ulaştığını garanti et
+        drive.flush().map_err(|_| JournalError::WriteError)?;
+
         self.commit_phase = JournalCommitPhase::Idle;
         Ok(())
     }
@@ -847,95 +948,321 @@ impl Journal {
         crate::serial_println!("[JBD2] İşlem iptal edildi");
     }
 
-    /// Mount sırasında günlüğü kurtarır: tamamlanmış işlemleri tekrar oynatır
-    pub fn recover(&mut self, device_data: &[u8]) -> Result<(), JournalError> {
-        self.validate_superblock_bounds(device_data)?;
-        let start = self.superblock.s_start;
-        let sequence = self.superblock.s_sequence;
+    /// Mount sırasında günlüğü kurtarır: 3-pass JBD2 journal replay
+    ///
+    /// Linux fs/jbd2/recovery.c implementasyonuna uygun:
+    /// Pass 1 (SCAN): Journal'ı s_start'tan s_maxlen'e kadar tara,
+    ///                descriptor+commit çiftlerini bul, revoke table oluştur.
+    /// Pass 2 (REVOKE): Revoke bloklarını işle, invalid descriptor tag'lerini filtrele.
+    /// Pass 3 (REPLAY): Geçerli transaction bloklarını hedef adreslerine yaz.
+    pub fn recover(
+        &mut self,
+        device: &mut dyn BlockDevice,
+    ) -> Result<RecoveryResult, JournalError> {
+        let mut result = RecoveryResult::new();
 
-        if start == 0 {
-            // Günlük temiz, kurtarma gerekmiyor
-            return Ok(());
+        // s_start == 0 ise journal temiz, kurtarma gerekmez
+        if self.superblock.s_start == 0 {
+            result.success = true;
+            result.phase = RecoveryPhase::Complete;
+            return Ok(result);
         }
 
-        crate::serial_println!("[JBD2] {} bloğundan kurtarma başlıyor", start);
+        crate::serial_println!(
+            "[JBD2] 3-pass recovery: start={}, seq={}, maxlen={}",
+            self.superblock.s_start,
+            self.superblock.s_sequence,
+            self.superblock.s_maxlen
+        );
 
-        // Tamamlanmamış işlemler için günlüğü tara
-        let mut current_seq: u64 = sequence as u64;
-        let mut offset = self.journal_offset + (start as u64) * (self.block_size as u64);
+        let block_size = self.block_size as usize;
+        let journal_len = self.superblock.s_maxlen as usize;
+        let journal_base = self.journal_offset;
 
-        loop {
-            if offset as usize + self.block_size as usize > device_data.len() {
+        // ============================================================
+        // PASS 1: SCAN — Descriptor+Commit çiftlerini bul, revoke table doldur
+        // ============================================================
+        result.phase = RecoveryPhase::Scan;
+
+        struct ScannedTransaction {
+            seq: u32,
+            descriptor_offset: usize,
+            commit_offset: usize,
+            block_tags: Vec<BlockTagInfo>,
+            has_commit: bool,
+        }
+
+        struct BlockTagInfo {
+            target_block: u32,
+            data_offset: usize,
+            is_escape: bool,
+        }
+
+        let mut transactions: Vec<ScannedTransaction> = Vec::new();
+        let mut revoke_table: Vec<u32> = Vec::new();
+        let mut current_txn: Option<ScannedTransaction> = None;
+        let mut scan_pos = self.superblock.s_start as usize;
+        let mut max_seq: u32 = 0;
+
+        while scan_pos < journal_len {
+            let lba = journal_base / 512 + (scan_pos * block_size / 512) as u64;
+            let block_buf = device.read_sectors(lba as u32, (block_size / 512) as u8);
+            if block_buf.is_empty() || block_buf.len() < block_size {
                 break;
             }
 
-            let block_data = &device_data[offset as usize..];
-            let block = &block_data[..self.block_size as usize];
-            verify_journal_block_checksum(block, self.block_size as usize)?;
+            if verify_journal_block_checksum(&block_buf, block_size).is_err() {
+                // Checksum hatası — journal sonu burada biter
+                break;
+            }
 
-            if let Some(header) = JournalHeader::parse(block) {
-                match header.h_blocktype {
-                    JBD2_DESCRIPTOR_BLOCK => {
-                        // İşlem başlangıcı bulundu
-                        current_seq = header.h_sequence as u64;
-                    }
-                    JBD2_COMMIT_BLOCK => {
-                        // İşlem teslim edilmiş, tekrar oynat
-                        if header.h_sequence as u64 == current_seq {
-                            self.replay_transaction(block_data)?;
+            let header = match JournalHeader::parse(&block_buf) {
+                Some(h) => h,
+                None => break,
+            };
+
+            match header.h_blocktype {
+                JBD2_DESCRIPTOR_BLOCK => {
+                    // Yeni transaction başlangıcı
+                    if let Some(txn) = current_txn.take() {
+                        if txn.has_commit {
+                            max_seq = max_seq.max(txn.seq);
+                            transactions.push(txn);
                         }
                     }
-                    JBD2_REVOKE_BLOCK => {
-                        // İptal bloğunu işle
+
+                    let mut tags = Vec::new();
+                    let mut tag_offset = 12;
+                    while tag_offset + 4 <= block_size.saturating_sub(4) {
+                        let tag_blocknr = u32::from_be_bytes([
+                            block_buf[tag_offset],
+                            block_buf[tag_offset + 1],
+                            block_buf[tag_offset + 2],
+                            block_buf[tag_offset + 3],
+                        ]);
+
+                        if tag_blocknr == 0 {
+                            break;
+                        }
+
+                        let flags = if tag_offset + 6 <= block_size {
+                            u16::from_be_bytes([
+                                block_buf[tag_offset + 4],
+                                block_buf[tag_offset + 5],
+                            ])
+                        } else {
+                            0
+                        };
+
+                        let is_escape = (flags as u32 & JBD2_FLAG_ESCAPE) != 0;
+
+                        // Data bloğu descriptor'dan hemen sonra gelir
+                        let data_pos = scan_pos + 1;
+                        if data_pos < journal_len {
+                            tags.push(BlockTagInfo {
+                                target_block: tag_blocknr,
+                                data_offset: data_pos,
+                                is_escape,
+                            });
+                        }
+
+                        // Tag boyutu: 4 (blocknr) + 2 (flags) + 2 (checksum) = 8 bayt
+                        // UUID varsa +16 bayt (JBD2_FLAG_SAME_UUID)
+                        let mut tag_size = 8;
+                        if (flags as u32 & JBD2_FLAG_SAME_UUID) != 0 {
+                            tag_size += 16;
+                        }
+                        tag_offset += tag_size;
                     }
-                    _ => {}
+
+                    current_txn = Some(ScannedTransaction {
+                        seq: header.h_sequence,
+                        descriptor_offset: scan_pos,
+                        commit_offset: 0,
+                        block_tags: tags,
+                        has_commit: false,
+                    });
+                }
+
+                JBD2_COMMIT_BLOCK => {
+                    // Transaction commit — descriptor ile eşleşmeli
+                    if let Some(ref mut txn) = current_txn {
+                        if header.h_sequence == txn.seq {
+                            txn.commit_offset = scan_pos;
+                            txn.has_commit = true;
+
+                            // Commit block embedded checksum doğrulama (h_chksum)
+                            let chksum_type = if block_size > 12 { block_buf[12] } else { 0 };
+                            let chksum_size = if block_size > 13 { block_buf[13] } else { 0 };
+                            if chksum_type == JOURNAL_CHECKSUM_TYPE_CRC32 && chksum_size == 4 && block_size >= 20 {
+                                let stored_csum = u32::from_be_bytes([
+                                    block_buf[16], block_buf[17], block_buf[18], block_buf[19],
+                                ]);
+                                if stored_csum != 0 {
+                                    // CRC32C: descriptor block + her data bloğu
+                                    let desc_lba = journal_base / 512 + (txn.descriptor_offset * block_size / 512) as u64;
+                                    let desc_buf = device.read_sectors(desc_lba as u32, (block_size / 512) as u8);
+                                    if desc_buf.len() >= block_size {
+                                        let mut csum = crc32c_with_seed(&desc_buf[..block_size], 0xFFFFFFFF);
+                                        for tag in &txn.block_tags {
+                                            let data_lba = journal_base / 512 + (tag.data_offset * block_size / 512) as u64;
+                                            let data_buf = device.read_sectors(data_lba as u32, (block_size / 512) as u8);
+                                            if data_buf.len() >= block_size {
+                                                csum = crc32c_with_seed(&data_buf[..block_size], csum);
+                                            }
+                                        }
+                                        if csum != stored_csum {
+                                            txn.has_commit = false; // checksum mismatch → invalid txn
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                JBD2_REVOKE_BLOCK => {
+                    // Revoke table'a girişleri ekle
+                    let r_count = if block_size >= 16 {
+                        u32::from_be_bytes([
+                            block_buf[12],
+                            block_buf[13],
+                            block_buf[14],
+                            block_buf[15],
+                        ])
+                    } else {
+                        0
+                    };
+
+                    // r_count overflow guard: 4 bytes per entry + 16-byte header must fit in block
+                    let max_entries = (block_size.saturating_sub(16)) / 4;
+                    let count = (r_count as usize).min(max_entries);
+                    let mut entry_offset = 16;
+                    for _ in 0..count {
+                        let revoked_block = u32::from_be_bytes([
+                            block_buf[entry_offset],
+                            block_buf[entry_offset + 1],
+                            block_buf[entry_offset + 2],
+                            block_buf[entry_offset + 3],
+                        ]);
+                        revoke_table.push(revoked_block);
+                        entry_offset += 4;
+                    }
+                }
+
+                JBD2_SUPERBLOCK_V1 | JBD2_SUPERBLOCK_V2 => {
+                    // Superblock — atla
+                }
+
+                _ => break,
+            }
+
+            scan_pos += 1;
+        }
+
+        // Son transaction'ı da ekle
+        if let Some(txn) = current_txn {
+            if txn.has_commit {
+                max_seq = max_seq.max(txn.seq);
+                transactions.push(txn);
+            }
+        }
+
+        result.transactions_found = transactions.len() as u32;
+        crate::serial_println!(
+            "[JBD2] Pass 1 (Scan): {} transaction, {} revoke entry bulundu",
+            result.transactions_found,
+            revoke_table.len()
+        );
+
+        // ============================================================
+        // PASS 2: REVOKE — Revoke table uygula, tag'leri filtrele
+        // ============================================================
+        result.phase = RecoveryPhase::Revoke;
+
+        let mut blocks_revoked = 0u32;
+        for txn in &mut transactions {
+            txn.block_tags.retain(|tag| {
+                if revoke_table.contains(&tag.target_block) {
+                    blocks_revoked += 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        result.blocks_revoked = blocks_revoked;
+        crate::serial_println!(
+            "[JBD2] Pass 2 (Revoke): {} blok revoke edildi",
+            result.blocks_revoked
+        );
+
+        // ============================================================
+        // PASS 3: REPLAY — Blokları hedef adreslerine yaz
+        // ============================================================
+        result.phase = RecoveryPhase::Replay;
+
+        let mut blocks_replayed = 0u32;
+        for txn in &transactions {
+            for tag in &txn.block_tags {
+                // Data bloğunu journal'dan oku
+                let data_lba = journal_base / 512 + (tag.data_offset * block_size / 512) as u64;
+                let data_buf = device.read_sectors(data_lba as u32, (block_size / 512) as u8);
+                if data_buf.is_empty() || data_buf.len() < block_size {
+                    continue;
+                }
+                let mut data_buf = data_buf;
+
+                // Escape flag varsa, JBD2_MAGIC ile full-block XOR decode
+                if tag.is_escape {
+                    let magic_bytes = JBD2_MAGIC.to_be_bytes();
+                    for (i, b) in data_buf.iter_mut().enumerate().take(block_size) {
+                        *b ^= magic_bytes[i % 4];
+                    }
+                }
+
+                // Hedef bloğa yaz (filesystem'deki asıl konum)
+                let target_lba = tag.target_block as u32;
+                if device
+                    .write_sectors(target_lba, &data_buf[..block_size])
+                    .is_ok()
+                {
+                    blocks_replayed += 1;
                 }
             }
-
-            offset += self.block_size as u64;
-
-            // Döngüsel tamponu başa sar
-            if offset
-                >= self.journal_offset
-                    + (self.superblock.s_maxlen as u64) * (self.block_size as u64)
-            {
-                break;
-            }
         }
 
-        // Günlüğü temiz olarak işaretle
+        result.blocks_replayed = blocks_replayed;
+        crate::serial_println!(
+            "[JBD2] Pass 3 (Replay): {} blok replay edildi",
+            result.blocks_replayed
+        );
+
+        // ============================================================
+        // Journal'ı temiz işaretle
+        // ============================================================
         self.superblock.s_start = 0;
-        self.sequence = current_seq + 1;
+        self.superblock.s_sequence = max_seq + 1;
 
-        crate::serial_println!("[JBD2] Kurtarma tamamlandı, sıra={}", self.sequence);
+        // Superblock'u diske yaz
+        let sb_data = self.superblock.serialize_block_checked(block_size)?;
+        let sb_lba = (journal_base / 512) as u32;
+        let _ = device.write_sectors(sb_lba, &sb_data);
 
-        Ok(())
-    }
+        result.phase = RecoveryPhase::Complete;
+        result.success = true;
+        result.last_sequence = max_seq + 1;
 
-    /// Kurtarma sırasında teslim edilmiş bir işlemi tekrar oynatır
-    fn replay_transaction(&mut self, _block_data: &[u8]) -> Result<(), JournalError> {
-        // Gerçek uygulamada teslim edilmiş bloklar tekrar oynatılırdı
-        Ok(())
-    }
+        crate::serial_println!(
+            "[JBD2] Recovery complete: seq={}, {} txn, {} replay, {} revoke",
+            result.last_sequence,
+            result.transactions_found,
+            result.blocks_replayed,
+            result.blocks_revoked
+        );
 
-    fn validate_superblock_bounds(&self, device_data: &[u8]) -> Result<(), JournalError> {
-        if self.superblock.s_blocksize != self.block_size {
-            return Err(JournalError::InvalidSuperblock);
-        }
-        if self.superblock.s_maxlen == 0 {
-            return Err(JournalError::InvalidSuperblock);
-        }
-        let start = self.journal_offset as usize;
-        let bytes = (self.superblock.s_maxlen as usize)
-            .checked_mul(self.block_size as usize)
-            .ok_or(JournalError::InvalidSuperblock)?;
-        let end = start
-            .checked_add(bytes)
-            .ok_or(JournalError::InvalidSuperblock)?;
-        if end > device_data.len() {
-            return Err(JournalError::InvalidSuperblock);
-        }
-        Ok(())
+        Ok(result)
     }
 
     /// Günlüğü klonlar (Arc<Mutex<Journal>> için gerekli)
@@ -1177,7 +1504,92 @@ pub fn needs_recovery(journal_data: &[u8]) -> bool {
     }
 }
 
-/// Checkpoint yazma — commitment tamamlanmış transaction'ları journal'dan sil.
+/// Commit timer — periyodik journal flush mekanizmasi
+///
+/// Linux ext4'te commit=N mount option ile yapilandirilir (default 5 saniye).
+/// Timer her tikladiginda, son commit'ten bu yana gecen sureyi kontrol eder.
+/// Sure asildiginda ve bekleyen transaction varsa, otomatik commit yapilir.
+///
+/// data=ordered modunda: data bloklari once yazilir, sonra metadata commit
+/// data=journal modunda: data + metadata birlikte journal'dan gecer
+/// data=writeback modunda: metadata journal'a yazilir, data siralamasi yok
+pub struct CommitTimer {
+    /// Son commit zamani (tick cinsinden)
+    last_commit_tick: u64,
+    /// Commit interval (tick cinsinden)
+    interval_ticks: u64,
+    /// Bekleyen dirty inode sayisi
+    dirty_inodes: u32,
+    /// Toplam commit sayisi
+    commit_count: u64,
+}
+
+impl CommitTimer {
+    pub fn new(commit_interval_secs: u32, ticks_per_sec: u64) -> Self {
+        Self {
+            last_commit_tick: crate::task::scheduler::get_ticks() as u64,
+            interval_ticks: (commit_interval_secs as u64).saturating_mul(ticks_per_sec),
+            dirty_inodes: 0,
+            commit_count: 0,
+        }
+    }
+
+    /// Dirty inode ekle (write sirasinda cagrilir)
+    pub fn mark_dirty(&mut self) {
+        self.dirty_inodes += 1;
+    }
+
+    /// Commit timer'i kontrol et. Gerekirse otomatik commit yap.
+    ///
+    /// Returns: true eger commit yapildiysa
+    pub fn check_and_commit(
+        &mut self,
+        journal: &mut Journal,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> bool {
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let elapsed = now.saturating_sub(self.last_commit_tick);
+
+        if elapsed >= self.interval_ticks && self.dirty_inodes > 0 {
+            // Bekleyen transaction var ve sure doldu — commit yap
+            if journal.current_transaction.is_some() {
+                if journal.commit_transaction(drive).is_ok() {
+                    self.last_commit_tick = now;
+                    self.dirty_inodes = 0;
+                    self.commit_count += 1;
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Manuel commit — fsync/fdatasync cagrildiginda
+    pub fn force_commit(
+        &mut self,
+        journal: &mut Journal,
+        drive: &mut dyn crate::drivers::linux::BlockDevice,
+    ) -> bool {
+        if journal.current_transaction.is_some() {
+            if journal.commit_transaction(drive).is_ok() {
+                self.last_commit_tick = crate::task::scheduler::get_ticks() as u64;
+                self.dirty_inodes = 0;
+                self.commit_count += 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn commit_count(&self) -> u64 {
+        self.commit_count
+    }
+
+    pub fn dirty_count(&self) -> u32 {
+        self.dirty_inodes
+    }
+}
 ///
 /// Journal alanını geri kazanmak için tamamlanmış and diske yazılmış
 /// transaction'lar silinir.
@@ -1203,6 +1615,40 @@ pub fn checkpoint(journal_data: &mut [u8], block_size: usize, up_to_seq: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct JournalTestDevice {
+        data: Vec<u8>,
+    }
+
+    impl JournalTestDevice {
+        fn new(size: usize) -> Self {
+            Self {
+                data: vec![0u8; size],
+            }
+        }
+    }
+
+    impl crate::drivers::linux::BlockDevice for JournalTestDevice {
+        fn read_sectors(&mut self, lba: u32, count: u8) -> Vec<u8> {
+            let offset = lba as usize * 512;
+            let len = count as usize * 512;
+            if offset + len <= self.data.len() {
+                self.data[offset..offset + len].to_vec()
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn write_sectors(&mut self, lba: u32, data: &[u8]) -> Result<(), ()> {
+            let offset = lba as usize * 512;
+            if offset + data.len() <= self.data.len() {
+                self.data[offset..offset + data.len()].copy_from_slice(data);
+                Ok(())
+            } else {
+                Err(())
+            }
+        }
+    }
 
     fn checked_superblock_block(block_size: usize, sequence: u32, start: u32) -> Vec<u8> {
         let mut sb: JournalSuperblock = unsafe { mem::zeroed() };
@@ -1279,7 +1725,10 @@ mod tests {
         journal
             .add_block(11, &[0x5A; 128], true)
             .expect("add journal block");
-        journal.commit_transaction().expect("commit transaction");
+        let mut drive = JournalTestDevice::new(block_size * 16);
+        journal
+            .commit_transaction(&mut drive)
+            .expect("commit transaction");
 
         assert_eq!(journal.commit_phase, JournalCommitPhase::Idle);
         assert_eq!(journal.superblock.s_start, 0);

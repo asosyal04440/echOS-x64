@@ -102,6 +102,7 @@ use super::{
     allocator, cpu, drivers, ecosystem_exactness, fs, random, security, serial_print,
     serial_println, tty,
 };
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
@@ -120,7 +121,9 @@ use echos_sdk_sys::{
     MAX_SCENE_OPS, MAX_SERVICE_NOTIFICATION_ITEMS,
 };
 use lazy_static::lazy_static;
-use rcore_fs::vfs::{FileType, FsError, INode};
+use crate::fs::FsError;
+use rcore_fs::vfs::FsError as RcFsError;
+use rcore_fs::vfs::{FileType, INode};
 use spin::Mutex;
 #[cfg(target_os = "uefi")]
 use uefi::table::runtime::VariableVendor;
@@ -171,6 +174,15 @@ const EOPNOTSUPP: usize = 95;
 const ENOTCONN: usize = 107;
 const EAGAIN: usize = 11;
 const EFBIG: usize = 27;
+const EBUSY: usize = 16;
+const EXDEV: usize = 18;
+const EROFS: usize = 30;
+const ENAMETOOLONG: usize = 36;
+const ELOOP: usize = 40;
+const EOVERFLOW: usize = 75;
+const ESTALE: usize = 116;
+const ERANGE: usize = 34;
+const ESPIPE: usize = 29;
 
 // Futex wait queue entry
 struct FutexWaiter {
@@ -257,10 +269,13 @@ const SYS_MEMFD_CREATE: usize = 319;
 
 // Dosya Sistemi Syscall'ları
 // Bu çağrılar VFS (Virtual File System) katmanı üzerinden F2FS'e yönlendirilir.
+const SYS_SENDFILE: usize = 40;
+const SYS_COPY_FILE_RANGE: usize = 326;
 const SYS_MKDIR: usize = 83;
 const SYS_RMDIR: usize = 84;
 const SYS_UNLINK: usize = 87;
 const SYS_RENAME: usize = 82;
+const SYS_RENAMEAT2: usize = 264;
 const SYS_CHMOD: usize = 90;
 const SYS_FCHMOD: usize = 91;
 const SYS_CHOWN: usize = 92;
@@ -273,13 +288,28 @@ const SYS_SYMLINK: usize = 88;
 const SYS_READLINK: usize = 89;
 const SYS_CREAT: usize = 85;
 const SYS_STATX: usize = 332;
+const SYS_FSYNC: usize = 74;
+const SYS_FDATASYNC: usize = 75;
+const SYS_GETDENTS64: usize = 217;
+const SYS_UTIMENSAT: usize = 280;
+const SYS_FACCESSAT: usize = 269;
+const SYS_STATFS: usize = 137;
+const SYS_FSTATFS: usize = 138;
+const SYS_LINKAT: usize = 265;
+const SYS_READLINKAT: usize = 267;
+const SYS_SYMLINKAT: usize = 266;
+const SYS_SYNCFS: usize = 306;
+const SYS_MOUNT: usize = 165;
+const SYS_UMOUNT2: usize = 166;
 
 const SYS_GETPID: usize = 39;
 const SYS_EXECVE: usize = 59;
 const SYS_FORK: usize = 57;
 const SYS_WAIT4: usize = 61;
+const SYS_UMASK: usize = 60;
 const SYS_UNAME: usize = 63;
 const SYS_GETCWD: usize = 79;
+const SYS_CHDIR: usize = 80;
 const SYS_GETRUSAGE: usize = 98;
 const SYS_SYSINFO: usize = 99;
 const SYS_TIMES: usize = 100;
@@ -300,16 +330,69 @@ const SYS_IO_URING_SETUP: usize = 425;
 const SYS_IO_URING_ENTER: usize = 426;
 const SYS_FUTEX_WAITV: usize = 449;
 
+// O_* sabitleri (open/openat flag'leri)
+const O_APPEND: usize = 0o2000;
+const O_DIRECTORY: usize = 0o200000;
+const O_NOFOLLOW: usize = 0o400000;
+const O_EXCL: usize = 0o200;
+const O_CLOEXEC: usize = 0o2000000;
+const O_SYNC: usize = 0o4010000;
+const O_DSYNC: usize = 0o10000;
+const O_RSYNC: usize = 0o4010000;
+
 // AT_* sabitleri (openat, newfstatat, faccessat için)
 const AT_FDCWD: isize = -100;
 const AT_EMPTY_PATH: usize = 0x1000;
 const AT_SYMLINK_NOFOLLOW: usize = 0x100;
+const AT_REMOVEDIR: usize = 0x200;
+const AT_EACCESS: usize = 0x200;
+const AT_SYMLINK_FOLLOW: usize = 0x400;
+
+// renameat2 flags
+const RENAME_NOREPLACE: usize = 1;
+const RENAME_EXCHANGE: usize = 2;
+const RENAME_WHITEOUT: usize = 4;
+
+// statx() mask sabitleri
+const STATX_TYPE: usize = 0x0001;
+const STATX_MODE: usize = 0x0002;
+const STATX_NLINK: usize = 0x0004;
+const STATX_UID: usize = 0x0008;
+const STATX_GID: usize = 0x0010;
+const STATX_ATIME: usize = 0x0020;
+const STATX_MTIME: usize = 0x0040;
+const STATX_CTIME: usize = 0x0080;
+const STATX_INO: usize = 0x0100;
+const STATX_SIZE: usize = 0x0200;
+const STATX_BLOCKS: usize = 0x0400;
+const STATX_BTIME: usize = 0x0800;
+const STATX_ALL: usize = 0x0FFF;
+
+// utimensat flag sabitleri
+const UTIME_NOW: usize = 0x3FFFFFFF;
+const UTIME_OMIT: usize = 0x3FFFFFFE;
 
 // access() mode sabitleri
 const F_OK: usize = 0;
 const R_OK: usize = 4;
 const W_OK: usize = 2;
 const X_OK: usize = 1;
+
+// fcntl command sabitleri (Linux uyumlu)
+const F_DUPFD: usize = 0;
+const F_GETFD: usize = 1;
+const F_SETFD: usize = 2;
+const F_GETFL: usize = 3;
+const F_SETFL: usize = 4;
+const F_GETLK: usize = 5;
+const F_SETLK: usize = 6;
+const F_SETLKW: usize = 7;
+// OFD (open file description) lock commands (Linux 3.15+)
+const F_OFD_GETLK: usize = 36;
+const F_OFD_SETLK: usize = 37;
+const F_OFD_SETLKW: usize = 38;
+// FD_CLOEXEC flag (F_GETFD/F_SETFD için)
+const FD_CLOEXEC_FLAG: usize = 1;
 
 // ============================================================
 // echOS Grafik / Pencere Sunucusu Syscall'ları (Faz 5)
@@ -565,8 +648,14 @@ enum FdKind {
 
 static FD_INIT: AtomicBool = AtomicBool::new(false);
 static FD_TABLE: Mutex<[Option<FdKind>; MAX_FDS]> = Mutex::new([None; MAX_FDS]);
+/// FD_CLOEXEC flag'leri: true → exec() sırasında otomatik kapatılır
+static FD_CLOEXEC: Mutex<[bool; MAX_FDS]> = Mutex::new([false; MAX_FDS]);
+static CURRENT_WORKING_DIR: Mutex<String> = Mutex::new(String::new());
+/// Process umask: yeni dosyalardan kaldırılacak permission bitleri (varsayılan: 022)
+static PROCESS_UMASK: Mutex<usize> = Mutex::new(0o022);
 lazy_static! {
     pub static ref FILE_TABLE: Mutex<Vec<Option<FileState>>> = Mutex::new(vec![None; MAX_FDS]);
+    pub static ref FILE_GENERATION: Mutex<Vec<u64>> = Mutex::new(vec![0; MAX_FDS]);
     static ref RING_TABLE: Mutex<alloc::collections::BTreeMap<usize, LockFreeIoUring>> =
         Mutex::new(alloc::collections::BTreeMap::new());
 }
@@ -578,6 +667,9 @@ pub struct FileState {
     pub offset: usize,
     pub size: usize,
     pub is_hello: bool,
+    pub generation: u64,
+    pub flags: usize, // O_RDONLY/O_WRONLY/O_RDWR | O_APPEND/O_SYNC/O_DSYNC/O_NONBLOCK
+    pub path: String, // debugging / getdents için
 }
 
 #[derive(Clone)]
@@ -621,6 +713,23 @@ struct Stat {
     __unused: [i64; 3],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Statfs {
+    f_type: u64,
+    f_bsize: u64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_fsid: [u64; 2],
+    f_namelen: u64,
+    f_frsize: u64,
+    f_flags: u64,
+    f_spare: [u64; 4],
+}
+
 /// Hata kodunu Linux errno formatına dönüştürür.
 ///
 /// Linux'ta başarısız syscall'lar negatif değer döner:
@@ -642,13 +751,105 @@ fn unsupported_syscall_number(number: usize) -> usize {
     errno(ENOSYS)
 }
 
-fn vfs_errno(err: FsError) -> usize {
+fn vfs_errno(err: impl Into<FsError>) -> usize {
+    let err: FsError = err.into();
     match err {
-        FsError::EntryNotFound => errno(ENOENT),
-        FsError::NotFile | FsError::IsDir => errno(EINVAL),
+        FsError::NotFound => errno(ENOENT),
+        FsError::NotFile | FsError::IsDirectory => errno(EINVAL),
+        FsError::NotDirectory => errno(ENOTDIR),
         FsError::NoDevice => errno(EIO),
-        FsError::InvalidParam => errno(EINVAL),
+        FsError::InvalidPath => errno(EINVAL),
+        FsError::AlreadyExists => errno(EEXIST),
+        FsError::NameTooLong | FsError::ComponentTooLong => errno(ENAMETOOLONG),
+        FsError::SymlinkLoop => errno(ELOOP),
+        FsError::CrossDevice => errno(EXDEV),
+        FsError::ReadOnlyFs => errno(EROFS),
+        FsError::PermissionDenied => errno(EACCES),
+        FsError::Busy => errno(EBUSY),
+        FsError::NotEmpty => errno(ENOTEMPTY),
+        FsError::StaleHandle => errno(ESTALE),
+        FsError::Interrupted => errno(EINTR),
+        FsError::WouldBlock => errno(EAGAIN),
+        FsError::NoSpace => errno(ENOSPC),
+        FsError::NoMemory => errno(ENOMEM),
+        FsError::NotSupported | FsError::UnsupportedSymlink => errno(EOPNOTSUPP),
         _ => errno(EIO),
+    }
+}
+
+/// En son `/` ayracına göre yolu parent + name olarak böler.
+/// Örn: "/a/b/c" -> ("/a/b", "c"), "/foo" -> ("/", "foo"), "bar" -> (".", "bar")
+fn split_path(path: &str) -> (&str, &str) {
+    if let Some(pos) = path.rfind('/') {
+        let parent = if pos == 0 { "/" } else { &path[..pos] };
+        let name = &path[pos + 1..];
+        (parent, name)
+    } else {
+        (".", path)
+    }
+}
+
+/// dirfd bazlı path çözümleme (APUE §3.3 openat).
+///
+/// 1. Mutlak path → dirfd yoksayılır, path aynen döner.
+/// 2. Göreceli + AT_FDCWD → CURRENT_WORKING_DIR önüne eklenir.
+/// 3. Göreceli + dirfd (≥0) → dirfd'deki dizin path'i alınır, önüne eklenir.
+///    dirfd File değilse ya da dizin değilse path olduğu gibi döner (caller hata yönetir).
+fn resolve_path_at(dirfd: usize, path: &str) -> String {
+    if path.starts_with('/') {
+        return path.to_string();
+    }
+    let dirfd_isize = dirfd as isize;
+    if dirfd_isize == AT_FDCWD {
+        let cwd = CURRENT_WORKING_DIR.lock();
+        if cwd.is_empty() || cwd.as_str() == "/" {
+            return path.to_string();
+        }
+        let mut result = cwd.clone();
+        if !result.ends_with('/') {
+            result.push('/');
+        }
+        result.push_str(path);
+        result
+    } else {
+        // dirfd >= 0: FILE_TABLE'dan path al
+        let files = FILE_TABLE.lock();
+        if let Some(Some(state)) = files.get(dirfd) {
+            let dir_path = state.path.clone();
+            if !dir_path.starts_with('/') {
+                return path.to_string();
+            }
+            let mut result = dir_path;
+            if !result.ends_with('/') {
+                result.push('/');
+            }
+            result.push_str(path);
+            result
+        } else {
+            path.to_string()
+        }
+    }
+}
+
+/// Symlink hedefini okur, ELOOP döndürebilir.
+fn read_symlink_target_f2fs(path: &str) -> Result<String, usize> {
+    match fs::f2fs::read_link(path) {
+        Ok(target) => {
+            if target.is_empty() {
+                Err(errno(ENOENT))
+            } else {
+                Ok(target)
+            }
+        }
+        Err(e) => {
+            let fe: FsError = e.into();
+            match fe {
+                FsError::SymlinkLoop => Err(errno(ELOOP)),
+                FsError::NotFound => Err(errno(ENOENT)),
+                FsError::NotFile => Err(errno(EINVAL)),
+                _ => Err(vfs_errno(fe)),
+            }
+        }
     }
 }
 
@@ -740,6 +941,8 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_SPLICE => sys_splice(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYS_TEE => sys_tee(args[0], args[1], args[2], args[3]),
         SYS_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3]),
+        SYS_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
+        SYS_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYS_MEMFD_CREATE => sys_memfd_create(args[0], args[1]),
         SYS_SELECT => sys_select(args[0], args[1], args[2], args[3], args[4]),
         SYS_SCHED_YIELD => sys_sched_yield(),
@@ -789,8 +992,10 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_EXECVE => process_bridge::sys_execve(args[0], args[1], args[2]),
         SYS_FORK => process_bridge::sys_fork(),
         SYS_WAIT4 => process_bridge::sys_wait4(args[0], args[1], args[2], args[3]),
+        SYS_UMASK => sys_umask(args[0]),
         SYS_UNAME => sys_uname(args[0]),
         SYS_GETCWD => sys_getcwd(args[0], args[1]),
+        SYS_CHDIR => sys_chdir(args[0]),
         SYS_GETRUSAGE => sys_getrusage(args[0], args[1]),
         SYS_SYSINFO => sys_sysinfo(args[0]),
         SYS_TIMES => sys_times(args[0]),
@@ -801,6 +1006,7 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_RMDIR => sys_rmdir(args[0]),
         SYS_UNLINK => sys_unlink(args[0]),
         SYS_RENAME => sys_rename(args[0], args[1]),
+        SYS_RENAMEAT2 => sys_renameat2(args[0], args[1], args[2], args[3], args[4]),
         SYS_CHMOD => sys_chmod(args[0], args[1]),
         SYS_FCHMOD => sys_fchmod(args[0], args[1]),
         SYS_CHOWN => sys_chown(args[0], args[1], args[2]),
@@ -811,6 +1017,20 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_LINK => sys_link(args[0], args[1]),
         SYS_SYMLINK => sys_symlink(args[0], args[1]),
         SYS_READLINK => sys_readlink(args[0], args[1], args[2]),
+        SYS_FSYNC => sys_fsync(args[0]),
+        SYS_FDATASYNC => sys_fdatasync(args[0]),
+        SYS_FCNTL => sys_fcntl(args[0], args[1], args[2]),
+        SYS_GETDENTS64 => sys_getdents64(args[0], args[1], args[2]),
+        SYS_UTIMENSAT => sys_utimensat(args[0], args[1], args[2], args[3]),
+        SYS_FACCESSAT => sys_faccessat(args[0], args[1], args[2], args[3]),
+        SYS_STATFS => sys_statfs(args[0], args[1]),
+        SYS_FSTATFS => sys_fstatfs(args[0], args[1]),
+        SYS_LINKAT => sys_linkat(args[0], args[1], args[2], args[3], args[4]),
+        SYS_READLINKAT => sys_readlinkat(args[0], args[1], args[2], args[3]),
+        SYS_SYMLINKAT => sys_symlinkat(args[0], args[1], args[2]),
+        SYS_SYNCFS => sys_syncfs(args[0]),
+        SYS_MOUNT => sys_mount(args[0], args[1], args[2], args[3], args[4]),
+        SYS_UMOUNT2 => sys_umount2(args[0], args[1]),
 
         // Signal syscalls
         SYS_RT_SIGACTION => sys_rt_sigaction(args[0], args[1], args[2], args[3]),
@@ -1002,7 +1222,49 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
         }
         Some(FdKind::Null) => count,
         Some(FdKind::Zero) => count,
-        Some(FdKind::File) => errno(EBADF),
+        Some(FdKind::File) => {
+            let (inode, offset, size, flags) = {
+                let files = FILE_TABLE.lock();
+                let Some(Some(state)) = files.get(fd) else {
+                    return errno(EBADF);
+                };
+                (
+                    state.inode.clone(),
+                    state.offset,
+                    state.size,
+                    state.flags,
+                )
+            };
+            // O_APPEND: her write öncesi offset'i EOF'a ayarla
+            let write_offset = if flags & O_APPEND != 0 {
+                size
+            } else {
+                offset
+            };
+            let written = match fs::vfs_write_at(&inode, write_offset, bytes) {
+                Ok(value) => value,
+                Err(err) => return vfs_errno(err),
+            };
+            let mut files = FILE_TABLE.lock();
+            let gen = FILE_GENERATION.lock();
+            let current_gen = if fd < gen.len() { gen[fd] } else { 0 };
+            let saved_gen = if let Some(Some(s)) = files.get(fd) {
+                s.generation
+            } else {
+                return errno(EBADF);
+            };
+            if current_gen != saved_gen {
+                return errno(EBADF);
+            }
+            drop(gen);
+            if let Some(Some(state)) = files.get_mut(fd) {
+                state.offset = write_offset.saturating_add(written);
+                if write_offset.saturating_add(written) > state.size {
+                    state.size = write_offset.saturating_add(written);
+                }
+            }
+            written
+        }
         _ => errno(EBADF),
     }
 }
@@ -1072,6 +1334,18 @@ fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
                 );
             }
             let mut files = FILE_TABLE.lock();
+            // Generation kontrolü: fd arada kapatılıp yeniden açıldı mı?
+            let gen = FILE_GENERATION.lock();
+            let current_gen = if fd < gen.len() { gen[fd] } else { 0 };
+            let saved_gen = if let Some(Some(s)) = files.get(fd) {
+                s.generation
+            } else {
+                return errno(EBADF);
+            };
+            if current_gen != saved_gen {
+                return errno(EBADF);
+            }
+            drop(gen);
             if let Some(Some(state)) = files.get_mut(fd) {
                 state.offset = state.offset.saturating_add(read);
             }
@@ -1081,76 +1355,12 @@ fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
     }
 }
 
-fn sys_open(path: usize, flags: usize, _mode: usize) -> usize {
-    const O_WRONLY: usize = 1;
-    const O_RDWR: usize = 2;
-    const O_CREAT: usize = 0o100;
-    const O_TRUNC: usize = 0o1000;
-
-    let path = match read_user_cstring(path, 256) {
+fn sys_open(path: usize, flags: usize, mode: usize) -> usize {
+    let path = match read_user_cstring(path, 4096) {
         Ok(value) => value,
         Err(err) => return err,
     };
-
-    let write_intent = (flags & O_WRONLY != 0)
-        || (flags & O_RDWR != 0)
-        || (flags & O_CREAT != 0)
-        || (flags & O_TRUNC != 0);
-    let access = if write_intent {
-        security::landlock::Access::Write
-    } else {
-        security::landlock::Access::Read
-    };
-    if let Err(err) = enforce_path_policy(&path, access) {
-        return err;
-    }
-
-    match path.as_str() {
-        "/dev/null" => allocate_fd(FdKind::Null),
-        "/dev/zero" => allocate_fd(FdKind::Zero),
-        "/dev/dri/card0" => allocate_fd(FdKind::Drm),
-        _ => {
-            let inode = match fs::vfs_open_inode(&path) {
-                Ok(value) => value,
-                Err(err) => {
-                    if flags & O_CREAT == 0 {
-                        return vfs_errno(err);
-                    }
-                    let (parent, name) = match path.rfind('/') {
-                        Some(pos) => {
-                            let p = if pos == 0 { "/" } else { &path[..pos] };
-                            (p, &path[pos + 1..])
-                        }
-                        None => ("/", path.as_str()),
-                    };
-                    if name.is_empty() {
-                        return errno(EINVAL);
-                    }
-                    if let Err(create_err) = fs::f2fs::create_f2fs_file(parent, name) {
-                        return vfs_errno(create_err);
-                    }
-                    match fs::vfs_open_inode(&path) {
-                        Ok(value) => value,
-                        Err(open_err) => return vfs_errno(open_err),
-                    }
-                }
-            };
-            let size = match fs::vfs_inode_metadata(&inode) {
-                Ok(meta) => meta.size,
-                Err(err) => return vfs_errno(err),
-            };
-            let is_hello = path.eq_ignore_ascii_case("HELLO.ELF") || path.ends_with("/HELLO.ELF");
-            if is_hello {
-                serial_println!("VFS: open HELLO.ELF size={}", size);
-            }
-            allocate_file_fd(FileState {
-                inode,
-                offset: 0,
-                size,
-                is_hello,
-            })
-        }
-    }
+    sys_open_with_str(&path, flags, mode)
 }
 
 /// close syscall (stdin/out/err hariç)
@@ -1161,8 +1371,13 @@ fn sys_close(fd: usize) -> usize {
     free_fd(fd)
 }
 
-/// `lseek` syscall for the in-memory file table path.
+/// `lseek` syscall — POSIX: ESPIPE for pipes/FIFOs/sockets, EOVERFLOW for negative
 fn sys_lseek(fd: usize, offset: usize, whence: usize) -> usize {
+    // Pipe/socket seek edilemez
+    match get_fd(fd) {
+        Some(FdKind::Pipe) | Some(FdKind::Socket) => return errno(ESPIPE),
+        _ => {}
+    }
     let mut files = FILE_TABLE.lock();
     let Some(Some(state)) = files.get_mut(fd) else {
         return errno(EBADF);
@@ -1203,6 +1418,9 @@ fn sys_stat(path: usize, statbuf: usize) -> usize {
             Ok(value) => value,
             Err(_) => return errno(ENOENT),
         };
+        if path.ends_with('/') && !entry.is_dir {
+            return errno(ENOTDIR);
+        }
         let stat = stat_from_f2fs_entry(&entry);
         if let Err(err) = write_user(statbuf, stat) {
             return err;
@@ -1213,6 +1431,9 @@ fn sys_stat(path: usize, statbuf: usize) -> usize {
         Ok(value) => value,
         Err(_) => return errno(ENOENT),
     };
+    if path.ends_with('/') && !entry.is_dir {
+        return errno(ENOTDIR);
+    }
     let stat = stat_from_f2fs_entry(&entry);
     if let Err(err) = write_user(statbuf, stat) {
         return err;
@@ -1804,26 +2025,169 @@ fn sys_writev(fd: usize, iov: usize, iovcnt: usize) -> usize {
     total
 }
 
-/// openat(2) — dizin tanımlayıcısına görecel dosya aç
+/// openat(2) — dizin tanımlayıcısına görecel dosya aç (APUE §3.3)
 ///
-/// dirfd == AT_FDCWD (-100) ise, path mutlak veya mevcut dizine göreceldir.
-/// Aksi halde dirfd, bir dizin fd'si olmalıdır (henüz desteklenmiyor,
-/// AT_FDCWD varsayılıyor).
-///
-/// Bayraklar: O_RDONLY (0), O_WRONLY (1), O_RDWR (2), O_CREAT (0o100),
-///            O_EXCL (0o200), O_TRUNC (0o1000), O_APPEND (0o2000)
-fn sys_openat(dirfd: usize, path: usize, flags: usize, mode: usize) -> usize {
-    let dirfd = dirfd as isize;
+/// 1. Mutlak path → path olduğu gibi kullanılır.
+/// 2. Göreceli + AT_FDCWD → CWD'ye görecel.
+/// 3. Göreceli + dirfd → dirfd bir dizin olmalı, ona görecel.
+fn sys_openat(dirfd: usize, path_ptr: usize, flags: usize, mode: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    // AT_FDCWD (-100): mevcut çalışma dizinine görecel
-    // Diğer dirfd değerleri henüz desteklenmiyor — AT_FDCWD gibi davran
-    if dirfd != AT_FDCWD && dirfd >= 0 {
-        // İleride dirfd lookup + path birleştirme yapılacak
-        // Şimdilik sys_open'a düşür
+    // dirfd geçerli bir dizin fd'si mi kontrol et (göreceli path + fd >= 0)
+    let dirfd_isize = dirfd as isize;
+    if dirfd_isize >= 0 && !path.starts_with('/') {
+        let kind = get_fd(dirfd);
+        match kind {
+            Some(FdKind::File) => {
+                let files = FILE_TABLE.lock();
+                let Some(Some(state)) = files.get(dirfd) else {
+                    return errno(EBADF);
+                };
+                // Dizin değilse ENOTDIR (O_DIRECTORY flag'ini kontrol et)
+                if state.flags & O_DIRECTORY == 0 {
+                    // stat ile dizin kontrolü yap
+                    if let Ok(entry) = fs::f2fs::open_entry(&state.path) {
+                        if !entry.is_dir {
+                            return errno(ENOTDIR);
+                        }
+                    }
+                }
+            }
+            Some(_) => return errno(ENOTDIR), // File değil → dizin olamaz
+            None => return errno(EBADF),
+        }
     }
 
-    // sys_open'a devret (tüm mantık orada)
-    sys_open(path, flags, mode)
+    let resolved = resolve_path_at(dirfd, &path);
+    let path_ptr_temp = alloc::vec![0u8; resolved.len() + 1];
+    // resolved'ı user-space'e yazıp tekrar okuyamayız; doğrudan sys_open'a String olarak gitmek gerek.
+    // sys_open user pointer bekler, biz String'den gidiyoruz — wrapper yapalım.
+    sys_open_with_str(&resolved, flags, mode)
+}
+
+/// sys_open'un String tabanlı versiyonu (openat için)
+fn sys_open_with_str(path: &str, flags: usize, mode: usize) -> usize {
+    const O_WRONLY: usize = 1;
+    const O_RDWR: usize = 2;
+    const O_CREAT: usize = 0o100;
+    const O_TRUNC: usize = 0o1000;
+
+    // Umask uygula: sadece O_CREAT varsa mode'a etki eder
+    let effective_mode = if flags & O_CREAT != 0 {
+        let umask = PROCESS_UMASK.lock();
+        mode & !(*umask)
+    } else {
+        mode
+    };
+    let _ = effective_mode; // Backend henüz mode kullanmıyor, hazır
+
+    // path_resolution(7): trailing slash → resolved entry must be a directory
+    // Check this before any O_DIRECTORY/O_NOFOLLOW/CREAT logic
+    if path.ends_with('/') {
+        // Only reject if path EXISTS and is NOT a directory
+        // If path doesn't exist, let normal open logic handle it
+        if let Ok(entry) = fs::f2fs::open_entry(path) {
+            if !entry.is_dir {
+                return errno(ENOTDIR);
+            }
+        }
+    }
+
+    if flags & O_DIRECTORY != 0 {
+        match fs::f2fs::open_entry(path) {
+            Ok(entry) => {
+                if !entry.is_dir {
+                    return errno(ENOTDIR);
+                }
+            }
+            Err(e) => return vfs_errno(e),
+        }
+    }
+
+    if flags & O_NOFOLLOW != 0 {
+        match fs::f2fs::read_link(path) {
+            Ok(_) => return errno(ELOOP),
+            Err(_) => {}
+        }
+    }
+
+    let write_intent = (flags & O_WRONLY != 0)
+        || (flags & O_RDWR != 0)
+        || (flags & O_CREAT != 0)
+        || (flags & O_TRUNC != 0);
+    let access = if write_intent {
+        security::landlock::Access::Write
+    } else {
+        security::landlock::Access::Read
+    };
+    if let Err(err) = enforce_path_policy(path, access) {
+        return err;
+    }
+
+    let fd = match path {
+        "/dev/null" => return allocate_fd(FdKind::Null),
+        "/dev/zero" => return allocate_fd(FdKind::Zero),
+        "/dev/dri/card0" => return allocate_fd(FdKind::Drm),
+        _ => {
+            let inode = match fs::vfs_open_inode(path) {
+                Ok(value) => value,
+                Err(err) => {
+                    if flags & O_CREAT == 0 {
+                        return vfs_errno(err);
+                    }
+                    if flags & O_EXCL != 0 {
+                        return errno(EEXIST);
+                    }
+                    let (parent, name) = match path.rfind('/') {
+                        Some(pos) => {
+                            let p = if pos == 0 { "/" } else { &path[..pos] };
+                            (p, &path[pos + 1..])
+                        }
+                        None => ("/", path),
+                    };
+                    if name.is_empty() {
+                        return errno(EINVAL);
+                    }
+                    if let Err(create_err) = fs::f2fs::create_f2fs_file(parent, name) {
+                        return vfs_errno(create_err);
+                    }
+                    match fs::vfs_open_inode(path) {
+                        Ok(value) => value,
+                        Err(open_err) => return vfs_errno(open_err),
+                    }
+                }
+            };
+            let mut meta_size = match fs::vfs_inode_metadata(&inode) {
+                Ok(meta) => meta.size,
+                Err(err) => return vfs_errno(err),
+            };
+            if flags & O_TRUNC != 0 && write_intent {
+                if let Err(e) = fs::f2fs::truncate_f2fs(path, 0) {
+                    return vfs_errno(e);
+                }
+                meta_size = 0;
+            }
+            let is_hello = path.eq_ignore_ascii_case("HELLO.ELF") || path.ends_with("/HELLO.ELF");
+            let fd = allocate_file_fd(FileState {
+                inode,
+                offset: 0,
+                size: meta_size,
+                is_hello,
+                generation: 0,
+                flags,
+                path: path.to_string(),
+            });
+            if fd < MAX_FDS && (flags & O_CLOEXEC != 0) {
+                let mut cloexec = FD_CLOEXEC.lock();
+                cloexec[fd] = true;
+            }
+            fd
+        }
+    };
+    fd
 }
 
 /// access(2) — dosya erişim izinlerini kontrol et
@@ -1862,18 +2226,10 @@ fn sys_access(path: usize, mode: usize) -> usize {
             // Meta veri al ve izinleri kontrol et
             match fs::vfs_inode_metadata(&inode) {
                 Ok(meta) => {
-                    let file_mode = meta.mode as usize;
-                    // Basitleştirilmiş kontrol: owner izinlerini kontrol et
-                    // Linux'ta gerçek kontrol uid/gid eşleştirmesi yapardı
-                    let owner_bits = (file_mode >> 6) & 0o7;
-
-                    if (mode & R_OK != 0) && (owner_bits & 0o4 == 0) {
-                        return errno(EACCES);
-                    }
-                    if (mode & W_OK != 0) && (owner_bits & 0o2 == 0) {
-                        return errno(EACCES);
-                    }
-                    if (mode & X_OK != 0) && (owner_bits & 0o1 == 0) {
+                    // POSIX permission check — arşiv: inodes.html i_mode
+                    // owner_bits = (mode >> 6) & 0o7, group_bits = (mode >> 3) & 0o7, other_bits = mode & 0o7
+                    // uid/gid eşleştirmesi ile owner/group/other kontrolü
+                    if !fs::check_permission(meta.mode as u16, meta.uid as u16, meta.gid as u16, mode as u32) {
                         return errno(EACCES);
                     }
                     0
@@ -2059,29 +2415,133 @@ fn sys_rename(oldpath_ptr: usize, newpath_ptr: usize) -> usize {
         Ok(value) => value,
         Err(err) => return err,
     };
+    // APUE §4.16: oldpath == newpath → no-op
+    if oldpath == newpath {
+        return 0;
+    }
     if let Err(err) = enforce_path_policy(&oldpath, security::landlock::Access::Rename) {
         return err;
     }
     if let Err(err) = enforce_path_policy(&newpath, security::landlock::Access::Create) {
         return err;
     }
-    // Extract parent and old/new names. For simplicity, both must be in same parent dir.
-    let (old_parent, old_name) = match oldpath.rfind('/') {
-        Some(pos) => {
-            let p = if pos == 0 { "/" } else { &oldpath[..pos] };
-            (p, &oldpath[pos + 1..])
-        }
-        None => ("/", oldpath.as_str()),
-    };
-    let (_new_parent, new_name) = match newpath.rfind('/') {
-        Some(pos) => {
-            let p = if pos == 0 { "/" } else { &newpath[..pos] };
-            (p, &newpath[pos + 1..])
-        }
-        None => ("/", newpath.as_str()),
-    };
+    let (old_parent, old_name) = split_path(&oldpath);
+    let (new_parent, new_name) = split_path(&newpath);
     if old_name.is_empty() || new_name.is_empty() {
         return errno(EINVAL);
+    }
+    // APUE §4.16: cross-directory rename → f2fs desteklemiyor → EXDEV
+    if old_parent != new_parent {
+        // Farklı dizinler arası rename: create + copy + delete yapılabilir,
+        // ancak f2fs backend bunu desteklemiyor şimdilik.
+        return errno(EXDEV);
+    }
+    match fs::f2fs::rename_f2fs(old_parent, old_name, new_name) {
+        Ok(()) => 0,
+        Err(err) => vfs_errno(err),
+    }
+}
+
+/// renameat2(2) — rename with dirfd and flags support
+///
+/// Flags: RENAME_NOREPLACE (1), RENAME_EXCHANGE (2), RENAME_WHITEOUT (4)
+fn sys_renameat2(
+    olddirfd: usize,
+    oldpath_ptr: usize,
+    newdirfd: usize,
+    newpath_ptr: usize,
+    flags: usize,
+) -> usize {
+    let oldpath = match read_user_cstring(oldpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let newpath = match read_user_cstring(newpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let old_resolved = resolve_path_at(olddirfd, &oldpath);
+    let new_resolved = resolve_path_at(newdirfd, &newpath);
+
+    if flags & !(RENAME_NOREPLACE | RENAME_EXCHANGE | RENAME_WHITEOUT) != 0 {
+        return errno(EINVAL);
+    }
+
+    // man renameat2(2): incompatible flag combinations
+    if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
+        return errno(EINVAL);
+    }
+    if flags & RENAME_WHITEOUT != 0 && flags & RENAME_EXCHANGE != 0 {
+        return errno(EINVAL);
+    }
+
+    // APUE §4.16: oldpath == newpath → no-op
+    if old_resolved == new_resolved && flags == 0 {
+        return 0;
+    }
+
+    // RENAME_NOREPLACE: newpath varsa EEXIST
+    if flags & RENAME_NOREPLACE != 0 {
+        if fs::f2fs::open_entry(&new_resolved).is_ok() {
+            return errno(EEXIST);
+        }
+    }
+
+    // RENAME_EXCHANGE: atomik swap (her iki dosya da var olmalı, aynı parent)
+    if flags & RENAME_EXCHANGE != 0 {
+        if fs::f2fs::open_entry(&old_resolved).is_err() {
+            return errno(ENOENT);
+        }
+        if fs::f2fs::open_entry(&new_resolved).is_err() {
+            return errno(ENOENT);
+        }
+        let (old_parent, old_file) = split_path(&old_resolved);
+        let (new_parent, new_file) = split_path(&new_resolved);
+        // f2fs rename sadece aynı parent içinde çalışır
+        if old_parent != new_parent {
+            return errno(EXDEV);
+        }
+        // old → tmp, new → old, tmp → new (hepsi aynı parent)
+        let tmp_name = format!(".echos_swap_{}", tasking::scheduler::get_ticks());
+        if let Err(e) = fs::f2fs::rename_f2fs(old_parent, old_file, &tmp_name) {
+            return vfs_errno(e);
+        }
+        if let Err(e) = fs::f2fs::rename_f2fs(old_parent, new_file, old_file) {
+            let _ = fs::f2fs::rename_f2fs(old_parent, &tmp_name, old_file);
+            return vfs_errno(e);
+        }
+        if let Err(e) = fs::f2fs::rename_f2fs(old_parent, &tmp_name, new_file) {
+            // Rollback: undo step 2 (new_file → old_file), then undo step 1 (old_file → tmp_name)
+            let _ = fs::f2fs::rename_f2fs(old_parent, old_file, new_file);
+            let _ = fs::f2fs::rename_f2fs(old_parent, &tmp_name, old_file);
+            return vfs_errno(e);
+        }
+        return 0;
+    }
+
+    // RENAME_WHITEOUT: Linux 3.18+ overlay/union filesystem feature
+    // Creates a {0,0} char device as whiteout at source atomically.
+    // EINVAL per renameat2(2): filesystem does not support the flag
+    // (or CAP_MKNOD missing — but we don't implement capability checks)
+    if flags & RENAME_WHITEOUT != 0 {
+        return errno(EINVAL);
+    }
+
+    // flags == 0: normal rename
+    if let Err(err) = enforce_path_policy(&old_resolved, security::landlock::Access::Rename) {
+        return err;
+    }
+    if let Err(err) = enforce_path_policy(&new_resolved, security::landlock::Access::Create) {
+        return err;
+    }
+    let (old_parent, old_name) = split_path(&old_resolved);
+    let (new_parent, new_name) = split_path(&new_resolved);
+    if old_name.is_empty() || new_name.is_empty() {
+        return errno(EINVAL);
+    }
+    // APUE §4.16: cross-dir rename → f2fs desteklemiyor → EXDEV
+    if old_parent != new_parent {
+        return errno(EXDEV);
     }
     match fs::f2fs::rename_f2fs(old_parent, old_name, new_name) {
         Ok(()) => 0,
@@ -2152,19 +2612,606 @@ fn sys_creat(path_ptr: usize, mode: usize) -> usize {
     sys_open(path_ptr, O_CREAT | O_WRONLY | O_TRUNC, mode)
 }
 
-/// link - create a hard link
-fn sys_link(_oldpath_ptr: usize, _newpath_ptr: usize) -> usize {
-    unsupported_errno("link")
+/// link(2) — create a hard link
+fn sys_link(oldpath_ptr: usize, newpath_ptr: usize) -> usize {
+    let oldpath = match read_user_cstring(oldpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let newpath = match read_user_cstring(newpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (parent, name) = split_path(&newpath);
+    match fs::f2fs::create_hardlink(parent, name, &oldpath) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
 }
 
-/// symlink - create a symbolic link
-fn sys_symlink(_target_ptr: usize, _linkpath_ptr: usize) -> usize {
-    unsupported_errno("symlink")
+/// symlink(2) — create a symbolic link
+fn sys_symlink(target_ptr: usize, linkpath_ptr: usize) -> usize {
+    let target = match read_user_cstring(target_ptr, 4096) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let linkpath = match read_user_cstring(linkpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let (parent, name) = split_path(&linkpath);
+    match fs::f2fs::create_symlink(parent, name, &target) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
 }
 
-/// readlink - read a symbolic link
-fn sys_readlink(_path_ptr: usize, _buf: usize, _bufsize: usize) -> usize {
-    unsupported_errno("readlink")
+/// readlink(2) — read the target of a symbolic link
+fn sys_readlink(path_ptr: usize, buf: usize, bufsize: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let target = match read_symlink_target_f2fs(&path) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let target_bytes = target.as_bytes();
+    let to_copy = core::cmp::min(bufsize, target_bytes.len());
+    if let Err(e) = validate_user_range(buf, to_copy) {
+        return e;
+    }
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(target_bytes.as_ptr(), buf as *mut u8, to_copy);
+    });
+    to_copy
+}
+
+// ============================================================================
+// YENİ SYSCALL'LAR (FSYNC, FDATASYNC, GETDENTS64, UTIMENSAT, FACESSAT,
+// STATFS, FSTATFS, LINKAT, READLINKAT, SYMLINKAT, SYNCFS, MOUNT, UMOUNT2)
+// ============================================================================
+
+/// fsync(2) — synchronize a file's in-core state with storage device
+fn sys_fsync(fd: usize) -> usize {
+    // Öncelikle posix FILE_TABLE üzerinden dene
+    let inode_opt = {
+        let files = FILE_TABLE.lock();
+        files.get(fd).and_then(|s| s.as_ref().map(|st| st.inode.clone()))
+    };
+    match inode_opt {
+        Some(inode) => match inode.sync_all() {
+            Ok(_) => 0,
+            Err(_) => {
+                // GLOBAL_FD_TABLE üzerinden fsync dene (fallback: per-process tablo kullanılır)
+                match fs::sys_fsync(fd) {
+                    Ok(_) => 0,
+                    Err(e) => vfs_errno(e),
+                }
+            }
+        },
+        None => {
+            match fs::sys_fsync(fd) {
+                Ok(_) => 0,
+                Err(e) => vfs_errno(e),
+            }
+        }
+    }
+}
+
+/// fdatasync(2) — synchronize a file's data only
+///
+/// Per APUE §3.14: fsync updates both data AND attributes (metadata).
+/// fdatasync updates only the data portions of a file; metadata
+/// (mtime, ctime, size) is NOT flushed unless file size changed.
+fn sys_fdatasync(fd: usize) -> usize {
+    // Get the file state to find the path
+    let (path_opt, inode_opt) = {
+        let files = FILE_TABLE.lock();
+        let state = files.get(fd).and_then(|s| s.as_ref());
+        match state {
+            Some(st) => (Some(st.path.clone()), Some(st.inode.clone())),
+            None => (None, None),
+        }
+    };
+
+    // Try INode::sync_data() first (data-only sync, no metadata)
+    if let Some(inode) = inode_opt {
+        if let Some(path) = path_opt {
+            match fs::f2fs::fdatasync_path(&path) {
+                Ok(_) => return 0,
+                Err(RcFsError::IsDir) => return errno(EISDIR),
+                Err(_) => {} // fall through
+            }
+        }
+    }
+
+    // Fallback: per-process FD tablosu üzerinden fdatasync dene
+    match fs::sys_fsync(fd) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// fcntl(2) — manipulate file descriptor
+///
+/// Supported commands: F_DUPFD, F_GETFD, F_SETFD, F_GETFL, F_SETFL
+/// Lock commands (F_SETLK/F_SETLKW/F_GETLK) delegate to file_lock module.
+fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> usize {
+    if get_fd(fd).is_none() {
+        return errno(EBADF);
+    }
+
+    match cmd {
+        F_DUPFD => {
+            // En düşük >= arg olan boş fd'yi bul; CLOEXEC temizlenir
+            let mut table = FD_TABLE.lock();
+            let kind = match table.get(fd) {
+                Some(Some(k)) => *k,
+                _ => return errno(EBADF),
+            };
+            let mut newfd = arg.max(0);
+            while newfd < MAX_FDS && table[newfd].is_some() {
+                newfd += 1;
+            }
+            if newfd >= MAX_FDS {
+                return errno(EMFILE);
+            }
+            table[newfd] = Some(kind);
+            drop(table);
+            let mut cloexec = FD_CLOEXEC.lock();
+            cloexec[newfd] = false;
+            drop(cloexec);
+            if kind == FdKind::File {
+                let files = FILE_TABLE.lock();
+                if let Some(Some(state)) = files.get(fd) {
+                    let mut gen = FILE_GENERATION.lock();
+                    let mut new_files = FILE_TABLE.lock();
+                    let generation = gen[newfd].wrapping_add(1);
+                    gen[newfd] = generation;
+                    let mut new_state = state.clone();
+                    new_state.generation = generation;
+                    new_files[newfd] = Some(new_state);
+                }
+            }
+            newfd
+        }
+
+        F_GETFD => {
+            let cloexec = FD_CLOEXEC.lock();
+            if cloexec[fd] { FD_CLOEXEC_FLAG } else { 0 }
+        }
+
+        F_SETFD => {
+            let mut cloexec = FD_CLOEXEC.lock();
+            cloexec[fd] = (arg & FD_CLOEXEC_FLAG) != 0;
+            0
+        }
+
+        F_GETFL => {
+            // FILE ise FileState.flags döndür; diğer türler için O_RDWR
+            let kind = get_fd(fd);
+            match kind {
+                Some(FdKind::File) => {
+                    let files = FILE_TABLE.lock();
+                    match files.get(fd) {
+                        Some(Some(state)) => state.flags,
+                        _ => errno(EBADF),
+                    }
+                }
+                Some(FdKind::Stdin) => 0, // O_RDONLY
+                Some(FdKind::Stdout) | Some(FdKind::Stderr) => 1, // O_WRONLY
+                Some(FdKind::Null) | Some(FdKind::Zero) => 2, // O_RDWR
+                Some(FdKind::Pipe) | Some(FdKind::Socket) => 2, // O_RDWR
+                Some(FdKind::Drm) | Some(FdKind::IoUring) => 2, // O_RDWR
+                None => errno(EBADF),
+            }
+        }
+
+        F_SETFL => {
+            // Sadece O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT, O_NOATIME değiştirilebilir
+            let kind = get_fd(fd);
+            match kind {
+                Some(FdKind::File) => {
+                    let mut files = FILE_TABLE.lock();
+                    match files.get_mut(fd) {
+                        Some(Some(state)) => {
+                            // APUE §3.14: Sadece O_APPEND, O_NONBLOCK, O_SYNC, O_DSYNC, O_ASYNC değiştirilebilir
+                            let preserved = state.flags & !(O_APPEND | O_NONBLOCK as usize | O_SYNC | O_DSYNC);
+                            state.flags = preserved | (arg & (O_APPEND | O_NONBLOCK as usize | O_SYNC | O_DSYNC));
+                            0
+                        }
+                        _ => errno(EBADF),
+                    }
+                }
+                // Pipe/Socket için varsayılan başarı
+                Some(_) => 0,
+                None => errno(EBADF),
+            }
+        }
+
+        // POSIX lock commands + OFD lock commands (delegate to file_lock module)
+        F_GETLK | F_SETLK | F_SETLKW | F_OFD_GETLK | F_OFD_SETLK | F_OFD_SETLKW => {
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            struct Flock64 {
+                l_type: i16,
+                l_whence: i16,
+                l_start: i64,
+                l_len: i64,
+                l_pid: i32,
+            }
+            let buf_ptr = arg;
+            let mut flock: Flock64 = match read_user(buf_ptr) {
+                Ok(v) => v,
+                Err(e) => return e,
+            };
+            let mut file_lock = fs::file_lock::FileLock {
+                l_type: flock.l_type as i32,
+                l_whence: flock.l_whence as i32,
+                l_start: flock.l_start as u64,
+                l_len: flock.l_len as u64,
+                l_pid: flock.l_pid as u64,
+                is_ofd: false,
+            };
+            let ret = fs::file_lock::sys_fcntl_lock(fd as i32, cmd as i32, &mut file_lock);
+            if ret < 0 {
+                return errno((-ret) as usize);
+            }
+            // F_GETLK / F_OFD_GETLK: result'ı user'a geri yaz
+            if cmd == F_GETLK || cmd == F_OFD_GETLK {
+                flock.l_type = file_lock.l_type as i16;
+                flock.l_whence = file_lock.l_whence as i16;
+                flock.l_start = file_lock.l_start as i64;
+                flock.l_len = file_lock.l_len as i64;
+                flock.l_pid = file_lock.l_pid as i32;
+                if let Err(e) = write_user(buf_ptr, flock) {
+                    return e;
+                }
+            }
+            0
+        }
+
+        _ => errno(EINVAL),
+    }
+}
+
+/// getdents64(2) — get directory entries
+/// Linux struct linux_dirent64:
+///   d_ino (u64), d_off (i64), d_reclen (u16), d_type (u8), d_name (flex)
+fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> usize {
+    if count < 24 {
+        return errno(EINVAL); // minimum dirent64 boyutu
+    }
+    let dir_path = {
+        let files = FILE_TABLE.lock();
+        let Some(Some(state)) = files.get(fd) else {
+            return errno(EBADF);
+        };
+        state.path.clone()
+    };
+    if dir_path.is_empty() {
+        return errno(ENOSYS); // path olmayan fd'ler için
+    }
+    let entries = match fs::f2fs::list_dir(&dir_path) {
+        Ok(e) => e,
+        Err(e) => return vfs_errno(e),
+    };
+    let mut written: usize = 0;
+    for entry in &entries {
+        if entry.name == "." || entry.name == ".." {
+            continue;
+        }
+        // d_reclen: 19 (sabit başlık) + name.len() + 1 (null) + padding
+        let name_len = entry.name.len() + 1; // +1 for null terminator
+        let reclen = (19 + name_len + 7) & !7; // 8-byte align
+        if written + reclen > count {
+            break;
+        }
+        let d_ino: u64 = entry.ino;
+        let d_off: i64 = entries.len() as i64; // simplified: all entries at once
+        let d_reclen: u16 = reclen as u16;
+        let d_type: u8 = if entry.is_dir { 4 } else { 8 }; // DT_DIR=4, DT_REG=8
+        let pos = dirp.wrapping_add(written);
+        if let Err(e) = validate_user_range(pos, reclen) {
+            return e;
+        }
+        with_user_access(|| unsafe {
+            core::ptr::write(pos as *mut u64, d_ino);
+            core::ptr::write((pos + 8) as *mut i64, d_off);
+            core::ptr::write((pos + 16) as *mut u16, d_reclen);
+            core::ptr::write((pos + 18) as *mut u8, d_type);
+            let name_ptr = (pos + 19) as *mut u8;
+            for (i, &b) in entry.name.as_bytes().iter().enumerate() {
+                core::ptr::write(name_ptr.add(i), b);
+            }
+            core::ptr::write(name_ptr.add(entry.name.len()), 0u8); // null terminator
+        });
+        written = written.wrapping_add(reclen);
+    }
+    // offset güncelle: tüm entry'leri tek seferde oku
+    {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(state)) = files.get_mut(fd) {
+            state.offset = state.offset.wrapping_add(written);
+        }
+    }
+    written
+}
+
+/// utimensat(2) — change timestamps of a file with nanosecond precision
+fn sys_utimensat(dirfd: usize, pathname_ptr: usize, times_ptr: usize, flags: usize) -> usize {
+    let path = match pathname_ptr {
+        0 => return errno(ENOENT),
+        _ => match read_user_cstring(pathname_ptr, 4096) {
+            Ok(p) => p,
+            Err(e) => return e,
+        },
+    };
+    let resolved = resolve_path_at(dirfd, &path);
+    // AT_SYMLINK_NOFOLLOW: symlink'in kendisine timestamp yaz (henüz FS desteği yok)
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        // update_timestamps symlink için de çalışır (inline data) - aynı FS fonksiyonunu kullan
+    }
+    if times_ptr == 0 {
+        // NULL times = set to current time
+        let now = super::fs::get_global_time();
+        match fs::f2fs::update_timestamps(&resolved, now.sec, 0, now.sec, 0) {
+            Ok(_) => 0,
+            Err(e) => vfs_errno(e),
+        }
+    } else {
+        if let Err(e) = validate_user_range(times_ptr, 2 * core::mem::size_of::<Timespec>()) {
+            return e;
+        }
+        let times: [Timespec; 2] = with_user_access(|| unsafe {
+            core::ptr::read(times_ptr as *const [Timespec; 2])
+        });
+        let atime_sec = if times[0].tv_nsec as usize == UTIME_OMIT {
+            // unchanged — skip
+            return errno(ENOSYS);
+        } else if times[0].tv_nsec as usize == UTIME_NOW {
+            super::fs::get_global_time().sec
+        } else {
+            times[0].tv_sec
+        };
+        let atime_nsec = if times[0].tv_nsec as usize == UTIME_OMIT { 0 }
+        else if times[0].tv_nsec as usize == UTIME_NOW { 0 }
+        else { times[0].tv_nsec };
+        let mtime_sec = if times[1].tv_nsec as usize == UTIME_OMIT {
+            return errno(ENOSYS);
+        } else if times[1].tv_nsec as usize == UTIME_NOW {
+            super::fs::get_global_time().sec
+        } else {
+            times[1].tv_sec
+        };
+        let mtime_nsec = if times[1].tv_nsec as usize == UTIME_OMIT { 0 }
+        else if times[1].tv_nsec as usize == UTIME_NOW { 0 }
+        else { times[1].tv_nsec };
+        match fs::f2fs::update_timestamps(&resolved, atime_sec, atime_nsec, mtime_sec, mtime_nsec) {
+            Ok(_) => 0,
+            Err(e) => vfs_errno(e),
+        }
+    }
+}
+
+/// faccessat(2) — check access permissions of a file
+/// AT_EACCESS flag'i -> effective UID/GID kullan (Linux varsayılanı)
+fn sys_faccessat(dirfd: usize, pathname_ptr: usize, mode: usize, flags: usize) -> usize {
+    let path = match read_user_cstring(pathname_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let resolved = resolve_path_at(dirfd, &path);
+    // AT_SYMLINK_NOFOLLOW: symlink'in kendisini kontrol et
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        match fs::f2fs::read_link(&resolved) {
+            Ok(_) => {
+                // symlink var, read -> okuma izni
+                if mode & R_OK != 0 {
+                    return 0;
+                }
+                return errno(EACCES);
+            }
+            Err(_) => {} // symlink değil, altındaki dosyayı kontrol et
+        }
+    }
+    // AT_EACCESS: effective UID/GID kullan (henüz ayrım yok)
+    let _ = flags & AT_EACCESS;
+    match fs::f2fs::open_entry(&resolved) {
+        Ok(entry) => {
+            // path_resolution(7): trailing slash → must be a directory
+            if path.ends_with('/') && !entry.is_dir {
+                return errno(ENOTDIR);
+            }
+            if mode == F_OK {
+                return 0;
+            }
+            let file_mode = entry.mode;
+            let owner_read = file_mode & 0o400 != 0;
+            let owner_write = file_mode & 0o200 != 0;
+            let owner_exec = file_mode & 0o100 != 0;
+            if (mode & R_OK != 0 && !owner_read)
+                || (mode & W_OK != 0 && !owner_write)
+                || (mode & X_OK != 0 && !owner_exec)
+            {
+                return errno(EACCES);
+            }
+            0
+        }
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// statfs(2) — get filesystem statistics
+fn sys_statfs(path_ptr: usize, buf: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    if let Err(e) = validate_user_range(buf, core::mem::size_of::<Statfs>()) {
+        return e;
+    }
+    let stats = match fs::f2fs::f2fs_stats() {
+        Ok(s) => s,
+        Err(e) => return vfs_errno(e),
+    };
+    let statfs = Statfs {
+        f_type: 0x2015, // F2FS magic
+        f_bsize: 4096,
+        f_blocks: stats.total_main_blocks,
+        f_bfree: stats.free_blocks,
+        f_bavail: stats.free_blocks,
+        f_files: 0,
+        f_ffree: 0,
+        f_fsid: [0; 2],
+        f_namelen: 255,
+        f_frsize: 4096,
+        f_flags: 0,
+        f_spare: [0; 4],
+    };
+    with_user_access(|| unsafe {
+        core::ptr::write(buf as *mut Statfs, statfs);
+    });
+    0
+}
+
+/// fstatfs(2) — get filesystem statistics by fd
+fn sys_fstatfs(_fd: usize, buf: usize) -> usize {
+    // fd bazlı statfs: fd'den mount noktası çıkar.
+    // Şimdilik doğrudan statfs çağır.
+    if let Err(e) = validate_user_range(buf, core::mem::size_of::<Statfs>()) {
+        return e;
+    }
+    let stats = match fs::f2fs::f2fs_stats() {
+        Ok(s) => s,
+        Err(e) => return vfs_errno(e),
+    };
+    let statfs = Statfs {
+        f_type: 0x2015,
+        f_bsize: 4096,
+        f_blocks: stats.total_main_blocks,
+        f_bfree: stats.free_blocks,
+        f_bavail: stats.free_blocks,
+        f_files: 0,
+        f_ffree: 0,
+        f_fsid: [0; 2],
+        f_namelen: 255,
+        f_frsize: 4096,
+        f_flags: 0,
+        f_spare: [0; 4],
+    };
+    with_user_access(|| unsafe {
+        core::ptr::write(buf as *mut Statfs, statfs);
+    });
+    0
+}
+
+/// linkat(2) — create a hard link relative to directory fds
+fn sys_linkat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize, flags: usize) -> usize {
+    if flags & AT_EMPTY_PATH != 0 {
+        return errno(ENOSYS);
+    }
+    let oldpath = match read_user_cstring(oldpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let newpath = match read_user_cstring(newpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let resolved_old = resolve_path_at(olddirfd, &oldpath);
+    let resolved_new = resolve_path_at(newdirfd, &newpath);
+    let (parent, name) = split_path(&resolved_new);
+    match fs::f2fs::create_hardlink(parent, name, &resolved_old) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// readlinkat(2) — read the target of a symbolic link relative to a directory fd
+fn sys_readlinkat(dirfd: usize, path_ptr: usize, buf: usize, bufsize: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let resolved = resolve_path_at(dirfd, &path);
+    let target = match read_symlink_target_f2fs(&resolved) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let target_bytes = target.as_bytes();
+    let to_copy = core::cmp::min(bufsize, target_bytes.len());
+    if let Err(e) = validate_user_range(buf, to_copy) {
+        return e;
+    }
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(target_bytes.as_ptr(), buf as *mut u8, to_copy);
+    });
+    to_copy
+}
+
+/// symlinkat(2) — create a symbolic link relative to a directory fd
+fn sys_symlinkat(target_ptr: usize, newdirfd: usize, linkpath_ptr: usize) -> usize {
+    let target = match read_user_cstring(target_ptr, 4096) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let linkpath = match read_user_cstring(linkpath_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let resolved_link = resolve_path_at(newdirfd, &linkpath);
+    let (parent, name) = split_path(&resolved_link);
+    match fs::f2fs::create_symlink(parent, name, &target) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// syncfs(2) — synchronize an entire mounted filesystem
+fn sys_syncfs(_fd: usize) -> usize {
+    match fs::vfs_unified::vfs_sync_all() {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// mount(2) — mount a filesystem
+fn sys_mount(source_ptr: usize, target_ptr: usize, fstype_ptr: usize, _flags: usize, _data_ptr: usize) -> usize {
+    let source = match read_user_cstring(source_ptr, 4096) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+    let target = match read_user_cstring(target_ptr, 4096) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let fstype = if fstype_ptr == 0 {
+        String::new()
+    } else {
+        match read_user_cstring(fstype_ptr, 256) {
+            Ok(t) => t,
+            Err(e) => return e,
+        }
+    };
+    let fs_type = if fstype.is_empty() { "f2fs" } else { &fstype };
+    match fs::f2fs::mount_fs(&source, &target, fs_type) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// umount2(2) — unmount a mounted filesystem
+fn sys_umount2(target_ptr: usize, _flags: usize) -> usize {
+    let target = match read_user_cstring(target_ptr, 4096) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    match fs::f2fs::umount_fs(&target) {
+        Ok(_) => 0,
+        Err(e) => vfs_errno(e),
+    }
 }
 
 fn sys_select(
@@ -2652,6 +3699,176 @@ fn sys_vmsplice(fd: usize, _iov_ptr: usize, _nr_segs: usize, _flags: usize) -> u
     0
 }
 
+/// sendfile(2) — copy data between file descriptors
+///
+/// sendfile(out_fd, in_fd, offset_ptr, count)
+/// offset_ptr: user-space pointer to u64 offset (or NULL = use current fd offset)
+fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> usize {
+    if get_fd(out_fd).is_none() || get_fd(in_fd).is_none() {
+        return errno(EBADF);
+    }
+    if count == 0 {
+        return 0;
+    }
+
+    let (in_path, mut read_off) = {
+        let files = FILE_TABLE.lock();
+        match files.get(in_fd) {
+            Some(Some(s)) => (s.path.clone(), s.offset),
+            _ => return errno(EBADF),
+        }
+    };
+    let (out_path, mut write_off) = {
+        let files = FILE_TABLE.lock();
+        match files.get(out_fd) {
+            Some(Some(s)) => (s.path.clone(), s.offset),
+            _ => return errno(EBADF),
+        }
+    };
+
+    // If user provided offset_ptr, read offset from user-space
+    if offset_ptr != 0 {
+        if let Ok(off) = read_user::<u64>(offset_ptr) {
+            read_off = off as usize;
+        } else {
+            return errno(EFAULT);
+        }
+    }
+
+    let mut transferred: usize = 0;
+    let mut remaining = count;
+    let chunk = 65536usize;
+    let mut buf = alloc::vec![0u8; chunk];
+
+    while remaining > 0 {
+        let n = core::cmp::min(remaining, chunk);
+        let buf_slice = &mut buf[..n];
+        let read = match fs::f2fs::read_f2fs_file_at(&in_path, read_off, buf_slice) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if read == 0 {
+            break;
+        }
+        let written = match fs::f2fs::write_f2fs_file_at(&out_path, write_off, &buf[..read]) {
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        if written == 0 {
+            break;
+        }
+        transferred += written;
+        read_off += written;
+        write_off += written;
+        remaining -= written;
+        if written < read {
+            break;
+        }
+    }
+
+    // Update offsets
+    if offset_ptr != 0 {
+        let new_off = read_off as u64;
+        let _ = write_user(offset_ptr, new_off);
+    } else {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(s)) = files.get_mut(in_fd) {
+            s.offset = read_off;
+        }
+    }
+    {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(s)) = files.get_mut(out_fd) {
+            s.offset = write_off;
+        }
+    }
+
+    transferred
+}
+
+/// copy_file_range(2) — kernel-space copy between file descriptors
+///
+/// copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)
+fn sys_copy_file_range(
+    fd_in: usize,
+    off_in: usize,
+    fd_out: usize,
+    off_out: usize,
+    len: usize,
+    _flags: usize,
+) -> usize {
+    // off_in/off_out are user-space pointers to i64, or NULL (= use current fd offset)
+    if off_in != 0 && off_out != 0 {
+        // Both explicit offsets: use sendfile with offset
+        let in_off_raw: i64 = match read_user(off_in) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let out_off_raw: i64 = match read_user(off_out) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let in_path = {
+            let files = FILE_TABLE.lock();
+            match files.get(fd_in) {
+                Some(Some(s)) => s.path.clone(),
+                _ => return errno(EBADF),
+            }
+        };
+        let out_path = {
+            let files = FILE_TABLE.lock();
+            match files.get(fd_out) {
+                Some(Some(s)) => s.path.clone(),
+                _ => return errno(EBADF),
+            }
+        };
+
+        let mut transferred: usize = 0;
+        let mut remaining = len;
+        let chunk = 65536usize;
+        let mut buf = alloc::vec![0u8; chunk];
+        let mut in_off = in_off_raw.max(0) as usize;
+        let mut out_off = out_off_raw.max(0) as usize;
+
+        while remaining > 0 {
+            let n = core::cmp::min(remaining, chunk);
+            let buf_slice = &mut buf[..n];
+            let read = match fs::f2fs::read_f2fs_file_at(&in_path, in_off, buf_slice) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if read == 0 {
+                break;
+            }
+            let written = match fs::f2fs::write_f2fs_file_at(&out_path, out_off, &buf[..read]) {
+                Ok(n) => n,
+                Err(_) => break,
+            };
+            if written == 0 {
+                break;
+            }
+            transferred += written;
+            in_off += written;
+            out_off += written;
+            remaining -= written;
+            if written < read {
+                break;
+            }
+        }
+
+        // Update user-space offsets
+        let new_in_off = in_off as i64;
+        let new_out_off = out_off as i64;
+        let _ = write_user(off_in, new_in_off);
+        let _ = write_user(off_out, new_out_off);
+
+        transferred
+    } else {
+        // At least one offset is NULL: use current fd offsets
+        sys_sendfile(fd_out, fd_in, off_in, len)
+    }
+}
+
 /// dup - duplicate file descriptor
 fn sys_dup(oldfd: usize) -> usize {
     let kind = get_fd(oldfd);
@@ -2660,6 +3877,19 @@ fn sys_dup(oldfd: usize) -> usize {
             let newfd = allocate_fd(k);
             if newfd >= MAX_FDS {
                 return errno(EMFILE);
+            }
+            // File ise FILE_TABLE entry'sini de kopyala
+            if k == FdKind::File {
+                let files = FILE_TABLE.lock();
+                if let Some(Some(state)) = files.get(oldfd) {
+                    let mut gen = FILE_GENERATION.lock();
+                    let mut new_files = FILE_TABLE.lock();
+                    let generation = gen[newfd].wrapping_add(1);
+                    gen[newfd] = generation;
+                    let mut new_state = state.clone();
+                    new_state.generation = generation;
+                    new_files[newfd] = Some(new_state);
+                }
             }
             newfd
         }
@@ -2675,8 +3905,35 @@ fn sys_dup2(oldfd: usize, newfd: usize) -> usize {
             if newfd >= MAX_FDS {
                 return errno(EBADF);
             }
+            // oldfd == newfd: hiçbir şey yapma, direkt dön
+            if oldfd == newfd {
+                return newfd;
+            }
+            // newfd açıksa önce kapat (fd > 2 ise)
+            if newfd > 2 {
+                let _ = free_fd(newfd);
+            }
+            // POSIX: dup2 yeni fd'de CLOEXEC flag'ini temizler
+            {
+                let mut cloexec = FD_CLOEXEC.lock();
+                cloexec[newfd] = false;
+            }
             let mut table = FD_TABLE.lock();
             table[newfd] = Some(k);
+            drop(table);
+            // File ise FILE_TABLE entry'sini kopyala
+            if k == FdKind::File {
+                let files = FILE_TABLE.lock();
+                if let Some(Some(state)) = files.get(oldfd) {
+                    let mut gen = FILE_GENERATION.lock();
+                    let mut new_files = FILE_TABLE.lock();
+                    let generation = gen[newfd].wrapping_add(1);
+                    gen[newfd] = generation;
+                    let mut new_state = state.clone();
+                    new_state.generation = generation;
+                    new_files[newfd] = Some(new_state);
+                }
+            }
             newfd
         }
         None => errno(EBADF),
@@ -3022,60 +4279,140 @@ struct Statx {
     _spare3: [u64; 12],
 }
 
-/// statx(2) — genişletilmiş dosya bilgisi döner.
-fn sys_statx(dirfd: usize, pathname: usize, _flags: usize, mask: usize, statxbuf: usize) -> usize {
-    let _ = dirfd; // AT_FDCWD varsayılıyor
-    let _ = mask; // Tüm alanlar doldurulur
-
+/// statx(2) — genişletilmiş dosya bilgisi döner (APUE §4.2, Linux statx(2))
+///
+/// flags: AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW
+/// mask: STATX_* bit maskesi
+fn sys_statx(dirfd: usize, pathname: usize, flags: usize, mask: usize, statxbuf: usize) -> usize {
     if let Err(err) = validate_user_range(statxbuf, core::mem::size_of::<Statx>()) {
         return err;
     }
     let buf = statxbuf as *mut Statx;
 
-    // Dosya adını oku
-    let path = match read_user_cstring(pathname, 256) {
-        Ok(value) => value,
-        Err(err) => return err,
+    // AT_EMPTY_PATH: dirfd'nin kendisine stat yap (man statx(2))
+    // pathname == 0 (NULL) without AT_EMPTY_PATH → EFAULT
+    // (since Linux 6.11 NULL + AT_EMPTY_PATH is also allowed)
+    let path = if flags & AT_EMPTY_PATH != 0 {
+        let files = FILE_TABLE.lock();
+        let Some(Some(state)) = files.get(dirfd) else {
+            return errno(EBADF);
+        };
+        state.path.clone()
+    } else if pathname == 0 {
+        return errno(EFAULT);
+    } else {
+        match read_user_cstring(pathname, 4096) {
+            Ok(value) => value,
+            Err(err) => return err,
+        }
     };
 
     // Özel cihaz dosyaları
     if path == "/dev/null" || path == "/dev/zero" || path == "/dev/dri/card0" {
         with_user_access(|| unsafe {
             core::ptr::write_bytes(buf, 0, 1);
-            (*buf).stx_mask = 0x0FFF;
+            (*buf).stx_mask = (mask & STATX_ALL) as u32;
+            if mask & STATX_MODE != 0 {
+                (*buf).stx_mode = (S_IFCHR | MODE_CHAR) as u16;
+            }
+            if mask & STATX_NLINK != 0 {
+                (*buf).stx_nlink = 1;
+            }
             (*buf).stx_blksize = 4096;
-            (*buf).stx_nlink = 1;
-            (*buf).stx_mode = (S_IFCHR | MODE_CHAR) as u16;
         });
         return 0;
     }
 
-    // F2FS ile dosya bilgisi al
-    let entry = match fs::f2fs::open_entry(&path) {
-        Ok(value) => value,
-        Err(_) => return errno(ENOENT),
+    // AT_SYMLINK_NOFOLLOW: symlink'in kendisine bak
+    let entry = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        // Symlink'in kendisini açmaya çalış
+        match fs::f2fs::open_entry(&path) {
+            Ok(e) => e,
+            Err(_) => {
+                // Dosya yoksa veya symlink kontrolü başarısız
+                return errno(ENOENT);
+            }
+        }
+    } else {
+        // Default: symlink'ler otomatik izlenir (read_link yok)
+        match fs::f2fs::open_entry(&path) {
+            Ok(value) => value,
+            Err(_) => return errno(ENOENT),
+        }
     };
 
     let mode = if entry.is_dir {
-        S_IFDIR | MODE_DIR
+        (S_IFDIR | MODE_DIR) as u16
     } else {
-        S_IFREG | MODE_FILE
+        (S_IFREG | MODE_FILE) as u16
     };
-    let size = if entry.is_dir {
-        0u64
-    } else {
-        entry.size as u64
-    };
+    let file_size = if entry.is_dir { 0u64 } else { entry.size as u64 };
+    let blocks = (file_size + 511) / 512;
+    let now = tasking::scheduler::get_ticks() as u64 * TICK_NS;
+
     with_user_access(|| unsafe {
         core::ptr::write_bytes(buf, 0, 1);
-        (*buf).stx_mask = 0x0FFF; // STATX_BASIC_STATS
+        // Always fill mask
+        (*buf).stx_mask = (mask & STATX_ALL) as u32;
+
+        // Only fill fields matching mask
+        if mask & (STATX_TYPE | STATX_MODE) != 0 {
+            (*buf).stx_mode = (mode & 0xF000) | (entry.mode as u16 & 0x01FF);
+        } else {
+            (*buf).stx_mode = mode; // default
+        }
+        if mask & STATX_NLINK != 0 {
+            (*buf).stx_nlink = 1;
+        }
+        if mask & STATX_UID != 0 {
+            (*buf).stx_uid = entry.uid;
+        }
+        if mask & STATX_GID != 0 {
+            (*buf).stx_gid = entry.gid;
+        }
+        if mask & STATX_INO != 0 {
+            (*buf).stx_ino = entry.ino;
+        }
+        if mask & STATX_SIZE != 0 {
+            (*buf).stx_size = file_size;
+        }
+        if mask & STATX_BLOCKS != 0 {
+            (*buf).stx_blocks = blocks;
+        }
+        if mask & STATX_BTIME != 0 {
+            (*buf).stx_btime = [0u8; 16]; // No birth time in F2FS yet
+        }
+        if mask & STATX_ATIME != 0 {
+            let ts = into_statx_timestamp(now);
+            (*buf).stx_atime = ts;
+        }
+        if mask & STATX_CTIME != 0 {
+            let ts = into_statx_timestamp(now);
+            (*buf).stx_ctime = ts;
+        }
+        if mask & STATX_MTIME != 0 {
+            let ts = into_statx_timestamp(now);
+            (*buf).stx_mtime = ts;
+        }
+
         (*buf).stx_blksize = 4096;
-        (*buf).stx_nlink = 1;
-        (*buf).stx_mode = mode as u16;
-        (*buf).stx_size = size;
-        (*buf).stx_blocks = (size + 511) / 512;
+        (*buf).stx_dev_major = 0;
+        (*buf).stx_dev_minor = 0;
+        (*buf).stx_rdev_major = 0;
+        (*buf).stx_rdev_minor = 0;
+        (*buf).stx_attributes_mask = 0;
     });
     0
+}
+
+/// Timespec (i64 tv_sec + u32 tv_nsec + u32 pad) → 16 byte
+fn into_statx_timestamp(ns: u64) -> [u8; 16] {
+    let sec = (ns / 1_000_000_000) as i64;
+    let nsec = (ns % 1_000_000_000) as u32;
+    let mut ts = [0u8; 16];
+    ts[..8].copy_from_slice(&sec.to_ne_bytes());
+    ts[8..12].copy_from_slice(&nsec.to_ne_bytes());
+    ts
 }
 
 /// Futex (fast userspace mutex)
@@ -3846,8 +5183,66 @@ fn sys_uname(uts_ptr: usize) -> usize {
     0
 }
 
-fn sys_getcwd(_buf: usize, _size: usize) -> usize {
-    unsupported_errno("getcwd")
+/// getcwd(2) — mevcut çalışma dizinini döndürür
+fn sys_getcwd(buf: usize, size: usize) -> usize {
+    if buf == 0 || size == 0 {
+        return errno(EINVAL);
+    }
+    if let Err(e) = validate_user_range(buf, size) {
+        return e;
+    }
+    let cwd = CURRENT_WORKING_DIR.lock();
+    let cwd_bytes = cwd.as_bytes();
+    // null terminator için +1
+    let needed = cwd_bytes.len() + 1;
+    if needed > size {
+        return errno(ERANGE);
+    }
+    if let Err(e) = write_user_bytes(buf, cwd_bytes) {
+        return e;
+    }
+    // null terminator
+    with_user_access(|| unsafe {
+        core::ptr::write((buf + cwd_bytes.len()) as *mut u8, 0u8);
+    });
+    needed
+}
+
+/// chdir(2) — mevcut çalışma dizinini değiştirir
+fn sys_chdir(path_ptr: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // Dizin var mı kontrol et
+    match fs::f2fs::open_entry(&path) {
+        Ok(entry) => {
+            if !entry.is_dir {
+                return errno(ENOTDIR);
+            }
+            let mut cwd = CURRENT_WORKING_DIR.lock();
+            if path.starts_with('/') {
+                *cwd = path;
+            } else {
+                // Göreceli path: mevcut CWD'ye göre çöz
+                let current = cwd.clone();
+                drop(cwd);
+                let resolved = resolve_path_at(AT_FDCWD as usize, &path);
+                let mut cwd = CURRENT_WORKING_DIR.lock();
+                *cwd = resolved;
+            }
+            0
+        }
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// umask(2) — dosya oluşturma maskesini ayarlar, eski maskeyi döndürür
+fn sys_umask(mask: usize) -> usize {
+    let mut umask = PROCESS_UMASK.lock();
+    let old = *umask;
+    *umask = mask & 0o777;
+    old
 }
 
 fn sys_getuid() -> usize {
@@ -4558,13 +5953,16 @@ fn allocate_fd(kind: FdKind) -> usize {
     for (idx, slot) in table.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(kind);
+            // Yeni fd: CLOEXEC varsayılan olarak kapalı
+            let mut cloexec = FD_CLOEXEC.lock();
+            cloexec[idx] = false;
             return idx;
         }
     }
     errno(EIO)
 }
 
-fn allocate_file_fd(file: FileState) -> usize {
+fn allocate_file_fd(mut file: FileState) -> usize {
     let fd = allocate_fd(FdKind::File);
     if fd >= MAX_FDS {
         return fd;
@@ -4573,11 +5971,16 @@ fn allocate_file_fd(file: FileState) -> usize {
     if fd >= files.len() {
         return errno(EIO);
     }
+    let mut gen = FILE_GENERATION.lock();
+    let generation = gen[fd].wrapping_add(1);
+    gen[fd] = generation;
+    file.generation = generation;
     files[fd] = Some(file);
     fd
 }
 
-/// FD serbest bırakır
+/// FD serbest bırakır.
+/// Lock sırası: FD_TABLE → FILE_TABLE → FILE_GENERATION (deadlock önleme).
 fn free_fd(fd: usize) -> usize {
     let mut table = FD_TABLE.lock();
     if fd >= table.len() {
@@ -4588,10 +5991,29 @@ fn free_fd(fd: usize) -> usize {
         return errno(EBADF);
     }
     table[fd] = None;
+    let mut cloexec = FD_CLOEXEC.lock();
+    cloexec[fd] = false;
+    drop(cloexec);
     if kind == Some(FdKind::File) {
+        // APUE §14.3: fd kapanırken POSIX lock'ları release et
+        let _ = fs::file_lock::sys_fcntl_lock(fd as i32, 6, &mut fs::file_lock::FileLock {
+            l_type: 2, // F_UNLCK
+            l_whence: 0, // SEEK_SET
+            l_start: 0,
+            l_len: 0, // entire file
+            l_pid: 0,
+            is_ofd: false,
+        });
+        // man fcntl_locking(2): OFD locks released on last close of OFD
+        fs::file_lock::release_ofd_locks(fd as u64);
         let mut files = FILE_TABLE.lock();
         if fd < files.len() {
             files[fd] = None;
+        }
+        drop(files);
+        let mut gen = FILE_GENERATION.lock();
+        if fd < gen.len() {
+            gen[fd] = gen[fd].wrapping_add(1);
         }
     }
     0

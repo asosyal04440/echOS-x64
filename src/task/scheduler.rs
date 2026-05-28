@@ -435,6 +435,18 @@ pub fn current_task_id() -> TaskId {
     }
 }
 
+/// Mevcut task'ın FD tablosunu döndürür (per-process FD table desteği)
+/// Eğer task'ın kendi FD tablosu varsa onu, yoksa None döner (global tablo kullanılır)
+pub fn current_task_fd_table() -> Option<Arc<Mutex<crate::fs::FileDescriptorTable>>> {
+    let cpu_id = get_current_cpu_id();
+    unsafe {
+        PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)
+            .and_then(|t| t.as_ref())
+            .and_then(|task| task.cold.fd_table.clone())
+    }
+}
+
 pub fn current_execution_mode() -> Option<ExecutionMode> {
     let cpu_id = get_current_cpu_id();
     unsafe {
@@ -514,6 +526,11 @@ pub fn fork_current_user_task(user_rip: u64, user_rsp: u64) -> Option<TaskId> {
         child.cold.user_entry = Some(user_rip);
         child.cold.user_stack_top = Some(user_rsp);
         child.affinity = affinity;
+
+        // Per-process FD tablosunu kopyala — Linux: dup_fd() / copy_files()
+        // Child her zaman kendi tablosuna sahip olur (CLONE_FILES olmadıkça)
+        child.cold.fd_table = Some(crate::fs::clone_fd_table_for_fork());
+
         SMP_SCHEDULER.spawn(child);
         Some(child_id)
     })
@@ -883,6 +900,8 @@ pub fn exec_current_user_image(image: &[u8]) -> Result<(), ()> {
             current.cold.address_space = Some(address_space.clone());
             current.cold.user_entry = Some(user.entry.as_u64());
             current.cold.user_stack_top = Some(user.stack_top.as_u64());
+            // Kernel task user moduna geçiyor — per-process FD tablosu başlat
+            current.init_fd_table();
         }
     });
     unsafe {
@@ -947,6 +966,9 @@ pub fn spawn_user_image_task_with_address_space(
     task.cold.address_space = Some(address_space.clone());
     task.cold.user_entry = Some(user.entry.as_u64());
     task.cold.user_stack_top = Some(user.stack_top.as_u64());
+
+    // Per-process FD tablosu başlat — her user task kendi tablosuna sahip olmalı
+    task.init_fd_table();
 
     x86_64::instructions::interrupts::without_interrupts(|| {
         SMP_SCHEDULER.spawn(task);

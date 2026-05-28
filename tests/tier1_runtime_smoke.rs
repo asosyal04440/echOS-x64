@@ -281,12 +281,12 @@ fn nvme_async_smoke() {
     let sq = vec![ech_os::drivers::nvme::NvmeCommand::new(0, 0, 0); 8].into_boxed_slice();
     let cq = vec![
         ech_os::drivers::nvme::NvmeCompletion {
-            cid: 0,
-            p: 0,
-            sqid: 0,
-            status: 1,
             cdw0: 0,
             cdw1: 0,
+            sq_head: 0,
+            sq_id: 0,
+            cid: 0,
+            status: 1,
         };
         8
     ]

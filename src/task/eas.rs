@@ -56,8 +56,8 @@ fn base_energy_score(task: &EasTask, core: &EasCore) -> i64 {
     let perf_term = capacity * task_weight;
     let energy_term = core.caps.energy_cost.max(1) as i64;
     let kind_bonus = match (task.latency_sensitive, core.kind) {
-        (true, CoreKind::Performance) => 96,
-        (true, CoreKind::Efficiency) => -48,
+        (true, CoreKind::Performance) => capacity.saturating_mul(task_weight),
+        (true, CoreKind::Efficiency) => -capacity.saturating_mul(task_weight / 2),
         (false, CoreKind::Performance) => -16,
         (false, CoreKind::Efficiency) => 24,
     };

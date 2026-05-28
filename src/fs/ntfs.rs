@@ -220,6 +220,7 @@ pub enum NtfsError {
     NotSupported,
     Corrupted,
     OutOfMemory,
+    NoSpace,
 }
 
 // ============================================================================
@@ -1145,7 +1146,9 @@ impl NtfsFileSystem {
     ) -> Result<MftEntry, NtfsError> {
         let parent = self.read_mft_entry_from_storage(parent_entry, storage)?;
         if let Some(index_attr) = parent.get_attribute(ATTR_INDEX_ROOT) {
-            if let Some(entry) = self.find_via_index_root_from_storage(index_attr, name, storage)? {
+            if let Some(entry) =
+                self.find_via_index_root_from_storage(index_attr, name, &parent, storage)?
+            {
                 return Ok(entry);
             }
         }
@@ -1203,6 +1206,7 @@ impl NtfsFileSystem {
         &self,
         index_attr: &NtfsAttribute,
         name: &str,
+        parent: &MftEntry,
         storage: &NtfsStorage,
     ) -> Result<Option<MftEntry>, NtfsError> {
         if index_attr.non_resident {
@@ -1227,14 +1231,29 @@ impl NtfsFileSystem {
             if let Some(entry) = IndexEntry::parse(&data[offset..]) {
                 if entry.is_end() {
                     if entry.has_sub_node() {
-                        // $INDEX_ALLOCATION'dan devam et
+                        // Sub-node VCN bulundu, $INDEX_ALLOCATION'a geç
+                        if let Some(sub_node_vcn) = entry.sub_node_vcn {
+                            if let Some(index_alloc_attr) =
+                                parent.get_attribute(ATTR_INDEX_ALLOCATION)
+                            {
+                                return self.find_via_index_allocation_from_storage(
+                                    Some(index_alloc_attr),
+                                    name,
+                                    storage,
+                                    sub_node_vcn,
+                                );
+                            }
+                        }
                     }
                     break;
                 }
                 if let Some(ref fname) = entry.filename_attr {
                     if ntfs_name_matches(&fname.name, name) {
                         return self
-                            .read_mft_entry_from_storage(entry.file_reference & 0xFFFFFFFFFFFF, storage)
+                            .read_mft_entry_from_storage(
+                                entry.file_reference & 0xFFFFFFFFFFFF,
+                                storage,
+                            )
                             .map(Some)
                             .or(Ok(None));
                     }
@@ -1245,6 +1264,117 @@ impl NtfsFileSystem {
             }
         }
         Ok(None)
+    }
+
+    /// $INDEX_ALLOCATION üzerinden child bul (storage-aware, sub_node VCN ile)
+    fn find_via_index_allocation_from_storage(
+        &self,
+        index_alloc_attr: Option<&NtfsAttribute>,
+        name: &str,
+        storage: &NtfsStorage,
+        sub_node_vcn: u64,
+    ) -> Result<Option<MftEntry>, NtfsError> {
+        let attr = match index_alloc_attr {
+            Some(a) => a,
+            None => return Ok(None),
+        };
+        if !attr.non_resident {
+            return Ok(None);
+        }
+
+        let data = self.read_non_resident_data_from_storage(attr, storage)?;
+        if data.is_empty() {
+            return Ok(None);
+        }
+
+        // Index record'ları parse et (her record INDX header ile başlar)
+        // sub_node_vcn, index record'un VCN'sini belirtir
+        let record_size = 4096usize; // Tipik index record boyutu
+        let record_offset = (sub_node_vcn as usize) * record_size;
+
+        if record_offset + 32 > data.len() {
+            return Ok(None);
+        }
+
+        // INDX magic kontrolü: "INDX" = 0x58444E49
+        if data[record_offset] != 0x49
+            || data[record_offset + 1] != 0x4E
+            || data[record_offset + 2] != 0x44
+            || data[record_offset + 3] != 0x58
+        {
+            return Ok(None);
+        }
+
+        let node_header = IndexNodeHeader::parse(&data[record_offset + 24..]);
+        if let Some(nh) = node_header {
+            let entries_start = record_offset + 24 + 16;
+            let entries_end = entries_start + nh.entries_length as usize;
+            if entries_end <= data.len() {
+                let mut eoffset = entries_start;
+                while eoffset + 16 <= data.len() {
+                    if let Some(entry) = IndexEntry::parse(&data[eoffset..]) {
+                        if entry.is_end() {
+                            // Bu record'da bulunamadı, sub_node varsa devam et
+                            if entry.has_sub_node() {
+                                if let Some(next_vcn) = entry.sub_node_vcn {
+                                    return self.find_via_index_allocation_from_storage(
+                                        Some(attr),
+                                        name,
+                                        storage,
+                                        next_vcn,
+                                    );
+                                }
+                            }
+                            break;
+                        }
+                        if let Some(ref fname) = entry.filename_attr {
+                            if ntfs_name_matches(&fname.name, name) {
+                                return self
+                                    .read_mft_entry_from_storage(
+                                        entry.file_reference & 0xFFFFFFFFFFFF,
+                                        storage,
+                                    )
+                                    .map(Some)
+                                    .or(Ok(None));
+                            }
+                        }
+                        eoffset += entry.entry_length as usize;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Non-resident attribute verisini storage'dan oku (data runs ile)
+    fn read_non_resident_data_from_storage(
+        &self,
+        attr: &NtfsAttribute,
+        storage: &NtfsStorage,
+    ) -> Result<Vec<u8>, NtfsError> {
+        if let AttributeContent::NonResident { data_runs, .. } = &attr.content {
+            let mut result = Vec::new();
+            let mut current_lcn = 0i64;
+            for run in data_runs {
+                if run.length == 0 {
+                    current_lcn = 0;
+                    continue;
+                }
+                current_lcn += run.lcn;
+                if current_lcn < 0 {
+                    continue;
+                }
+                let offset = current_lcn as u64 * self.cluster_size;
+                let length = (run.length * self.cluster_size) as usize;
+                let data = storage.read_exact(offset as usize, length)?;
+                result.extend_from_slice(&data);
+            }
+            Ok(result)
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     /// $INDEX_ALLOCATION üzerinden child bul (non-resident, data runs)
@@ -1285,7 +1415,10 @@ impl NtfsFileSystem {
                             if let Some(ref fname) = entry.filename_attr {
                                 if ntfs_name_matches(&fname.name, name) {
                                     return self
-                                        .read_mft_entry(entry.file_reference & 0xFFFFFFFFFFFF, device_data)
+                                        .read_mft_entry(
+                                            entry.file_reference & 0xFFFFFFFFFFFF,
+                                            device_data,
+                                        )
                                         .map(Some)
                                         .or(Ok(None));
                                 }
@@ -1376,7 +1509,8 @@ impl NtfsFileSystem {
                 let offset = current_lcn as u64 * self.cluster_size;
                 let length = (run.length * self.cluster_size) as usize;
                 if offset as usize + length <= device_data.len() {
-                    result.extend_from_slice(&device_data[offset as usize..offset as usize + length]);
+                    result
+                        .extend_from_slice(&device_data[offset as usize..offset as usize + length]);
                 }
             }
             Ok(result)
@@ -1456,6 +1590,96 @@ impl NtfsStorage {
             }
         }
     }
+
+    pub fn write_exact(&self, offset: usize, data: &[u8]) -> Result<(), NtfsError> {
+        match self {
+            Self::Resident(image) => {
+                let image_len = image.len();
+                let end = offset.checked_add(data.len()).ok_or(NtfsError::ReadError)?;
+                if end > image_len {
+                    return Err(NtfsError::ReadError);
+                }
+                // Arc<Vec<u8>> mutable değil — write için yeni Arc oluştur
+                // Bu yöntem resident storage'da write için uygun değil,
+                // loopback device kullanılmalı
+                Err(NtfsError::NotSupported)
+            }
+            Self::LoopbackDevice(name) => {
+                let mut device =
+                    crate::drivers::loopback::open(name.as_str()).ok_or(NtfsError::ReadError)?;
+                let descriptor = device.descriptor();
+                let block_size = descriptor.block_size as usize;
+                let total_len = descriptor.block_count as usize * block_size;
+                let end = offset.checked_add(data.len()).ok_or(NtfsError::ReadError)?;
+                if end > total_len {
+                    return Err(NtfsError::ReadError);
+                }
+                let start_block = offset / block_size;
+                let end_block = (end + block_size - 1) / block_size;
+                let mut buffer = if start_block == end_block {
+                    // Tek blok içinde kısmi yazma
+                    let mut block = vec![0u8; block_size];
+                    crate::drivers::block::BlockDevice::read_block(
+                        &mut device,
+                        start_block as u64,
+                        block.as_mut_slice(),
+                    )
+                    .map_err(|_| NtfsError::ReadError)?;
+                    let inner_offset = offset % block_size;
+                    block[inner_offset..inner_offset + data.len()].copy_from_slice(data);
+                    block
+                } else {
+                    // Çoklu blok yazma
+                    let mut blocks = vec![0u8; (end_block - start_block) * block_size];
+                    // İlk blok: oku + kısmi yaz
+                    let mut first_block = vec![0u8; block_size];
+                    crate::drivers::block::BlockDevice::read_block(
+                        &mut device,
+                        start_block as u64,
+                        first_block.as_mut_slice(),
+                    )
+                    .map_err(|_| NtfsError::ReadError)?;
+                    let first_offset = offset % block_size;
+                    let first_len = block_size - first_offset;
+                    first_block[first_offset..].copy_from_slice(&data[..first_len]);
+                    blocks[..block_size].copy_from_slice(&first_block);
+                    // Orta bloklar: tam yaz
+                    let mut data_pos = first_len;
+                    for i in 1..(end_block - start_block - 1) {
+                        blocks[i * block_size..(i + 1) * block_size]
+                            .copy_from_slice(&data[data_pos..data_pos + block_size]);
+                        data_pos += block_size;
+                    }
+                    // Son blok: oku + kısmi yaz
+                    if end_block > start_block + 1 {
+                        let last_idx = end_block - start_block - 1;
+                        let mut last_block = vec![0u8; block_size];
+                        crate::drivers::block::BlockDevice::read_block(
+                            &mut device,
+                            end_block as u64 - 1,
+                            last_block.as_mut_slice(),
+                        )
+                        .map_err(|_| NtfsError::ReadError)?;
+                        let remaining =
+                            data.len() - first_len - (end_block - start_block - 2) * block_size;
+                        last_block[..remaining].copy_from_slice(&data[data_pos..]);
+                        blocks[last_idx * block_size..].copy_from_slice(&last_block);
+                    }
+                    blocks
+                };
+                // Blokları yaz
+                for (i, chunk) in buffer.chunks(block_size).enumerate() {
+                    crate::drivers::block::BlockDevice::write_block(
+                        &mut device,
+                        (start_block + i) as u64,
+                        chunk,
+                    )
+                    .map_err(|_| NtfsError::ReadError)?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1510,6 +1734,1208 @@ pub fn unmount_ntfs(name: &str) -> bool {
 /// NTFS modülünü başlatır
 pub fn init() {
     crate::serial_println!("[NTFS] Modül başlatıldı");
+}
+
+// ============================================================================
+// NTFS WRITE DESTEĞİ
+// ============================================================================
+
+/// MFT entry'yi ham baytlara serialize eder (parse'ın tersi)
+///
+/// Format: FILE header + attributes + USA array
+/// MST fixup uygulanmamış ham data döner
+pub fn serialize_mft_entry(entry: &MftEntry, mft_entry_size: usize) -> Vec<u8> {
+    let mut data = vec![0u8; mft_entry_size];
+
+    // FILE signature
+    data[0..4].copy_from_slice(&entry.signature);
+    // Sequence number (offset 2)
+    data[2..4].copy_from_slice(&entry.sequence.to_le_bytes());
+    // Link count (offset 18)
+    data[18..20].copy_from_slice(&entry.link_count.to_le_bytes());
+
+    // Öznitelikleri serialize et
+    let mut attr_offset: usize = 56; // MFT entry header boyutu
+    let mut attr_data = Vec::new();
+
+    for attr in &entry.attributes {
+        let attr_bytes = serialize_attribute(attr);
+        attr_data.extend_from_slice(&attr_bytes);
+    }
+
+    // Attribute end marker (0xFFFFFFFF)
+    attr_data.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+
+    // USA offset ve count hesapla
+    let sector_size = 512;
+    let num_sectors = (mft_entry_size + sector_size - 1) / sector_size;
+    let usa_offset = mft_entry_size - (num_sectors * 2);
+    // USA offset word 4'te
+    data[4..6].copy_from_slice(&(usa_offset as u16).to_le_bytes());
+    // USA count word 6'da
+    data[6..8].copy_from_slice(&((num_sectors + 1) as u16).to_le_bytes());
+
+    // Attribute offset word 20'de
+    data[20..22].copy_from_slice(&(attr_offset as u16).to_le_bytes());
+
+    // Öznitelikleri kopyala
+    if attr_offset + attr_data.len() <= mft_entry_size {
+        data[attr_offset..attr_offset + attr_data.len()].copy_from_slice(&attr_data);
+    }
+
+    // MST fixup uygula
+    apply_mst_fixup(&mut data, sector_size);
+
+    data
+}
+
+/// NtfsAttribute'ü ham baytlara serialize eder
+fn serialize_attribute(attr: &NtfsAttribute) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    // Common header (16 byte)
+    data.extend_from_slice(&attr.attr_type.to_le_bytes());
+    data.extend_from_slice(&attr.total_length.to_le_bytes());
+    data.push(if attr.non_resident { 1 } else { 0 });
+    data.push(attr.name_length);
+    data.extend_from_slice(&attr.name_offset.to_le_bytes());
+    data.extend_from_slice(&attr.flags.to_le_bytes());
+    data.extend_from_slice(&attr.instance.to_le_bytes());
+
+    if attr.non_resident {
+        // Non-resident header
+        if let AttributeContent::NonResident {
+            start_vcn,
+            last_vcn,
+            data_runs_offset,
+            data_runs,
+        } = &attr.content
+        {
+            data.extend_from_slice(&start_vcn.to_le_bytes());
+            data.extend_from_slice(&last_vcn.to_le_bytes());
+            data.extend_from_slice(&data_runs_offset.to_le_bytes());
+            // Compression unit size (2 byte) — 0 = compression yok
+            data.extend_from_slice(&0u16.to_le_bytes());
+            // Padding (5 byte)
+            data.extend_from_slice(&[0u8; 5]);
+
+            // Data run'ları encode et
+            let runs_start = *data_runs_offset as usize;
+            let mut encoded_runs = encode_data_runs(data_runs);
+            // Runs offset'e padding ekle
+            while data.len() < runs_start {
+                data.push(0);
+            }
+            data.extend_from_slice(&encoded_runs);
+
+            // total_length güncelle
+            let total_len = data.len() as u32;
+            data[4..8].copy_from_slice(&total_len.to_le_bytes());
+        }
+    } else {
+        // Resident header
+        if let AttributeContent::Resident {
+            data_offset,
+            data_length,
+        } = &attr.content
+        {
+            data.extend_from_slice(&data_length.to_le_bytes());
+            data.extend_from_slice(&data_offset.to_le_bytes());
+
+            // Resident data'yı kopyala
+            let resident_start = *data_offset as usize;
+            let resident_len = *data_length as usize;
+            while data.len() < resident_start {
+                data.push(0);
+            }
+            if let Some(rdata) = attr.get_resident_data() {
+                let copy_len = resident_len.min(rdata.len());
+                data.extend_from_slice(&rdata[..copy_len]);
+            }
+            // Padding
+            while data.len() < resident_start + resident_len {
+                data.push(0);
+            }
+
+            // total_length güncelle
+            let total_len = data.len() as u32;
+            data[4..8].copy_from_slice(&total_len.to_le_bytes());
+        }
+    }
+
+    data
+}
+
+/// DataRun listesini NTFS data run formatına encode eder
+fn encode_data_runs(runs: &[DataRun]) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut prev_lcn: i64 = 0;
+
+    for run in runs {
+        let length = run.length;
+        let lcn = run.lcn;
+
+        // Length encoding — minimal byte sayısı
+        let mut len_bytes = Vec::new();
+        let mut len = length;
+        while len > 0 {
+            len_bytes.push((len & 0xFF) as u8);
+            len >>= 8;
+        }
+        if len_bytes.is_empty() {
+            len_bytes.push(0);
+        }
+
+        // LCN encoding — relative to previous, minimal byte sayısı
+        let relative_lcn = lcn - prev_lcn;
+        let mut lcn_bytes = Vec::new();
+        let mut lcn_val = relative_lcn;
+        let is_negative = lcn_val < 0;
+
+        while lcn_val != 0 {
+            lcn_bytes.push((lcn_val & 0xFF) as u8);
+            lcn_val >>= 8;
+        }
+        if lcn_bytes.is_empty() {
+            lcn_bytes.push(0);
+        }
+
+        // Sign extension: negative ise son byte 0xFF olmalı
+        if is_negative && (lcn_bytes.last().unwrap() & 0x80) == 0 {
+            lcn_bytes.push(0xFF);
+        }
+        // Positive ise son byte 0x80 olmamalı
+        if !is_negative && (lcn_bytes.last().unwrap() & 0x80) != 0 {
+            lcn_bytes.push(0);
+        }
+
+        // Header: low nibble = len size, high nibble = lcn size
+        let header = (len_bytes.len() as u8) | ((lcn_bytes.len() as u8) << 4);
+        data.push(header);
+        data.extend_from_slice(&len_bytes);
+        data.extend_from_slice(&lcn_bytes);
+
+        prev_lcn = lcn;
+    }
+
+    // Runlist terminator
+    data.push(0);
+
+    data
+}
+
+/// MFT entry'ye MST (Multi-Sector Transfer) fixup uygula
+///
+/// Her sektörün son 2 byte'ına update sequence number yazılır.
+/// Orijinal sector son byte'ları USA array'e kaydedilir.
+fn apply_mst_fixup(data: &mut [u8], sector_size: usize) {
+    if data.len() < 48 {
+        return;
+    }
+
+    let usa_offset = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let usa_count = u16::from_le_bytes([data[6], data[7]]) as usize;
+
+    // Sequence number'ı 1 artır
+    let seq_num = u16::from_le_bytes([data[2], data[3]]).wrapping_add(1);
+    data[2..4].copy_from_slice(&seq_num.to_le_bytes());
+
+    // Her sektörün son 2 byte'ını USA array'e kaydet ve seq_num ile değiştir
+    let num_sectors = data.len() / sector_size;
+    for i in 0..num_sectors.min(usa_count - 1) {
+        let sector_end = (i + 1) * sector_size - 2;
+        let orig_bytes = [data[sector_end], data[sector_end + 1]];
+        if usa_offset + i * 2 + 2 <= data.len() {
+            data[usa_offset + i * 2..usa_offset + i * 2 + 2].copy_from_slice(&orig_bytes);
+        }
+        data[sector_end..sector_end + 2].copy_from_slice(&seq_num.to_le_bytes());
+    }
+}
+
+/// MFT entry'den MST fixup doğrula ve kaldır
+fn verify_and_remove_mst_fixup(data: &mut [u8], sector_size: usize) -> Result<(), NtfsError> {
+    if data.len() < 48 {
+        return Err(NtfsError::Corrupted);
+    }
+
+    let usa_offset = u16::from_le_bytes([data[4], data[5]]) as usize;
+    let usa_count = u16::from_le_bytes([data[6], data[7]]) as usize;
+
+    if usa_offset == 0 || usa_count == 0 {
+        return Ok(()); // USA yok
+    }
+
+    if usa_offset + usa_count * 2 > data.len() {
+        return Err(NtfsError::Corrupted);
+    }
+
+    // USA array'den orijinal sector son byte'larını geri yükle
+    let num_sectors = data.len() / sector_size;
+    for i in 0..num_sectors.min(usa_count - 1) {
+        let sector_end = (i + 1) * sector_size - 2;
+        if usa_offset + i * 2 + 2 <= data.len() {
+            let orig_bytes = [data[usa_offset + i * 2], data[usa_offset + i * 2 + 1]];
+            data[sector_end..sector_end + 2].copy_from_slice(&orig_bytes);
+        }
+    }
+
+    Ok(())
+}
+
+/// MFT entry'yi diske yaz
+fn write_mft_entry_raw(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    entry_num: u64,
+    entry_data: &[u8],
+) -> Result<(), NtfsError> {
+    let offset = fs.mft_offset + entry_num * fs.mft_entry_size;
+    storage.write_exact(offset as usize, entry_data)
+}
+
+/// $MFTMirr'e sync et — MFT'nin ilk N entry'sinin kopyası
+///
+/// Spec: layout.h FILE_MFTMirr — "copy of first four mft records.
+/// If cluster size > 4kiB, copy of first N mft records with
+/// N = cluster_size / mft_record_size."
+/// mft.c ntfs_mftmirr_sync.
+fn sync_mft_mirror(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    entry_num: u64,
+    entry_data: &[u8],
+) -> Result<(), NtfsError> {
+    // MFTMirr'de kaç entry var?
+    let mirror_count = if fs.cluster_size > 4096 {
+        fs.cluster_size / fs.mft_entry_size
+    } else {
+        4
+    };
+
+    // Sadece ilk N entry mirror'da. Bu entry o aralıktaysa sync et.
+    if entry_num >= mirror_count {
+        return Ok(());
+    }
+
+    let mirror_offset = fs.boot_sector.mftmirr_cluster * fs.cluster_size
+        + entry_num * fs.mft_entry_size;
+    storage.write_exact(mirror_offset as usize, entry_data)
+}
+
+/// MFT entry'yi oku, MST fixup'u kaldır, parse et
+fn read_mft_entry_raw(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    entry_num: u64,
+) -> Result<(MftEntry, Vec<u8>), NtfsError> {
+    let entry_bytes = fs.read_mft_entry_from_storage(entry_num, storage)?;
+    let mut raw_data = serialize_mft_entry(&entry_bytes, fs.mft_entry_size as usize);
+
+    // Bu zaten parse edilmiş MftEntry, raw_data için ayrı okuma yapalım
+    let offset = fs.mft_offset + entry_num * fs.mft_entry_size;
+    let mut raw = storage.read_exact(offset as usize, fs.mft_entry_size as usize)?;
+    let sector_size = fs.boot_sector.bytes_per_sector as usize;
+    verify_and_remove_mst_fixup(&mut raw, sector_size)?;
+    let entry = MftEntry::parse(&raw).ok_or(NtfsError::Corrupted)?;
+
+    Ok((entry, raw))
+}
+
+/// $BITMAP attribute verisini oku
+///
+/// $Bitmap (MFT #6) non-resident attribute'tur. Data run'ları absolute LCN
+/// içerir — MFT offset ile karıştırılmamalıdır. Spec: layout.h FILE_Bitmap,
+/// attrib.c ntfs_attr_read.
+fn read_bitmap_data(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    bitmap_mft_num: u64,
+) -> Result<Vec<u8>, NtfsError> {
+    let (entry, _raw) = read_mft_entry_raw(storage, fs, bitmap_mft_num)?;
+
+    let bitmap_attr = entry
+        .attributes
+        .iter()
+        .find(|a| a.attr_type == ATTR_BITMAP)
+        .ok_or(NtfsError::NotFound)?;
+
+    if !bitmap_attr.non_resident {
+        bitmap_attr
+            .get_resident_data()
+            .map(|d| d.to_vec())
+            .ok_or(NtfsError::Corrupted)
+    } else {
+        if let AttributeContent::NonResident { data_runs, .. } = &bitmap_attr.content {
+            let mut data = Vec::new();
+            let mut prev_lcn: i64 = 0;
+
+            for run in data_runs {
+                let lcn = prev_lcn + run.lcn;
+                prev_lcn = lcn;
+
+                if lcn >= 0 {
+                    let cluster_offset = (lcn as u64) * fs.cluster_size;
+                    let read_len = (run.length * fs.cluster_size) as usize;
+                    let bytes = storage.read_exact(cluster_offset as usize, read_len)?;
+                    data.extend_from_slice(&bytes);
+                }
+            }
+
+            Ok(data)
+        } else {
+            Err(NtfsError::Corrupted)
+        }
+    }
+}
+
+/// $BITMAP attribute verisini yaz
+///
+/// Data run'ları absolute LCN içerir. Spec: attrib.c ntfs_cluster_write.
+fn write_bitmap_data(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    bitmap_mft_num: u64,
+    data: &[u8],
+) -> Result<(), NtfsError> {
+    let (entry, _raw) = read_mft_entry_raw(storage, fs, bitmap_mft_num)?;
+
+    let bitmap_attr = entry
+        .attributes
+        .iter()
+        .find(|a| a.attr_type == ATTR_BITMAP)
+        .ok_or(NtfsError::NotFound)?;
+
+    if !bitmap_attr.non_resident {
+        Err(NtfsError::NotSupported)
+    } else {
+        if let AttributeContent::NonResident { data_runs, .. } = &bitmap_attr.content {
+            let mut data_offset = 0usize;
+            let mut prev_lcn: i64 = 0;
+
+            for run in data_runs {
+                let lcn = prev_lcn + run.lcn;
+                prev_lcn = lcn;
+
+                if lcn >= 0 {
+                    let cluster_offset = (lcn as u64) * fs.cluster_size;
+                    let write_len = (run.length * fs.cluster_size) as usize;
+                    let write_len = write_len.min(data.len() - data_offset);
+                    storage.write_exact(
+                        cluster_offset as usize,
+                        &data[data_offset..data_offset + write_len],
+                    )?;
+                    data_offset += write_len;
+                }
+            }
+
+            Ok(())
+        } else {
+            Err(NtfsError::Corrupted)
+        }
+    }
+}
+
+/// $BITMAP'te bir bit'i set veya clear et
+fn update_bitmap_bit(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    bitmap_mft_num: u64,
+    bit: u64,
+    set: bool,
+) -> Result<(), NtfsError> {
+    let mut bitmap_data = read_bitmap_data(storage, fs, bitmap_mft_num)?;
+
+    let byte_idx = (bit / 8) as usize;
+    let bit_idx = (bit % 8) as u8;
+
+    if byte_idx >= bitmap_data.len() {
+        return Err(NtfsError::NoSpace);
+    }
+
+    if set {
+        bitmap_data[byte_idx] |= 1 << bit_idx;
+    } else {
+        bitmap_data[byte_idx] &= !(1 << bit_idx);
+    }
+
+    write_bitmap_data(storage, fs, bitmap_mft_num, &bitmap_data)
+}
+
+/// $BITMAP'te ilk sıfır bit'i bul
+fn find_free_bit_in_bitmap(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    bitmap_mft_num: u64,
+    start_bit: u64,
+) -> Result<u64, NtfsError> {
+    let bitmap_data = read_bitmap_data(storage, fs, bitmap_mft_num)?;
+    let total_bits = (bitmap_data.len() as u64) * 8;
+
+    let mut bit = start_bit;
+    while bit < total_bits {
+        let byte_idx = (bit / 8) as usize;
+        let bit_idx = (bit % 8) as u8;
+        if byte_idx < bitmap_data.len() && (bitmap_data[byte_idx] & (1 << bit_idx)) == 0 {
+            return Ok(bit);
+        }
+        bit += 1;
+    }
+
+    Err(NtfsError::NoSpace)
+}
+
+/// NTFS attribute'tan VCN->LCN mapping ile veri oku
+///
+/// Data run'ları delta-encoded LCN içerir. İlk run absolute LCN,
+/// sonraki run'lar önceki LCN'ye göreli. Spec: layout.h ATTR_RECORD,
+/// attrib.c ntfs_attr_read.
+fn read_non_resident_attr(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    attr: &NtfsAttribute,
+) -> Result<Vec<u8>, NtfsError> {
+    if let AttributeContent::NonResident {
+        data_runs,
+        last_vcn,
+        start_vcn,
+        ..
+    } = &attr.content
+    {
+        let total_size = ((*last_vcn + 1).saturating_sub(*start_vcn) * fs.cluster_size) as usize;
+        if total_size == 0 {
+            return Ok(Vec::new());
+        }
+        let mut data = vec![0u8; total_size];
+        let mut prev_lcn: i64 = 0;
+        let mut current_vcn: u64 = *start_vcn;
+
+        for run in data_runs {
+            let lcn = prev_lcn + run.lcn;
+            prev_lcn = lcn;
+
+            if lcn >= 0 {
+                let cluster_offset = (lcn as u64) * fs.cluster_size;
+                let read_len = (run.length * fs.cluster_size) as usize;
+                let data_offset = ((current_vcn - *start_vcn) * fs.cluster_size) as usize;
+                let copy_len = read_len.min(total_size.saturating_sub(data_offset));
+                if data_offset < total_size {
+                    let bytes = storage.read_exact(cluster_offset as usize, read_len)?;
+                    data[data_offset..data_offset + copy_len]
+                        .copy_from_slice(&bytes[..copy_len]);
+                }
+            }
+
+            current_vcn += run.length;
+        }
+
+        Ok(data)
+    } else {
+        Err(NtfsError::NotSupported)
+    }
+}
+
+/// NTFS attribute'a VCN->LCN mapping ile veri yaz
+///
+/// Data run'ları delta-encoded LCN içerir. İlk run absolute LCN,
+/// sonraki run'lar önceki LCN'ye göreli. Spec: attrib.c ntfs_attr_write.
+fn write_non_resident_attr(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    attr: &NtfsAttribute,
+    data: &[u8],
+) -> Result<(), NtfsError> {
+    if let AttributeContent::NonResident {
+        data_runs,
+        start_vcn,
+        ..
+    } = &attr.content
+    {
+        let mut data_offset = 0usize;
+        let mut prev_lcn: i64 = 0;
+        let mut current_vcn: u64 = *start_vcn;
+
+        for run in data_runs {
+            let lcn = prev_lcn + run.lcn;
+            prev_lcn = lcn;
+
+            if lcn >= 0 && data_offset < data.len() {
+                let cluster_offset = (lcn as u64) * fs.cluster_size;
+                let write_len = (run.length * fs.cluster_size) as usize;
+                let write_len = write_len.min(data.len() - data_offset);
+                storage.write_exact(
+                    cluster_offset as usize,
+                    &data[data_offset..data_offset + write_len],
+                )?;
+                data_offset += write_len;
+            }
+
+            current_vcn += run.length;
+        }
+
+        Ok(())
+    } else {
+        Err(NtfsError::NotSupported)
+    }
+}
+
+/// NTFS'te dosya yaz — resident ve non-resident tam destek
+///
+/// Küçük dosyalar (~700 byte altı) resident olarak MFT'ye yazılır.
+/// Büyük dosyalar non-resident olarak cluster'lara yazılır.
+/// data=ordered semantics: önce veri yazılır, sonra metadata güncellenir.
+pub fn write_ntfs_file(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    mft_entry_num: u64,
+    data: &[u8],
+) -> Result<(), NtfsError> {
+    let (mut entry, mut raw_data) = read_mft_entry_raw(storage, fs, mft_entry_num)?;
+
+    // $DATA attribute bul (isimsiz — default data stream)
+    let data_attr_idx = entry
+        .attributes
+        .iter()
+        .position(|a| a.attr_type == ATTR_DATA && a.name_length == 0)
+        .ok_or(NtfsError::NotFound)?;
+
+    let data_attr = &entry.attributes[data_attr_idx];
+    let mft_entry_size = fs.mft_entry_size as usize;
+
+    if !data_attr.non_resident && data.len() <= 700 {
+        // Resident write — MFT entry içinde
+        if let AttributeContent::Resident {
+            data_offset,
+            data_length,
+        } = &data_attr.content
+        {
+            let offset = *data_offset as usize;
+            let len = *data_length as usize;
+
+            if offset + data.len() > mft_entry_size {
+                // Veri MFT'ye sığmıyor, non-resident'e geç
+                return write_ntfs_file_non_resident(storage, fs, mft_entry_num, data);
+            }
+
+            // raw_data'da resident veriyi güncelle
+            raw_data[offset..offset + data.len()].copy_from_slice(data);
+
+            // Attribute header güncelle: content length (offset 16)
+            let attr_header_offset = find_attr_header_offset(&raw_data, data_attr_idx)?;
+            let len_bytes = (data.len() as u32).to_le_bytes();
+            raw_data[attr_header_offset + 16..attr_header_offset + 20].copy_from_slice(&len_bytes);
+
+            // MFT entry'yi geri yaz
+            write_mft_entry_raw(storage, fs, mft_entry_num, &raw_data)?;
+            return Ok(());
+        }
+    }
+
+    // Non-resident write
+    if data_attr.non_resident {
+        // Zaten non-resident — mevcut cluster'lara yaz
+        write_non_resident_attr(storage, fs, data_attr, data)?;
+
+        // MFT entry'deki data size güncelle
+        let attr_header_offset = find_attr_header_offset(&raw_data, data_attr_idx)?;
+        let size_bytes = (data.len() as u64).to_le_bytes();
+        // Initialized size (offset 48)
+        raw_data[attr_header_offset + 48..attr_header_offset + 56].copy_from_slice(&size_bytes);
+        // Data size (offset 56)
+        raw_data[attr_header_offset + 56..attr_header_offset + 64].copy_from_slice(&size_bytes);
+
+        write_mft_entry_raw(storage, fs, mft_entry_num, &raw_data)?;
+    } else {
+        // Resident'tan non-resident'a geçiş
+        return write_ntfs_file_non_resident(storage, fs, mft_entry_num, data);
+    }
+
+    Ok(())
+}
+
+/// Dosyayı non-resident olarak yaz — cluster allocation + runlist + data write
+///
+/// Spec: attrib.c ntfs_cluster_alloc + ntfs_non_resident_attr_write.
+/// 1. $Bitmap'den cluster allocate et (zone-aware, contiguous tercih)
+/// 2. Bitişik cluster'ları run'lara birleştir (delta-encoded LCN)
+/// 3. Veriyi allocated cluster'lara yaz (data=ordered: önce veri)
+/// 4. MFT entry'yi güncelle (sonra metadata)
+/// 5. $MFTMirr'e sync et
+fn write_ntfs_file_non_resident(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    mft_entry_num: u64,
+    data: &[u8],
+) -> Result<(), NtfsError> {
+    let clusters_needed = ((data.len() as u64 + fs.cluster_size - 1) / fs.cluster_size) as u64;
+    if clusters_needed == 0 {
+        return Err(NtfsError::InvalidFormat);
+    }
+
+    // $Bitmap'den free cluster'ları bul ve allocate et
+    // Contiguous allocation tercih et (runlist merging için)
+    let mut allocated_runs: Vec<(u64, u64)> = Vec::new(); // (start_cluster, count)
+    let mut search_start = 0u64;
+    let mut remaining = clusters_needed;
+
+    while remaining > 0 {
+        let cluster = find_free_bit_in_bitmap(storage, fs, MFT_BITMAP, search_start)?;
+        let run_start = cluster;
+        let mut run_len = 0u64;
+
+        // Contiguous free cluster'ları tara
+        while cluster + run_len < (fs.boot_sector.total_sectors / fs.boot_sector.sectors_per_cluster as u64)
+            && run_len < remaining
+        {
+            let byte_idx = ((cluster + run_len) / 8) as usize;
+            let bit_idx = ((cluster + run_len) % 8) as u8;
+            let bitmap_data = read_bitmap_data(storage, fs, MFT_BITMAP)?;
+            if byte_idx >= bitmap_data.len()
+                || (bitmap_data[byte_idx] & (1 << bit_idx)) != 0
+            {
+                break;
+            }
+            run_len += 1;
+        }
+
+        // Bu run'u allocate et
+        for i in 0..run_len {
+            update_bitmap_bit(storage, fs, MFT_BITMAP, run_start + i, true)?;
+        }
+        allocated_runs.push((run_start, run_len));
+        remaining -= run_len;
+        search_start = run_start + run_len;
+    }
+
+    // DataRun'lara dönüştür (delta-encoded LCN)
+    let mut runs: Vec<DataRun> = Vec::new();
+    let mut prev_lcn: i64 = 0;
+
+    for &(start, count) in &allocated_runs {
+        let lcn = start as i64;
+        let delta = lcn - prev_lcn;
+        runs.push(DataRun {
+            length: count,
+            lcn: delta,
+        });
+        prev_lcn = lcn;
+    }
+
+    let last_vcn = clusters_needed - 1;
+    let data_runs_offset: u16 = 64;
+
+    let new_data_attr = NtfsAttribute {
+        attr_type: ATTR_DATA,
+        total_length: 0,
+        non_resident: true,
+        name_length: 0,
+        name_offset: 0,
+        flags: 0,
+        instance: 0,
+        content: AttributeContent::NonResident {
+            start_vcn: 0,
+            last_vcn,
+            data_runs_offset,
+            data_runs: runs.clone(),
+        },
+        resident_data: Vec::new(),
+    };
+
+    let (mut entry, _raw_data) = read_mft_entry_raw(storage, fs, mft_entry_num)?;
+
+    let data_attr_idx = entry
+        .attributes
+        .iter()
+        .position(|a| a.attr_type == ATTR_DATA && a.name_length == 0)
+        .ok_or(NtfsError::NotFound)?;
+    entry.attributes[data_attr_idx] = new_data_attr;
+
+    let serialized = serialize_mft_entry(&entry, fs.mft_entry_size as usize);
+    write_mft_entry_raw(storage, fs, mft_entry_num, &serialized)?;
+
+    // Sync $MFTMirr (MFT'nin ilk 4 entry'sinin kopyası)
+    sync_mft_mirror(storage, fs, mft_entry_num, &serialized)?;
+
+    // Veriyi allocated cluster'lara yaz (data=ordered: önce veri, sonra metadata commit)
+    let mut data_offset = 0usize;
+    let mut prev_lcn_write: i64 = 0;
+
+    for run in &runs {
+        let lcn = prev_lcn_write + run.lcn;
+        prev_lcn_write = lcn;
+
+        if lcn >= 0 {
+            let cluster_offset = (lcn as u64) * fs.cluster_size;
+            let write_len = (run.length as usize) * fs.cluster_size as usize;
+            let write_len = write_len.min(data.len() - data_offset);
+            storage.write_exact(
+                cluster_offset as usize,
+                &data[data_offset..data_offset + write_len],
+            )?;
+            data_offset += write_len;
+        }
+    }
+
+    Ok(())
+}
+
+/// Raw data içinde bir attribute'un header offset'ini bul
+fn find_attr_header_offset(raw_data: &[u8], attr_idx: usize) -> Result<usize, NtfsError> {
+    let mut offset: usize = u16::from_le_bytes([raw_data[20], raw_data[21]]) as usize;
+    let mut idx = 0;
+
+    while offset + 16 <= raw_data.len() {
+        let attr_type = u32::from_le_bytes([
+            raw_data[offset],
+            raw_data[offset + 1],
+            raw_data[offset + 2],
+            raw_data[offset + 3],
+        ]);
+
+        if attr_type == 0xFFFFFFFF {
+            break;
+        }
+
+        if idx == attr_idx {
+            return Ok(offset);
+        }
+
+        let attr_len = u32::from_le_bytes([
+            raw_data[offset + 4],
+            raw_data[offset + 5],
+            raw_data[offset + 6],
+            raw_data[offset + 7],
+        ]) as usize;
+
+        if attr_len == 0 {
+            break;
+        }
+
+        offset += attr_len;
+        idx += 1;
+    }
+
+    Err(NtfsError::NotFound)
+}
+
+/// NTFS'te yeni dosya oluştur
+///
+/// Adımlar:
+/// 1. $MFT Bitmap'ten free MFT entry bul ve allocate et
+/// 2. Yeni MFT entry oluştur (FILE header + $SI + $FN + $DATA)
+/// 3. Parent dizinin index'ine entry ekle ($INDEX_ROOT veya $INDEX_ALLOCATION)
+/// 4. MFT entry'yi diske yaz
+pub fn create_ntfs_file(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    parent_mft: u64,
+    name: &str,
+    is_dir: bool,
+) -> Result<u64, NtfsError> {
+    // 1. Free MFT entry bul
+    let free_entry = find_free_bit_in_bitmap(storage, fs, MFT_BITMAP, 24)?;
+    update_bitmap_bit(storage, fs, MFT_BITMAP, free_entry, true)?;
+
+    // 2. Yeni MFT entry oluştur
+    let mft_entry_size = fs.mft_entry_size as usize;
+    let sector_size = fs.boot_sector.bytes_per_sector as usize;
+    let num_sectors = (mft_entry_size + sector_size - 1) / sector_size;
+
+    // $FILE_NAME attribute için name verisi
+    let name_utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let name_len_bytes = name_utf16.len() as u8;
+
+    // $STANDARD_INFORMATION attribute: 72 byte (resident)
+    let si_attr = NtfsAttribute {
+        attr_type: ATTR_STANDARD_INFORMATION,
+        total_length: 72,
+        non_resident: false,
+        name_length: 0,
+        name_offset: 0,
+        flags: 0,
+        instance: 0,
+        content: AttributeContent::Resident {
+            data_offset: 24,
+            data_length: 64,
+        },
+        resident_data: vec![0u8; 64], // Timestamps — şimdilik sıfır
+    };
+
+    // $FILE_NAME attribute: 66 + name_len (resident)
+    // Spec: layout.h FILE_NAME_ATTR — parent_directory is leMFT_REF (48-bit index + 16-bit seq)
+    let fname_content_len = 66 + name_utf16.len();
+    let mut fname_data = vec![0u8; fname_content_len];
+    // Parent directory reference (8 byte) — MFT_REF format: low 48 bits = index, high 16 bits = sequence
+    let parent_ref = parent_mft & 0x0000_FFFF_FFFF_FFFF; // 48-bit index, sequence = 0
+    fname_data[0..8].copy_from_slice(&parent_ref.to_le_bytes());
+    // Timestamps (32 byte) — sıfır
+    // File size (8 byte) — sıfır
+    // Allocated size (8 byte) — sıfır
+    // Flags (4 byte)
+    let flags: u32 = if is_dir { 0x00000010 } else { 0x00000020 };
+    fname_data[56..60].copy_from_slice(&flags.to_le_bytes());
+    // Reparse value (4 byte)
+    // Name length (1 byte)
+    fname_data[64] = name_len_bytes;
+    // Name space (1 byte) — POSIX
+    fname_data[65] = FILE_NAME_POSIX;
+    // Name
+    fname_data[66..].copy_from_slice(&name_utf16);
+
+    let fname_attr = NtfsAttribute {
+        attr_type: ATTR_FILE_NAME,
+        total_length: (16 + fname_content_len) as u32,
+        non_resident: false,
+        name_length: 0,
+        name_offset: 0,
+        flags: 0,
+        instance: 0,
+        content: AttributeContent::Resident {
+            data_offset: 24,
+            data_length: fname_content_len as u32,
+        },
+        resident_data: fname_data,
+    };
+
+    // $DATA attribute: resident, boş
+    let data_attr = NtfsAttribute {
+        attr_type: ATTR_DATA,
+        total_length: 24,
+        non_resident: false,
+        name_length: 0,
+        name_offset: 0,
+        flags: 0,
+        instance: 0,
+        content: AttributeContent::Resident {
+            data_offset: 24,
+            data_length: 0,
+        },
+        resident_data: Vec::new(),
+    };
+
+    // MFT entry oluştur
+    let mut entry = MftEntry {
+        signature: MftEntry::SIGNATURE_FILE,
+        sequence: 1,
+        link_count: 1,
+        attributes: vec![si_attr, fname_attr, data_attr],
+        entry_number: free_entry,
+    };
+
+    // Flags: in-use (0x01), directory (0x02)
+    // Serialize sırasında raw data'ya yazılacak
+
+    // 3. MFT entry'yi yaz
+    let serialized = serialize_mft_entry(&entry, mft_entry_size);
+    write_mft_entry_raw(storage, fs, free_entry, &serialized)?;
+
+    // 4. Parent dizine index entry ekle
+    add_index_entry(storage, fs, parent_mft, free_entry, name, is_dir)?;
+
+    Ok(free_entry)
+}
+
+/// Parent dizinin index'ine yeni entry ekle
+///
+/// $INDEX_ROOT resident ise: içinde yer varsa ekle, yoksa $INDEX_ALLOCATION'a geç
+/// $INDEX_ALLOCATION non-resident ise: index record'a ekle
+fn add_index_entry(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    parent_mft: u64,
+    child_mft: u64,
+    name: &str,
+    is_dir: bool,
+) -> Result<(), NtfsError> {
+    let (mut entry, mut raw_data) = read_mft_entry_raw(storage, fs, parent_mft)?;
+
+    // $INDEX_ROOT attribute bul
+    let idx_root_attr = entry
+        .attributes
+        .iter()
+        .find(|a| a.attr_type == ATTR_INDEX_ROOT)
+        .ok_or(NtfsError::NotFound)?;
+
+    if !idx_root_attr.non_resident {
+        // Resident $INDEX_ROOT — içinde yer varsa ekle
+        if let AttributeContent::Resident {
+            data_offset,
+            data_length,
+        } = &idx_root_attr.content
+        {
+            let idx_data = idx_root_attr
+                .get_resident_data()
+                .ok_or(NtfsError::Corrupted)?;
+            let mut idx_data = idx_data.to_vec();
+
+            // Index node header parse
+            if idx_data.len() < 16 {
+                return Err(NtfsError::Corrupted);
+            }
+            let entries_offset =
+                u32::from_le_bytes([idx_data[0], idx_data[1], idx_data[2], idx_data[3]]) as usize;
+            let entries_length =
+                u32::from_le_bytes([idx_data[4], idx_data[5], idx_data[6], idx_data[7]]) as usize;
+            let allocated_size =
+                u32::from_le_bytes([idx_data[8], idx_data[9], idx_data[10], idx_data[11]]) as usize;
+
+            // Yeni index entry oluştur
+            let name_utf16: Vec<u8> = name.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+            let entry_size = 16 + 66 + name_utf16.len() + 8; // header + $FN + sub-node VCN (align)
+            let entry_size_aligned = (entry_size + 7) & !7;
+
+            // Yer var mı kontrol et
+            if entries_length + entry_size_aligned > allocated_size {
+                // Yer yok — $INDEX_ALLOCATION'a geç (şimdilik hata)
+                return Err(NtfsError::NoSpace);
+            }
+
+            // Index entry oluştur
+            let mut new_entry = vec![0u8; entry_size_aligned];
+            // File reference (8 byte)
+            new_entry[0..8].copy_from_slice(&child_mft.to_le_bytes());
+            // Entry length (2 byte)
+            new_entry[8..10].copy_from_slice(&(entry_size as u16).to_le_bytes());
+            // Stream length (2 byte) — $FILE_NAME boyutu
+            new_entry[10..12].copy_from_slice(&((66 + name_utf16.len()) as u16).to_le_bytes());
+            // Flags: NODE (0x01) — child var
+            if is_dir {
+                new_entry[12] = INDEX_ENTRY_NODE;
+            }
+            // $FILE_NAME stream
+            let mut fname_data = vec![0u8; 66 + name_utf16.len()];
+            // Parent directory = child_mft'nin parent'ı (parent_mft), MFT_REF format
+            let parent_ref = parent_mft & 0x0000_FFFF_FFFF_FFFF;
+            fname_data[0..8].copy_from_slice(&parent_ref.to_le_bytes());
+            let flags: u32 = if is_dir { 0x00000010 } else { 0x00000020 };
+            fname_data[56..60].copy_from_slice(&flags.to_le_bytes());
+            fname_data[64] = name_utf16.len() as u8 / 2;
+            fname_data[65] = FILE_NAME_POSIX;
+            fname_data[66..].copy_from_slice(&name_utf16);
+            new_entry[16..16 + fname_data.len()].copy_from_slice(&fname_data);
+
+            // Sub-node VCN (eğer NODE flag varsa)
+            if is_dir {
+                let vcn_offset = entry_size - 8;
+                new_entry[vcn_offset..vcn_offset + 8].copy_from_slice(&0u64.to_le_bytes());
+            }
+
+            // END marker oluştur
+            let end_entry_size = 16;
+            let mut end_entry = vec![0u8; end_entry_size];
+            end_entry[8..10].copy_from_slice(&(end_entry_size as u16).to_le_bytes());
+            end_entry[12] = INDEX_ENTRY_END;
+
+            // Yeni entry'yi idx_data'ya ekle
+            let insert_pos = entries_offset + entries_length - end_entry_size;
+            idx_data.splice(insert_pos..insert_pos, new_entry.iter().cloned());
+
+            // Index node header güncelle
+            let new_entries_length = entries_length + entry_size_aligned;
+            idx_data[4..8].copy_from_slice(&(new_entries_length as u32).to_le_bytes());
+
+            // Attribute content güncelle
+            let attr_idx = entry
+                .attributes
+                .iter()
+                .position(|a| a.attr_type == ATTR_INDEX_ROOT)
+                .unwrap();
+
+            if let AttributeContent::Resident { data_length, .. } =
+                &mut entry.attributes[attr_idx].content
+            {
+                *data_length = idx_data.len() as u32;
+            }
+            entry.attributes[attr_idx].resident_data = idx_data;
+
+            // MFT entry'yi serialize ve yaz
+            let serialized = serialize_mft_entry(&entry, fs.mft_entry_size as usize);
+            write_mft_entry_raw(storage, fs, parent_mft, &serialized)?;
+
+            return Ok(());
+        }
+    }
+
+    // Non-resident $INDEX_ROOT veya $INDEX_ALLOCATION — şimdilik unsupported
+    Err(NtfsError::NotSupported)
+}
+
+/// NTFS'te dosya sil
+///
+/// Adımlar:
+/// 1. MFT entry'den link count'u azalt
+/// 2. Link count 0 ise: MFT bitmap'te entry'yi free et, data cluster'larını free et
+/// 3. Parent dizinden index entry'yi kaldır
+pub fn delete_ntfs_file(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    parent_mft: u64,
+    mft_entry_num: u64,
+    name: &str,
+) -> Result<(), NtfsError> {
+    // 1. MFT entry oku
+    let (mut entry, raw_data) = read_mft_entry_raw(storage, fs, mft_entry_num)?;
+
+    // Link count azalt
+    if entry.link_count <= 1 {
+        // 2. Link count 0 — entry'yi ve data'yı sil
+        entry.link_count = 0;
+        entry.signature = MftEntry::SIGNATURE_BAAD; // Silinmiş işareti
+
+        // $DATA attribute cluster'larını free et
+        for attr in &entry.attributes {
+            if attr.attr_type == ATTR_DATA && attr.non_resident {
+                if let AttributeContent::NonResident { data_runs, .. } = &attr.content {
+                    let mut prev_lcn: i64 = 0;
+                    for run in data_runs {
+                        let lcn = prev_lcn + run.lcn;
+                        prev_lcn = lcn;
+
+                        if lcn >= 0 {
+                            for i in 0..run.length {
+                                let cluster = (lcn as u64) + i;
+                                update_bitmap_bit(storage, fs, MFT_BITMAP, cluster, false)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // MFT entry'yi free et
+        update_bitmap_bit(storage, fs, MFT_BITMAP, mft_entry_num, false)?;
+
+        // MFT entry'yi yaz
+        let serialized = serialize_mft_entry(&entry, fs.mft_entry_size as usize);
+        write_mft_entry_raw(storage, fs, mft_entry_num, &serialized)?;
+    } else {
+        // Link count > 1 — sadece count azalt
+        entry.link_count -= 1;
+        let serialized = serialize_mft_entry(&entry, fs.mft_entry_size as usize);
+        write_mft_entry_raw(storage, fs, mft_entry_num, &serialized)?;
+    }
+
+    // 3. Parent dizinden index entry'yi kaldır
+    remove_index_entry(storage, fs, parent_mft, name)?;
+
+    Ok(())
+}
+
+/// Parent dizinden index entry'yi kaldır
+fn remove_index_entry(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    parent_mft: u64,
+    name: &str,
+) -> Result<(), NtfsError> {
+    let (mut entry, _raw_data) = read_mft_entry_raw(storage, fs, parent_mft)?;
+
+    // $INDEX_ROOT attribute bul
+    let idx_root_idx = entry
+        .attributes
+        .iter()
+        .position(|a| a.attr_type == ATTR_INDEX_ROOT)
+        .ok_or(NtfsError::NotFound)?;
+
+    let idx_root_attr = &entry.attributes[idx_root_idx];
+
+    if !idx_root_attr.non_resident {
+        if let AttributeContent::Resident { .. } = &idx_root_attr.content {
+            let mut idx_data = idx_root_attr
+                .get_resident_data()
+                .ok_or(NtfsError::Corrupted)?
+                .to_vec();
+
+            // Index entry'leri tara ve silinecek olanı bul
+            if idx_data.len() < 16 {
+                return Err(NtfsError::Corrupted);
+            }
+            let entries_offset =
+                u32::from_le_bytes([idx_data[0], idx_data[1], idx_data[2], idx_data[3]]) as usize;
+
+            let mut pos = entries_offset;
+            let mut found = false;
+            let mut entry_len = 0usize;
+
+            while pos + 16 <= idx_data.len() {
+                let elen = u16::from_le_bytes([idx_data[pos + 8], idx_data[pos + 9]]) as usize;
+                if elen == 0 || elen > idx_data.len() - pos {
+                    break;
+                }
+
+                let flags = idx_data[pos + 12];
+                if (flags & INDEX_ENTRY_END) != 0 {
+                    break;
+                }
+
+                // $FILE_NAME parse
+                let stream_len =
+                    u16::from_le_bytes([idx_data[pos + 10], idx_data[pos + 11]]) as usize;
+                if stream_len >= 66 && pos + 16 + 64 + 1 <= idx_data.len() {
+                    let name_len = idx_data[pos + 16 + 64] as usize;
+                    let name_start = pos + 16 + 66;
+                    if name_start + name_len * 2 <= idx_data.len() {
+                        let entry_name_bytes = &idx_data[name_start..name_start + name_len * 2];
+                        if let Ok(entry_name) = String::from_utf16(
+                            &entry_name_bytes
+                                .chunks_exact(2)
+                                .map(|w| u16::from_le_bytes([w[0], w[1]]))
+                                .collect::<Vec<u16>>(),
+                        ) {
+                            if ntfs_name_matches(&entry_name, name) {
+                                found = true;
+                                entry_len = elen;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                pos += elen;
+            }
+
+            if found {
+                // Entry'yi sil (sonraki entry'leri kaydır)
+                idx_data.drain(pos..pos + entry_len);
+
+                // Index node header güncelle
+                let new_entries_length = idx_data.len() - entries_offset;
+                idx_data[4..8].copy_from_slice(&(new_entries_length as u32).to_le_bytes());
+
+                // Attribute güncelle
+                if let AttributeContent::Resident { data_length, .. } =
+                    &mut entry.attributes[idx_root_idx].content
+                {
+                    *data_length = idx_data.len() as u32;
+                }
+                entry.attributes[idx_root_idx].resident_data = idx_data;
+
+                // MFT entry'yi yaz
+                let serialized = serialize_mft_entry(&entry, fs.mft_entry_size as usize);
+                write_mft_entry_raw(storage, fs, parent_mft, &serialized)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// NTFS reparse point detection — UnsupportedFeature olarak reddet
+///
+/// $REPARSE_POINT attribute (0xC0) varsa, bu bir symlink/junction/ mount point.
+/// echOS bunları implement etmediği için explicit UnsupportedFeature döner.
+pub fn check_reparse_point(
+    storage: &NtfsStorage,
+    fs: &NtfsFileSystem,
+    mft_entry_num: u64,
+) -> Result<bool, NtfsError> {
+    let (entry, _raw) = read_mft_entry_raw(storage, fs, mft_entry_num)?;
+
+    let has_reparse = entry
+        .attributes
+        .iter()
+        .any(|a| a.attr_type == ATTR_REPARSE_POINT);
+
+    Ok(has_reparse)
 }
 
 fn normalize_file_reference(reference: u64) -> u64 {

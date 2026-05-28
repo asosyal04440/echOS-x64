@@ -121,7 +121,8 @@ impl EevdfRunQueue {
         };
         self.by_deadline.lock().remove(&old_key);
 
-        let next_vtime = self.vtime().saturating_add(delta_ns / 1024);
+        let delta_vtime = delta_ns.saturating_mul(1024) / task.weight.max(1);
+        let next_vtime = self.vtime().saturating_add(delta_vtime);
         self.vtime.store(next_vtime, Ordering::Release);
         task.update_runtime(delta_ns, next_vtime);
 

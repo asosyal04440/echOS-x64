@@ -193,14 +193,14 @@ pub fn snapshot() -> MouseSnapshot {
 /// Status Register bit 1 = Input buffer full; 0 olunca yazabiliriz.
 fn wait_write() {
     let mut status_port = Port::<u8>::new(STATUS_PORT);
-    let mut timeout = 100_000;
+    let mut timeout = 10_000;
     while timeout > 0 {
         let status = unsafe { status_port.read() };
         if (status & 0x02) == 0 {
-            return; // Input buffer boş -> yazabilir
+            return;
         }
         timeout -= 1;
-        core::hint::spin_loop(); // CPU'ya döngü içinde olduğunu bildir (enerji tasarrufu)
+        core::hint::spin_loop();
     }
 }
 
@@ -208,11 +208,11 @@ fn wait_write() {
 /// Status Register bit 0 = Output buffer full; 1 olunca okuyabiliriz.
 fn wait_read() {
     let mut status_port = Port::<u8>::new(STATUS_PORT);
-    let mut timeout = 100_000;
+    let mut timeout = 10_000;
     while timeout > 0 {
         let status = unsafe { status_port.read() };
         if (status & 0x01) != 0 {
-            return; // Output buffer dolu -> okunabilir
+            return;
         }
         timeout -= 1;
         core::hint::spin_loop();

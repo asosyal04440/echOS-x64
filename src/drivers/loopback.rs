@@ -82,6 +82,8 @@ enum LoopbackFilesystem {
     ExFat,
     Ext4,
     Ntfs,
+    Erofs,
+    Squashfs,
 }
 
 impl LoopbackStorage {
@@ -250,6 +252,16 @@ impl BlockDevice for LoopbackBlockDevice {
 
     fn is_read_only(&self) -> bool {
         self.state.lock().read_only
+    }
+
+    /// Loopback: flush dosya sistemine yazar (yazma destekliyse)
+    fn supports_flush(&self) -> bool {
+        !self.state.lock().read_only
+    }
+
+    /// Loopback: FUA desteklemez (yazma zaten dosyaya gider)
+    fn supports_fua(&self) -> bool {
+        false
     }
 
     fn flush(&mut self) -> Result<(), BlockDeviceError> {
@@ -443,6 +455,8 @@ pub fn mount(
         Some("exfat") => LoopbackFilesystem::ExFat,
         Some("ext4") => LoopbackFilesystem::Ext4,
         Some("ntfs") => LoopbackFilesystem::Ntfs,
+        Some("erofs") => LoopbackFilesystem::Erofs,
+        Some("squashfs") => LoopbackFilesystem::Squashfs,
         Some(_) => return Err("loopback mount: unsupported filesystem hint"),
         None => detect_loopback_filesystem(&mut device)?
             .ok_or("loopback mount: filesystem signature unsupported")?,
@@ -491,6 +505,26 @@ pub fn mount(
                 descriptor.name.clone(),
             )
         }
+        LoopbackFilesystem::Erofs => {
+            let snapshot = device.snapshot_for_mount()?;
+            crate::fs::erofs::mount_from_data(&snapshot, mount_point)
+                .map_err(|_| "loopback mount: erofs attach failed")?;
+            (
+                "erofs",
+                crate::fs::vfs_unified::VfsFsType::Erofs,
+                descriptor.name.clone(),
+            )
+        }
+        LoopbackFilesystem::Squashfs => {
+            let snapshot = device.snapshot_for_mount()?;
+            crate::fs::squashfs::mount_from_data(&snapshot, mount_point)
+                .map_err(|_| "loopback mount: squashfs attach failed")?;
+            (
+                "squashfs",
+                crate::fs::vfs_unified::VfsFsType::Squashfs,
+                descriptor.name.clone(),
+            )
+        }
     };
     let mount_flags = if descriptor.read_only {
         crate::fs::mount::MountFlags::read_only()
@@ -503,12 +537,24 @@ pub fn mount(
         mount_fs_type.as_str(),
         mount_flags,
     )?;
-    crate::fs::vfs_unified::VFS_UNIFIED.lock().mount(
-        mount_point,
-        mount_fs_type,
-        source.as_str(),
-        crate::fs::vfs_unified::VfsMountFlags::default(),
-    );
+    let vfs_readonly = descriptor.read_only
+        || matches!(
+            mount_fs_type,
+            crate::fs::vfs_unified::VfsFsType::Erofs | crate::fs::vfs_unified::VfsFsType::Squashfs
+        );
+    if let Err(err) = crate::fs::vfs_unified::VFS_UNIFIED
+        .lock()
+        .mount_with_readonly(
+            mount_point,
+            mount_fs_type,
+            source.as_str(),
+            crate::fs::vfs_unified::VfsMountFlags::default(),
+            vfs_readonly,
+        )
+    {
+        let _ = crate::fs::mount::MOUNT_TABLE.umount(mount_point);
+        return Err(err);
+    }
     {
         let mut state = device.state.lock();
         if !state.mount_points.iter().any(|entry| entry == mount_point) {
@@ -520,6 +566,97 @@ pub fn mount(
         mount_point: mount_point.to_string(),
         fs_type: fs_label,
     })
+}
+
+pub fn discover_seed_images() -> Vec<LoopbackMount> {
+    let mut discovered = Vec::new();
+    let registry = LOOPBACK_REGISTRY.lock();
+    for (name, state_arc) in registry.iter() {
+        let state = state_arc.lock();
+        let snapshot = match state_arc.clone().lock().storage {
+            LoopbackStorage::Resident { ref image, .. } => image.clone(),
+            LoopbackStorage::Paged { .. } => {
+                let path = match state.backing_path.as_ref() {
+                    Some(p) => p.clone(),
+                    None => continue,
+                };
+                match read_full_backing(path.as_str()) {
+                    Ok(data) => data,
+                    Err(_) => continue,
+                }
+            }
+        };
+
+        if !has_erofs_magic(&snapshot) && !has_squashfs_magic(&snapshot) {
+            continue;
+        }
+
+        let mount_point = alloc::format!("/seed/auto/{}", name);
+        let fs_type = if has_erofs_magic(&snapshot) {
+            "erofs"
+        } else {
+            "squashfs"
+        };
+
+        if crate::fs::mount::MOUNT_TABLE
+            .list()
+            .iter()
+            .any(|entry| entry.target == mount_point)
+        {
+            continue;
+        }
+
+        let mount_result = match fs_type {
+            "erofs" => crate::fs::erofs::mount_from_data(&snapshot, &mount_point),
+            "squashfs" => crate::fs::squashfs::mount_from_data(&snapshot, &mount_point),
+            _ => Err("unsupported fs type"),
+        };
+
+        if mount_result.is_err() {
+            continue;
+        }
+
+        let manifest_path = alloc::format!("{}/seed.manifest", mount_point);
+        let has_manifest = crate::fs::vfs_unified::read_file(&manifest_path).is_ok();
+        if !has_manifest {
+            let _ = crate::fs::erofs::unmount_erofs(&mount_point);
+            let _ = crate::fs::squashfs::unmount_squashfs(&mount_point);
+            continue;
+        }
+
+        let mount_flags = if state.read_only {
+            crate::fs::mount::MountFlags::read_only()
+        } else {
+            crate::fs::mount::MountFlags::default_rw()
+        };
+        let _ =
+            crate::fs::mount::MOUNT_TABLE.mount(name.as_str(), &mount_point, fs_type, mount_flags);
+
+        discovered.push(LoopbackMount {
+            device_name: name.clone(),
+            mount_point: mount_point.clone(),
+            fs_type,
+        });
+    }
+    discovered
+}
+
+fn has_erofs_magic(data: &[u8]) -> bool {
+    if data.len() < 1032 {
+        return false;
+    }
+    let magic_bytes = &data[1024..1028];
+    let magic = u32::from_le_bytes(magic_bytes.try_into().unwrap_or([0; 4]));
+    magic == 0xE0F5_E1E2
+}
+
+fn has_squashfs_magic(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let magic_bytes = &data[0..4];
+    let magic = u32::from_le_bytes(magic_bytes.try_into().unwrap_or([0; 4]));
+    magic == 0x7371_7368
 }
 
 pub fn umount(mount_point: &str) -> Result<(), &'static str> {
@@ -565,6 +702,12 @@ pub fn umount(mount_point: &str) -> Result<(), &'static str> {
                 {
                     let _ = crate::fs::fat::unmount_exfat(index);
                 }
+            }
+            "erofs" => {
+                let _ = crate::fs::erofs::unmount_erofs(mount_point);
+            }
+            "squashfs" => {
+                let _ = crate::fs::squashfs::unmount_squashfs(mount_point);
             }
             _ => {}
         }
@@ -643,6 +786,7 @@ fn block_error_str(error: BlockDeviceError) -> &'static str {
         BlockDeviceError::WriteProtected => "loopback device is read-only",
         BlockDeviceError::Timeout => "loopback I/O timeout",
         BlockDeviceError::Unknown => "loopback unknown error",
+        BlockDeviceError::Unsupported => "loopback operation not supported",
     }
 }
 
@@ -670,6 +814,20 @@ fn detect_loopback_filesystem(
     }
     if crate::fs::ntfs::NtfsBootSector::parse(sector0.as_slice()).is_some() {
         return Ok(Some(LoopbackFilesystem::Ntfs));
+    }
+    let erofs_super = read_loopback_range(device, 1024, 8)?;
+    if erofs_super.len() >= 8 {
+        let erofs_magic = u32::from_le_bytes(erofs_super[0..4].try_into().unwrap());
+        if erofs_magic == 0xE0F5_E1E2 {
+            return Ok(Some(LoopbackFilesystem::Erofs));
+        }
+    }
+    let squashfs_super = read_loopback_range(device, 0, 4)?;
+    if squashfs_super.len() >= 4 {
+        let squashfs_magic = u32::from_le_bytes(squashfs_super[0..4].try_into().unwrap());
+        if squashfs_magic == 0x7371_7368 {
+            return Ok(Some(LoopbackFilesystem::Squashfs));
+        }
     }
     Ok(None)
 }
