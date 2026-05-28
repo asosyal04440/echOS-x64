@@ -33,19 +33,20 @@
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Current Status](#current-status)
-4. [Module Tree](#module-tree)
-5. [Building](#building)
-6. [Running](#running)
-7. [CI — Simics Zero-Tolerance Gate](#ci--simics-zero-tolerance-gate)
-8. [Technical Report](#technical-report)
-9. [Third-Party Components](#third-party-components)
-10. [License](#license)
+4. [Phase 6 Filesystem and Storage](#phase-6-filesystem-and-storage)
+5. [Module Tree](#module-tree)
+6. [Building](#building)
+7. [Running](#running)
+8. [CI — Simics Zero-Tolerance Gate](#ci--simics-zero-tolerance-gate)
+9. [Technical Report](#technical-report)
+10. [Third-Party Components](#third-party-components)
+11. [License](#license)
 
 ---
 
 ## Overview
 
-**echOS-x64** is a Rust `no_std` x86-64 operating-system research kernel. The current public repository focuses on boot flow, kernel architecture, memory/scheduler/driver experiments, host-side tooling, and reproducible local validation paths.
+**echOS-x64** is a Rust `no_std` x86-64 operating-system research kernel. The current public repository focuses on boot flow, kernel architecture, memory/scheduler/driver experiments, a v1 test-gated filesystem/storage stack, host-side tooling, and reproducible local validation paths.
 
 This README is intentionally conservative: `✅` means the capability has a concrete implementation or repository workflow visible in this tree; `⏳` means the subsystem is under active development, partially integrated, target-specific, or still needs stronger validation before it should be presented as complete.
 
@@ -61,7 +62,7 @@ This README is intentionally conservative: `✅` means the capability has a conc
 │                         SYSTEM CALL INTERFACE                        │
 ├────────────┬─────────────┬──────────────┬───────────────────────────┤
 │  SCHEDULER │   MEMORY    │  FILESYSTEM  │       NETWORKING           │
-│  CFS/RT/DL │  PMM + VMM  │ FAT/ext/VFS  │  smoltcp-backed stack     │
+│  CFS/RT/DL │  PMM + VMM  │ VFS+ext4/F2FS│  smoltcp-backed stack     │
 │  SMP/AP    │  Allocators │ image tools  │  protocol experiments     │
 │  Work-Steal│  paging     │ validation   │  packet/device plumbing   │
 ├────────────┴─────────────┴──────────────┴───────────────────────────┤
@@ -116,13 +117,57 @@ UEFI/Multiboot2/Limine
 | SMP / AP bring-up | ⏳ | Active kernel path; VirtualBox smoke profile is intentionally single-vCPU. |
 | Memory manager stack | ⏳ | PMM, paging, and allocator work exists; broader invariants still need tighter public proof coverage. |
 | Scheduler stack | ⏳ | CFS/RT/deadline/work-stealing work is in-tree; end-to-end workload validation is still ongoing. |
-| Filesystems | ⏳ | FAT/ext-style/VFS work is in-tree; treat non-smoke paths as under validation. |
+| Filesystem/storage stack | ✅ | Phase 6 v1 gate passes for unified VFS, ext4, F2FS, FAT32/exFAT, loopback, notification, package/seed, crash, fsck/oracle-inspired, and corrupt-image corpora. |
 | Networking | ⏳ | smoltcp-backed work is in-tree; protocol matrix is not presented as complete. |
 | GUI/compositor | ⏳ | Framebuffer, graphics, and UI experiments are in-tree; not a finished desktop environment. |
 | Win32/POSIX/IronShim compatibility | ⏳ | Compatibility work exists, but public support should be treated as experimental. |
 | Hardware driver surface | ⏳ | VirtIO/PCI/storage/input/display work is active; bare-metal hardware coverage varies by target. |
 
 ---
+
+## Phase 6 Filesystem and Storage
+
+Phase 6 is the current v1 filesystem/storage foundation. It is intentionally described by tested contracts rather than by Linux/Windows/FreeBSD parity claims.
+
+### What is in scope for v1
+
+| Layer | Status | Contract |
+|-------|--------|----------|
+| Unified VFS | ✅ | Mount routing, path normalization, backend dispatch, stable unsupported-operation failures, and POSIX-facing read/write/stat/truncate/rename-style surfaces. |
+| ext4 | ✅ | Main disk filesystem candidate with read/write, metadata mutation, journaling integration, feature gates, and VFS wiring. |
+| F2FS | ✅ | Flash-oriented filesystem candidate with checkpoint/recovery-oriented paths, read/write/truncate/rename/fsync/fdatasync coverage, and truthful feature gates. |
+| FAT32 | ✅ | Portable-media backend with read/write/create/mkdir/rename/truncate paths and explicit no-fake-success durability limits. |
+| exFAT | ✅ | Portable-media backend with read/write/create/mkdir/unlink/truncate, entry-set-safe rename, checksum refresh, and fail-closed behavior when an operation would require an unsafe entry-set resize. |
+| EROFS/SquashFS | ✅ | Read-only seed/package image candidates. |
+| tmpfs/devfs/procfs/sysfs-style filesystems | ✅ | Virtual filesystem surfaces with explicit unsupported-operation behavior. |
+| NTFS/XFS/Btrfs | ⏳ | Read/gate and unsupported-boundary work exists; write parity is not claimed for v1. |
+
+### Validation evidence
+
+The Phase 6 gate runner is:
+
+```powershell
+.\scripts\phase6_fs_gate.ps1 -SkipFullTests
+```
+
+The latest local validation before this README update passed:
+
+- `cargo check --target x86_64-pc-windows-msvc --lib -q`
+- `.\scripts\phase6_fs_gate.ps1 -SkipFullTests`
+- `cargo test --target x86_64-pc-windows-msvc --test regression_suite -q`
+- `cargo test --target x86_64-pc-windows-msvc --tests -q`
+
+The Phase 6 gate currently covers:
+
+- xfstests-inspired corpus
+- crash consistency corpus
+- fsck/oracle-inspired corpus
+- corrupt image hardening
+- backend feature gates
+- loopback behavior
+- notification behavior
+- path and VFS contracts
+- package/seed state model
 
 ## Module Tree
 
@@ -147,7 +192,7 @@ src/
 ├── atomic_ops.rs        # Architecture-specific atomics
 ├── memory_barriers.rs   # SMP memory barriers (smp_mb / rmb / wmb)
 │
-├── fs/                  # FAT32, ext4+journal, NTFS, F2FS, NFS, FUSE, VFS
+├── fs/                  # Unified VFS, ext4+journal, F2FS, FAT32/exFAT, NTFS/XFS/Btrfs gates
 ├── net/                 # TCP/UDP, TLS 1.3, QUIC, WireGuard, IPSec, HTTP/2
 ├── drivers/             # NVMe, ATA, VirtIO, PCI, USB, audio, BT, IOMMU
 │

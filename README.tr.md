@@ -33,19 +33,20 @@
 1. [Genel Bakış](#genel-bakış)
 2. [Mimari](#mimari)
 3. [Mevcut Durum](#mevcut-durum)
-4. [Modül Ağacı](#modül-ağacı)
-5. [Derleme](#derleme)
-6. [Çalıştırma](#çalıştırma)
-7. [CI — Simics Sıfır Tolerans Kapısı](#ci--simics-sıfır-tolerans-kapısı)
-8. [Teknik Rapor](#teknik-rapor)
-9. [Üçüncü Taraf Bileşenler](#üçüncü-taraf-bileşenler)
-10. [Lisans](#lisans)
+4. [Phase 6 Dosya Sistemi ve Depolama](#phase-6-dosya-sistemi-ve-depolama)
+5. [Modül Ağacı](#modül-ağacı)
+6. [Derleme](#derleme)
+7. [Çalıştırma](#çalıştırma)
+8. [CI — Simics Sıfır Tolerans Kapısı](#ci--simics-sıfır-tolerans-kapısı)
+9. [Teknik Rapor](#teknik-rapor)
+10. [Üçüncü Taraf Bileşenler](#üçüncü-taraf-bileşenler)
+11. [Lisans](#lisans)
 
 ---
 
 ## Genel Bakış
 
-**echOS-x64**, Rust `no_std` ile geliştirilen x86-64 işletim sistemi araştırma çekirdeğidir. Mevcut public repo; boot akışı, çekirdek mimarisi, bellek/zamanlayıcı/sürücü deneyleri, host-side araçlar ve yeniden üretilebilir yerel doğrulama yollarına odaklanır.
+**echOS-x64**, Rust `no_std` ile geliştirilen x86-64 işletim sistemi araştırma çekirdeğidir. Mevcut public repo; boot akışı, çekirdek mimarisi, bellek/zamanlayıcı/sürücü deneyleri, v1 için test kapılı dosya sistemi/depolama katmanı, host-side araçlar ve yeniden üretilebilir yerel doğrulama yollarına odaklanır.
 
 Bu README bilinçli olarak konservatiftir: `✅` somut implementasyonu veya repo workflow'u bu ağaçta görünen alanı, `⏳` ise aktif geliştirme, kısmi entegrasyon, hedefe bağlı destek veya daha güçlü doğrulama bekleyen alanı gösterir.
 
@@ -61,7 +62,7 @@ Bu README bilinçli olarak konservatiftir: `✅` somut implementasyonu veya repo
 │                        SİSTEM ÇAĞRISI ARAYÜZÜ                        │
 ├────────────┬─────────────┬──────────────┬───────────────────────────┤
 │ ZAMANLAYIC │   BELLEK    │  DOSYA SİS.  │          AĞ               │
-│  CFS/RT/DL │  PMM + VMM  │ FAT/ext/VFS  │  smoltcp destekli yığın   │
+│  CFS/RT/DL │  PMM + VMM  │ VFS+ext4/F2FS│  smoltcp destekli yığın   │
 │  SMP/AP    │  Allocator  │ imaj araçları│  protokol deneyleri       │
 │  Work-Steal│  paging     │ validasyon   │  paket/cihaz bağlantısı   │
 ├────────────┴─────────────┴──────────────┴───────────────────────────┤
@@ -116,13 +117,57 @@ UEFI/Multiboot2/Limine
 | SMP / AP bring-up | ⏳ | Aktif çekirdek yolu; VirtualBox smoke profili bilinçli olarak tek vCPU. |
 | Bellek yönetimi | ⏳ | PMM, paging ve allocator işleri ağaçta var; daha güçlü public proof coverage gerekiyor. |
 | Zamanlayıcı | ⏳ | CFS/RT/deadline/work-stealing çalışmaları ağaçta; uçtan uca workload doğrulaması sürüyor. |
-| Dosya sistemleri | ⏳ | FAT/ext tarzı/VFS işleri ağaçta; smoke dışı yollar validasyon altında. |
+| Dosya sistemi/depolama katmanı | ✅ | Phase 6 v1 kapısı; unified VFS, ext4, F2FS, FAT32/exFAT, loopback, notification, package/seed, crash, fsck/oracle esinli ve corrupt-image corpus'ları için geçiyor. |
 | Ağ | ⏳ | smoltcp destekli çalışma ağaçta; protokol matrisi tamamlanmış gibi sunulmuyor. |
 | GUI/compositor | ⏳ | Framebuffer, grafik ve UI deneyleri ağaçta; bitmiş masaüstü ortamı değil. |
 | Win32/POSIX/IronShim uyumluluğu | ⏳ | Uyumluluk çalışmaları var; public destek deneysel kabul edilmeli. |
 | Donanım sürücü yüzeyi | ⏳ | VirtIO/PCI/depolama/giriş/görüntü işleri aktif; bare-metal donanım kapsamı hedefe göre değişir. |
 
 ---
+
+## Phase 6 Dosya Sistemi ve Depolama
+
+Phase 6, echOS v1 için mevcut dosya sistemi/depolama temelidir. Burada iddia Linux/Windows/FreeBSD ile birebir eşitlik değil; test kapılarından geçen, sınırları açık ve fail-closed çalışan bir v1 sözleşmesidir.
+
+### v1 kapsamı
+
+| Katman | Durum | Sözleşme |
+|--------|-------|----------|
+| Unified VFS | ✅ | Mount routing, path normalization, backend dispatch, stabil unsupported-operation hataları ve POSIX'e bakan read/write/stat/truncate/rename tarzı yüzeyler. |
+| ext4 | ✅ | Read/write, metadata mutation, journal entegrasyonu, feature gate ve VFS wiring içeren ana disk dosya sistemi adayı. |
+| F2FS | ✅ | Checkpoint/recovery odaklı yolları, read/write/truncate/rename/fsync/fdatasync kapsamı ve dürüst feature gate'leri olan flash odaklı dosya sistemi adayı. |
+| FAT32 | ✅ | Read/write/create/mkdir/rename/truncate yolları ve açık durability sınırları olan taşınabilir-medya backend'i. |
+| exFAT | ✅ | Read/write/create/mkdir/unlink/truncate, entry-set güvenli rename, checksum refresh ve riskli entry-set resize gerektiğinde fail-closed davranış. |
+| EROFS/SquashFS | ✅ | Salt-okunur seed/package image adayları. |
+| tmpfs/devfs/procfs/sysfs tarzı FS'ler | ✅ | Unsupported operasyonları açıkça hata dönen sanal dosya sistemi yüzeyleri. |
+| NTFS/XFS/Btrfs | ⏳ | Read/gate ve unsupported-boundary çalışması var; v1 için write parity iddiası yok. |
+
+### Doğrulama kanıtı
+
+Phase 6 kapı çalıştırıcısı:
+
+```powershell
+.\scripts\phase6_fs_gate.ps1 -SkipFullTests
+```
+
+Bu README güncellemesinden önce geçen yerel doğrulamalar:
+
+- `cargo check --target x86_64-pc-windows-msvc --lib -q`
+- `.\scripts\phase6_fs_gate.ps1 -SkipFullTests`
+- `cargo test --target x86_64-pc-windows-msvc --test regression_suite -q`
+- `cargo test --target x86_64-pc-windows-msvc --tests -q`
+
+Phase 6 kapısı şu alanları kapsar:
+
+- xfstests esinli corpus
+- crash consistency corpus
+- fsck/oracle esinli corpus
+- corrupt image hardening
+- backend feature gate'leri
+- loopback davranışı
+- notification davranışı
+- path ve VFS sözleşmeleri
+- package/seed state modeli
 
 ## Modül Ağacı
 
@@ -147,7 +192,7 @@ src/
 ├── atomic_ops.rs        # Mimariye özgü atomik işlemler
 ├── memory_barriers.rs   # SMP bellek engelleri (smp_mb / rmb / wmb)
 │
-├── fs/                  # FAT32, ext4+günlük, NTFS, F2FS, NFS, FUSE, VFS
+├── fs/                  # Unified VFS, ext4+journal, F2FS, FAT32/exFAT, NTFS/XFS/Btrfs gate'leri
 ├── net/                 # TCP/UDP, TLS 1.3, QUIC, WireGuard, IPSec, HTTP/2
 ├── drivers/             # NVMe, ATA, VirtIO, PCI, USB, ses, BT, IOMMU
 │
