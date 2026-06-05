@@ -114,7 +114,7 @@ pub fn init() {
 pub unsafe fn init_cpu_data(cpu_data: *mut CpuData) {
     let stack_top = (*cpu_data).kernel_stack_top;
     if stack_top != 0 && !is_dedicated_kernel_stack_top(stack_top) {
-        crate::serial_println!(
+        crate::debug_diag!(
             "[SYSCALL] CpuData kernel_stack_top outside dedicated stack VA: {:#x}",
             stack_top
         );
@@ -135,7 +135,7 @@ fn is_dedicated_kernel_stack_top(stack_top: u64) -> bool {
 
 pub fn set_kernel_stack_for_current_cpu(stack_top: u64) -> bool {
     if !is_dedicated_kernel_stack_top(stack_top) {
-        crate::serial_println!(
+        crate::debug_diag!(
             "[SYSCALL] refusing kernel_stack_top outside dedicated stack VA: {:#x}",
             stack_top
         );
@@ -157,15 +157,24 @@ pub fn set_kernel_stack_for_current_cpu(stack_top: u64) -> bool {
 /// Sistem çağrısından dönerken veya sinyal işlerken kullanıcı durumunu
 /// incelemek için kullanılır. `(user_rsp, user_rip, user_rflags)` demeti döner.
 pub fn current_user_context() -> (u64, u64, u64) {
+    // After SWAPGS, the GS segment (IA32_GS_BASE) points to the kernel CpuData,
+    // while MSR_KERNEL_GS_BASE holds the user's GS base. Reading MSR_KERNEL_GS_BASE
+    // here would dereference the user's GS pointer (often NULL), causing a page fault.
+    // We must read via the GS segment prefix instead.
     unsafe {
-        let mut msr = Msr::new(MSR_KERNEL_GS_BASE);
-        let base = msr.read();
-        let data = base as *const CpuData;
-        (
-            (*data).user_rsp_scratch,
-            (*data).user_rip,
-            (*data).user_rflags,
-        )
+        let user_rsp: u64;
+        let user_rip: u64;
+        let user_rflags: u64;
+        core::arch::asm!(
+            "mov {0}, qword ptr gs:[0]",   // user_rsp_scratch
+            "mov {1}, qword ptr gs:[24]",   // user_rip
+            "mov {2}, qword ptr gs:[32]",   // user_rflags
+            out(reg) user_rsp,
+            out(reg) user_rip,
+            out(reg) user_rflags,
+            options(nostack, readonly, preserves_flags),
+        );
+        (user_rsp, user_rip, user_rflags)
     }
 }
 
@@ -256,6 +265,18 @@ pub extern "sysv64" fn syscall_dispatcher(
     a6: u64,
 ) -> i64 {
     crate::security::spectre::kernel_entry_barrier();
+
+    static mut SYSCALL_LOG_COUNT: u32 = 0;
+    unsafe {
+        SYSCALL_LOG_COUNT += 1;
+        if SYSCALL_LOG_COUNT <= 10 {
+            crate::debug_diag!(
+                "[SYSCALL] Ring3 syscall: num={} a1={:#x} a2={:#x} a3={:#x}",
+                num, a1, a2, a3
+            );
+        }
+    }
+
     if num >= crate::win32::WIN32_USER_ABI_SYSCALL_BASE {
         let service_id = (num - crate::win32::WIN32_USER_ABI_SYSCALL_BASE) as u32;
         return crate::win32::dispatch_user_abi(service_id, [a1, a2, a3, a4]);

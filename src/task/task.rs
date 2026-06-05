@@ -7,12 +7,54 @@ use crate::allocator::stack::KernelStack;
 use crate::memory::AddressSpace;
 use crate::task::signal::SignalHandlers;
 use alloc::sync::Arc;
+use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::structures::paging::PhysFrame;
+
+/// CLONE flags — Linux: include/uapi/linux/sched.h
+pub const CLONE_VM: usize = 0x00000100;
+pub const CLONE_FS: usize = 0x00000200;
+pub const CLONE_FILES: usize = 0x00000400;
+pub const CLONE_SIGHAND: usize = 0x00000800;
+pub const CLONE_PIDFD: usize = 0x00001000;
+pub const CLONE_PTRACE: usize = 0x00002000;
+pub const CLONE_VFORK: usize = 0x00004000;
+pub const CLONE_PARENT: usize = 0x00008000;
+pub const CLONE_THREAD: usize = 0x00010000;
+pub const CLONE_NEWNS: usize = 0x00020000;
+pub const CLONE_SYSVSEM: usize = 0x00040000;
+pub const CLONE_SETTLS: usize = 0x00080000;
+pub const CLONE_PARENT_SETTID: usize = 0x00100000;
+pub const CLONE_CHILD_CLEARTID: usize = 0x00200000;
+pub const CLONE_CHILD_SETTID: usize = 0x01000000;
+pub const CLONE_CLEAR_SIGHAND: usize = 0x02000000;
+pub const CLONE_DETACHED: usize = 0x00400000;
+pub const CLONE_UNTRACED: usize = 0x00800000;
+pub const CLONE_NEWCGROUP: usize = 0x02000000;
+pub const CLONE_NEWUTS: usize = 0x04000000;
+pub const CLONE_NEWIPC: usize = 0x08000000;
+pub const CLONE_NEWUSER: usize = 0x10000000;
+pub const CLONE_NEWPID: usize = 0x20000000;
+pub const CLONE_NEWNET: usize = 0x40000000;
+
+/// POSIX: fork() her zaman SIGCHLD (child exit signal) kullanır
+pub const EXIT_SIGNAL_SIGCHLD: usize = 0x11; // SIGCHLD = 17 = 0x11
+
+/// Paylaşımlı dosya sistemi bilgisi — CLONE_FS ile paylaşılır
+/// Linux: struct fs_struct
+#[derive(Clone)]
+pub struct SharedFsInfo {
+    /// Current working directory path
+    pub cwd: String,
+    /// Root directory path
+    pub root: String,
+    /// File creation umask
+    pub umask: usize,
+}
 
 /// Task'ların benzersiz kimlik numarası
 pub type TaskId = usize;
@@ -183,14 +225,15 @@ impl TaskContext {
     /// - `entry_point`: Task'ın başlangıç adresi
     /// - `stack_top`: Task stack'inin tepesi
     pub fn new(entry_point: u64, stack_top: u64) -> Self {
+        let entry_rsp = stack_top.saturating_sub(8);
         Self {
             r15: 0,
             r14: 0,
             r13: 0,
             r12: 0,
             rbx: 0,
-            rbp: stack_top,
-            rsp: stack_top,
+            rbp: entry_rsp,
+            rsp: entry_rsp,
             rflags: 0x202, // Interrupt'lar aktif
             rip: entry_point,
             _pad: [0u64; 7],
@@ -267,6 +310,10 @@ pub struct TaskHotData {
     pub kernel_stack_low_watermark: u64,
     /// AOT davranış bayrakları — context switch optimizasyonları
     pub flags: TaskFlags,
+    /// I/O önceliği (ioprio_set/ioprio_get için)
+    /// class: 0=none, 1=realtime(0-7), 2=best-effort(0-7), 3=idle
+    /// class << 8 | priority = ioprio değeri
+    pub ioprio: u16,
 }
 
 /// Task'ın "Soğuk" verileri - Nadiren erişilen veya sadece context switch'te gerekenler
@@ -299,8 +346,39 @@ pub struct TaskColdData {
     pub parent_pid: Option<TaskId>,
     /// Alt süreç PID listesi — fork ile oluşturulan çocuklar
     pub children: Vec<TaskId>,
+    /// Process Group ID — POSIX: her process bir process group'a aittir
+    /// Job control için kritik: SIGINT/SIGTSTP foreground group'a dağıtılır
+    pub pgid: TaskId,
+    /// Session ID — POSIX: oturum lideri PID'i
+    /// setsid() ile oluşturulur, controlling terminal ataması için kullanılır
+    pub sid: TaskId,
     pub rseq: RseqState,
     pub win32: Option<Win32ThreadState>,
+    /// FS segment base address — x86_64 thread-local storage (TLS) için kullanılır.
+    /// arch_prctl(ARCH_SET_FS) ile ayarlanır, context switch'te save/restore edilir.
+    /// Linux: IA32_FS_BASE MSR (0xC0000102) üzerinden yönetilir.
+    pub fs_base: u64,
+    /// CLONE_FS: paylaşımlı dosya sistemi bilgisi (cwd, root, umask)
+    /// None ise child kendi kopyasını oluşturur, Some ise parent ile paylaşılır
+    pub shared_fs: Option<Arc<Mutex<SharedFsInfo>>>,
+    /// CLONE_VFORK: parent child'ın exec/exit yapmasını bekler
+    /// Parent bu flag ile suspend edilir, child exec/exit çağrısında parent'ı uyandırır
+    pub vfork_wait: Option<Arc<spin::Mutex<bool>>>,
+    /// Exit signal — child sonlandığında parent'a gönderilecek sinyal
+    /// fork(): SIGCHLD, clone(): flags'in low byte'ı
+    pub exit_signal: usize,
+    /// CLONE_CHILD_CLEARTID: child çıkışında bu adresteki TID'yi temizle + futex wake
+    /// Linux: copy_process() → copy_clear_child_tid()
+    pub clear_child_tid_addr: Option<usize>,
+    /// CLONE_VFORK: parent child'ın exec/exit yapmasını bekler
+    /// Parent bu flag ile suspend edilir, child exec/exit çağrısında parent'ı uyandırır
+    pub vfork_wait_child: Option<Arc<spin::Mutex<bool>>>,
+    /// CLONE_THREAD: İş parçacığı grubu kimliği (TGID)
+    /// Linux: clone() ile Thread oluşturulduğunda aynı TGID paylaşılır
+    /// getpid() TGID döndürür, gettid() gerçek task ID döndürür
+    /// CLONE_THREAD olduğunda: tgid = parent'ın tgid'si (aynı grup)
+    /// CLONE_THREAD olmadığında: tgid = kendi PID'i (grup lideri)
+    pub tgid: TaskId,
 }
 
 /// Bir işletim sistemi task'ı (thread/process).
@@ -406,6 +484,7 @@ impl Task {
                 kernel_stack_top: stack_top,
                 kernel_stack_low_watermark: stack_top,
                 flags: TaskFlags::FPU_PRISTINE, // İlk xrstor atlanır
+                ioprio: 2 << 8, // Varsayılan: best-effort class, priority 0
             },
             context: TaskContext::new(entry_point as u64, stack_top),
             cold: TaskColdData {
@@ -424,12 +503,21 @@ impl Task {
                 stack: Arc::new(stack),
                 is_background: false,
                 signals: Arc::new(SignalHandlers::new()),
-                pcid: 0, // 0 = kernel PCID (NativeRust tasks)
+                pcid: 0,        // 0 = kernel PCID (NativeRust tasks)
                 fd_table: None, // İlk açılışta global FD tablosu kullanılır
                 parent_pid: None,
                 children: Vec::new(),
+                pgid: 0, // fork sonrasında parent'ın pgid'si kopyalanır
+                sid: 0,  // fork sonrasında parent'ın sid'i kopyalanır
                 rseq: RseqState::default(),
                 win32: None,
+                fs_base: 0, // arch_prctl ile ayarlanacak
+                shared_fs: None, // fork'ta oluşturulur veya CLONE_FS ile paylaşılır
+                vfork_wait: None, // CLONE_VFork ile oluşturulur
+                exit_signal: EXIT_SIGNAL_SIGCHLD, // varsayılan: SIGCHLD
+                clear_child_tid_addr: None, // CLONE_CHILD_CLEARTID ile ayarlanır
+                vfork_wait_child: None, // CLONE_VFork ile parent suspend edilir
+                tgid: id, // Başlangıçta kendi PID'i ile aynı (grup lideri)
             },
         }
     }
@@ -475,9 +563,7 @@ impl Task {
         if self.cold.fd_table.is_none() {
             use alloc::sync::Arc;
             use spin::Mutex;
-            self.cold.fd_table = Some(Arc::new(Mutex::new(
-                crate::fs::FileDescriptorTable::new()
-            )));
+            self.cold.fd_table = Some(Arc::new(Mutex::new(crate::fs::FileDescriptorTable::new())));
         }
     }
 

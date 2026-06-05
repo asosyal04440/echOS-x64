@@ -442,9 +442,9 @@ pub fn init() {
 /// Timer softirq handler — ertelenmiş zamanlayıcı callback'leri işler
 fn timer_softirq_action() {
     // Zamanlayıcı tekerleği (timer wheel) callback'lerini işle
-    // Şu an scheduler::tick() doğrudan hard IRQ'dan çağrıldığı için
-    // burada ek timer callback'leri (hrtimer, wheel) işlenebilir
     crate::task::scheduler::process_deferred_timers();
+    // TCP zamanlayıcı: Nagle flush, yeniden iletim, keepalive, SYN timeout, TIME_WAIT GC
+    crate::net::tcp::tcp_timer_tick();
 }
 
 /// Scheduler softirq handler — ertelenmiş zamanlayıcı yeniden dengeleme

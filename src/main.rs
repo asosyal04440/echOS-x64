@@ -155,6 +155,26 @@ unsafe fn debugcon_write_byte(byte: u8) {
     outb(0xE9, byte);
 }
 
+unsafe fn debugcon_write_str(s: &str) {
+    for b in s.bytes() {
+        outb(0xE9, b);
+    }
+}
+
+fn debugcon_write_fmt(args: core::fmt::Arguments) {
+    use core::fmt::Write;
+    struct W;
+    impl core::fmt::Write for W {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            for b in s.bytes() {
+                unsafe { outb(0xE9, b); }
+            }
+            Ok(())
+        }
+    }
+    let _ = W.write_fmt(args);
+}
+
 fn serial_write_byte(byte: u8) {
     unsafe {
         let mut spins = 1_000_000u32;
@@ -889,8 +909,8 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     debugcon_write_byte(b'J'); // Mark: before gdt::init
     ech_os::gdt::init();
     debugcon_write_byte(b'K'); // Mark: after gdt::init
-    ech_os::syscall::init(); // SYSCALL/SYSRET MSR'larını BSP için programla
-    serial_write_str(&format_args!("[SYSCALL] BSP SYSCALL MSRs programmed\n"));
+    ech_os::syscall::init();
+    debugcon_write_str("[SYSCALL] BSP SYSCALL MSRs programmed\n");
     ech_os::boot::safety::BOOT_SAFETY.enter_phase(ech_os::boot::safety::BootPhase::GdtSetup);
     debugcon_write_byte(b'L'); // Mark: before cpu::init
     ech_os::cpu::init();
@@ -1037,7 +1057,9 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     // FS smoke test flag'ini boot_control'dan oku
     let run_fs_smoke_test = ech_os::boot::appliance::fs_smoke_test_requested();
     if run_fs_smoke_test {
-        serial_write_str(&format_args!("[FS_SMOKE] FS smoke test requested via boot control\n"));
+        serial_write_str(&format_args!(
+            "[FS_SMOKE] FS smoke test requested via boot control\n"
+        ));
     }
 
     if run_fs_smoke_test {
@@ -1058,6 +1080,21 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
     // F2FS background GC thread — free segment threshold monitoring
     ech_os::fs::f2fs::start_gc_thread();
 
+    let run_shell_smoke_test = ech_os::boot::appliance::shell_smoke_test_requested();
+    if run_shell_smoke_test {
+        serial_write_str(&format_args!(
+            "[SHELL_SMOKE] Ring 3 shell requested via boot control\n"
+        ));
+        if ech_os::boot::appliance::shell_command_test_requested() {
+            serial_write_str(&format_args!(
+                "[SHELL_TEST] injecting command corpus into TTY stdin\n"
+            ));
+            seed_shell_command_test_input();
+        }
+        ech_os::boot::appliance::publish_stage(ech_os::boot::appliance::BootStage::DisplayReady);
+        ech_os::shell::run_shell_ring3();
+    }
+
     // Shell yerine yeni compositor tabanlı GUI'yi başlat
     serial_write_str(&format_args!(
         "[BOOT] Starting Velvet Glove compositor...\n"
@@ -1067,7 +1104,70 @@ unsafe fn boot_pipeline_uefi(boot_info_addr: usize, _kaslr_offset: u64) -> ! {
         ech_os::gfx::velvet_glove::VelvetGloveCompositor::run(fb);
     } else {
         serial_write_str(&format_args!("[BOOT] No framebuffer, starting shell...\n"));
-        ech_os::shell::run_shell();
+        {
+            serial_write_str(&format_args!("[BOOT] Ring 3 shell mode active\n"));
+            ech_os::shell::run_shell_ring3();
+        }
+    }
+}
+
+fn seed_shell_command_test_input() {
+    const CORPUS: &[u8] = concat!(
+        "echo ECHTEST:ECHO:PASS\n",
+        "X=42\n",
+        "echo ECHTEST:VAR:$X\n",
+        "echo ECHTEST:ARITH:$((3+4))\n",
+        "printf \"ECHTEST:PRINTF:%s\\n\" ok\n",
+        "if [ 1 -eq 1 ]; then echo ECHTEST:IF:PASS; else echo ECHTEST:IF:FAIL; fi\n",
+        "for i in 1 2 3; do echo ECHTEST:FOR:$i; done\n",
+        ":\n",
+        "echo ECHTEST:COLON:PASS\n",
+        "MYVAR=hello\n",
+        "echo ECHTEST:LENGTH:${#MYVAR}\n",
+        "FRUIT=banana\n",
+        "echo ECHTEST:SUFFIX:${FRUIT%na}\n",
+        "echo ECHTEST:PREFIX:${FRUIT#ba}\n",
+        "echo ECHTEST:GREEDY_SUFFIX:${FRUIT%%a*}\n",
+        "echo ECHTEST:GREEDY_PREFIX:${FRUIT##b*}\n",
+        "eval echo ECHTEST:EVAL:PASS\n",
+        "echo ECHTEST:END:PASS\n",
+        "exit\n",
+    )
+    .as_bytes();
+
+    // Drain spurious bytes from PS/2 controller boot (e.g. QEMU sends
+    // a stray scancode during init that decodes to '7' or other garbage)
+    let mut drained = 0usize;
+    while ech_os::tty::DEFAULT_TTY.input_buf.pop().is_some() {
+        drained += 1;
+    }
+    if drained > 0 {
+        serial_write_str(&format_args!(
+            "[SHELL_TEST] drained {} spurious bytes from TTY input_buf\n",
+            drained
+        ));
+    }
+
+    let mut accepted = 0usize;
+    for &byte in CORPUS {
+        if ech_os::tty::DEFAULT_TTY.input_buf.push(byte).is_ok() {
+            accepted += 1;
+        } else {
+            break;
+        }
+    }
+
+    if accepted == CORPUS.len() {
+        serial_write_str(&format_args!(
+            "[SHELL_TEST] command corpus queued bytes={}\n",
+            accepted
+        ));
+    } else {
+        serial_write_str(&format_args!(
+            "[SHELL_TEST] command corpus truncated accepted={} expected={}\n",
+            accepted,
+            CORPUS.len()
+        ));
     }
 }
 

@@ -321,6 +321,23 @@ macro_rules! println {
     ($fmt:expr, $($arg:tt)*) => ($crate::serial_println!($fmt, $($arg)*));
 }
 
+/// Diagnostic çıktı makrosu — test modunda debugcon (0xE9)'a, normalde serial'e yazar.
+///
+/// Kernel debug mesajlarini serial'e yazar.
+/// NOT: debugcon yonlendirmesi kaldirildi — 900MB log sorununa neden oluyordu.
+#[macro_export]
+macro_rules! debug_diag {
+    () => {
+        $crate::serial_println!();
+    };
+    ($fmt:expr) => {
+        $crate::serial_println!($fmt);
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        $crate::serial_println!($fmt, $($arg)*);
+    };
+}
+
 #[doc(hidden)]
 pub fn _print_with_meta_hostsafe(
     args: fmt::Arguments,
@@ -340,4 +357,28 @@ pub fn _print_with_meta_hostsafe(
 
     #[cfg(any(target_os = "none", target_os = "uefi"))]
     _print_with_meta(args, file, line, module);
+}
+
+/// Formatlı çıktıyı sadece debugcon (port 0xE9) yazar — serial'e dokunmaz.
+pub fn debugcon_write_fmt(args: fmt::Arguments) {
+    use core::fmt::Write;
+    struct DebugconWriter;
+    impl fmt::Write for DebugconWriter {
+        fn write_str(&mut self, s: &str) -> fmt::Result {
+            for byte in s.bytes() {
+                unsafe {
+                    core::arch::asm!(
+                        "mov dx, 0xe9",
+                        "out dx, al",
+                        in("al") byte,
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
+    let _ = DebugconWriter.write_fmt(args);
+    unsafe {
+        core::arch::asm!("mov dx, 0xe9", "mov al, 0x0a", "out dx, al");
+    }
 }

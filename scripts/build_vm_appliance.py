@@ -20,6 +20,9 @@ BOOT_CONTROL_VERSION = 1
 BOOT_CONTROL_SIZE = 136
 BOOT_FLAG_AUTO_LOGIN = 1 << 0
 BOOT_FLAG_SUSPEND_RESUME_SMOKE = 1 << 1
+BOOT_FLAG_FS_SMOKE_TEST = 1 << 2
+BOOT_FLAG_SHELL_SMOKE_TEST = 1 << 3
+BOOT_FLAG_SHELL_COMMAND_TEST = 1 << 4
 
 SLOT_IDS = {
     "none": 0,
@@ -770,6 +773,9 @@ def build_boot_control(
     pending_slot: str,
     auto_login: bool,
     suspend_resume_smoke: bool,
+    fs_smoke_test: bool = False,
+    shell_smoke_test: bool = False,
+    shell_command_test: bool = False,
 ) -> bytes:
     active = SLOT_IDS[active_slot]
     pending = SLOT_IDS[pending_slot]
@@ -792,6 +798,12 @@ def build_boot_control(
         boot_flags |= BOOT_FLAG_AUTO_LOGIN
     if suspend_resume_smoke:
         boot_flags |= BOOT_FLAG_SUSPEND_RESUME_SMOKE
+    if fs_smoke_test:
+        boot_flags |= BOOT_FLAG_FS_SMOKE_TEST
+    if shell_smoke_test:
+        boot_flags |= BOOT_FLAG_SHELL_SMOKE_TEST
+    if shell_command_test:
+        boot_flags |= BOOT_FLAG_SHELL_COMMAND_TEST
     blob[48] = boot_flags
     struct.pack_into("<I", blob, 128, 0)
     crc = zlib.crc32(blob) & 0xFFFFFFFF
@@ -810,6 +822,9 @@ def main() -> None:
     parser.add_argument("--pending-slot", choices=SLOT_IDS.keys(), default="none")
     parser.add_argument("--auto-login", action="store_true")
     parser.add_argument("--suspend-resume-smoke", action="store_true")
+    parser.add_argument("--fs-smoke-test", action="store_true")
+    parser.add_argument("--shell-smoke-test", action="store_true")
+    parser.add_argument("--shell-command-test", action="store_true")
     parser.add_argument("--update-smoke-request-url")
     parser.add_argument("--pe-smoke-bundle", type=Path)
     parser.add_argument("--bundle", action="append", type=Path, default=[])
@@ -826,6 +841,9 @@ def main() -> None:
             args.pending_slot,
             args.auto_login,
             args.suspend_resume_smoke,
+            args.fs_smoke_test,
+            args.shell_smoke_test or args.shell_command_test,
+            args.shell_command_test,
         )
     pe_smoke_bundle = args.pe_smoke_bundle.read_bytes() if args.pe_smoke_bundle else None
     curated_bundles = [path.read_bytes() for path in args.bundle]
@@ -937,6 +955,9 @@ def main() -> None:
             "pending_slot": args.pending_slot,
             "auto_login": args.auto_login,
             "suspend_resume_smoke": args.suspend_resume_smoke,
+            "fs_smoke_test": args.fs_smoke_test,
+            "shell_smoke_test": args.shell_smoke_test or args.shell_command_test,
+            "shell_command_test": args.shell_command_test,
             "update_smoke_request_url": args.update_smoke_request_url,
             "pe_smoke_bundle": str(args.pe_smoke_bundle) if args.pe_smoke_bundle else None,
             "bundles": [str(path) for path in args.bundle],

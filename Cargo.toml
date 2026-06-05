@@ -15,6 +15,7 @@ keywords = ["operating-system", "kernel", "no-std", "x86_64", "rust"]
 categories = ["embedded", "no-std"]
 
 [workspace]
+resolver = "2"
 members = [
     ".",
     "sdk/echos-manifest",
@@ -22,6 +23,7 @@ members = [
     "sdk/echos-sdk",
     "sdk/echos-rt",
     "tools/arch_guard",
+    "echshell",
 ]
 
 
@@ -114,6 +116,7 @@ bootloader = "0.9"
 core_io = { path = "third_party/core_io" }
 virtio-drivers = { path = "third_party/virtio-drivers" }
 cosmic-text = { path = "third_party/cosmic-text" }
+ed448-goldilocks-plus = { path = "third_party/ed448-goldilocks-plus" }
 
 # ============================================================
 # KÜTÜPHANELERİ VE İKİLİLERİ YAPILANDIRMA
@@ -148,12 +151,14 @@ name = "echsdk"
 path = "src/bin/echsdk.rs"
 test = false
 bench = false
+required-features = ["host_smoke"]
 
 [[bin]]
 name = "echos_appliance"
 path = "src/bin/echos_appliance.rs"
 test = false
 bench = false
+required-features = ["host_smoke"]
 
 # ============================================================
 # GELİŞTİRME BAĞIMLILIKLARI (Sadece test/bench için)
@@ -166,7 +171,7 @@ libc = "0.2"
 [target.'cfg(all(not(target_os = "none"), not(target_os = "uefi")))'.dev-dependencies]
 rand = { version = "0.8", features = ["small_rng"] }
 
-[target.'cfg(not(target_os = "uefi"))'.dependencies]
+[target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
 # RustCrypto prime-order NIST curves - DNSSEC ECDSA P-384 parity.
 # UEFI boot binary bu host-side/runtime doğrulayıcıları linklemez; aksi halde
 # upstream feature graph `std` zincirini çekip `panic_impl` çakışması üretir.
@@ -200,6 +205,7 @@ rsa_legacy_private_ops = []
 heap_stats = []
 serial_debug = []
 stress_test = []
+
 host_smoke = []
 
 # ============================================================
@@ -310,6 +316,20 @@ path = "tests/fs/fsck_oracle.rs"
 [[test]]
 name = "corrupt_image_hardening"
 path = "tests/fs/corrupt_image_hardening.rs"
+
+# pjdfstest — Endüstriyel POSIX dosya sistemi test süiti.
+# pjd/pjdfstest (https://github.com/pjd/pjdfstest) referans alınarak
+# chmod, chown, ftruncate, link, mkdir, mkfifo, mknod, open, rename,
+# rmdir, symlink, truncate, unlink, utimensat kategorilerinde testler.
+[[test]]
+name = "posix_pjdfstest_suite"
+path = "tests/posix_pjdfstest_suite.rs"
+
+# Syscall conformance + shell builtin/scripting testleri.
+# LTP, pjdfstest ve glibc test patternlerinden esinlenilmiştir.
+[[test]]
+name = "syscall_shell_conformance"
+path = "tests/syscall_shell_conformance.rs"
 
 # ============================================================
 # DERLEME PROFİLLERİ

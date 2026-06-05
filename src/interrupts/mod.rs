@@ -845,19 +845,38 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    unsafe {
+        crate::serial::uart::SERIAL1.force_unlock();
+        // Debugcon: 'P' = page fault handler entered
+        core::arch::asm!("mov dx, 0xe9", "mov al, 0x50", "out dx, al");
+    }
     use x86_64::registers::control::Cr2;
 
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         let rip = stack_frame.instruction_pointer.as_u64();
         let addr = Cr2::read().as_u64();
-        if crate::memory::handle_user_page_fault(addr, error_code) {
+        crate::debug_diag!(
+            "[RING3_PF] RIP={:#x} ADDR={:#x} err={:?}",
+            rip,
+            addr,
+            error_code
+        );
+        let handled = crate::memory::handle_user_page_fault(addr, error_code);
+        crate::debug_diag!("[RING3_PF] handled={}", handled);
+        if handled {
             return;
         }
         let kind = classify_user_stack_fault(addr).unwrap_or("PAGE_FAULT");
         user_fault_exit(kind, rip, Some(addr), Some(error_code.bits() as u64));
     } else {
         let fault_addr = Cr2::read().as_u64();
+        if crate::memory::is_user_address(fault_addr) {
+            let handled = crate::memory::handle_user_page_fault(fault_addr, error_code);
+            if handled {
+                return;
+            }
+        }
         if let Some(kind) = crate::task::scheduler::classify_current_kernel_stack_fault(fault_addr)
         {
             let rip = stack_frame.instruction_pointer.as_u64();
@@ -895,6 +914,11 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    unsafe {
+        crate::serial::uart::SERIAL1.force_unlock();
+        // Debugcon: 'D' = double fault handler entered
+        core::arch::asm!("mov dx, 0xe9", "mov al, 0x44", "out dx, al");
+    }
     dump_registers(&stack_frame);
     panic!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
 }
@@ -905,9 +929,19 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    unsafe {
+        crate::serial::uart::SERIAL1.force_unlock();
+        // Debugcon: 'G' = #GP handler entered
+        core::arch::asm!("mov dx, 0xe9", "mov al, 0x47", "out dx, al");
+    }
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         let rip = stack_frame.instruction_pointer.as_u64();
+        crate::serial_println!(
+            "[RING3_GP] RIP={:#x} err={:#x}",
+            rip,
+            error_code
+        );
         user_fault_exit("GENERAL_PROTECTION_FAULT", rip, None, Some(error_code));
     } else {
         dump_registers(&stack_frame);
@@ -921,9 +955,11 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 /// Geçersiz opcode hatası (#UD)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
+    unsafe { crate::serial::uart::SERIAL1.force_unlock(); }
     let rip = stack_frame.instruction_pointer.as_u64();
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
+        crate::debug_diag!("[SHELL_TEST] User #UD at RIP={:#x}", rip);
         user_fault_exit("INVALID_OPCODE", rip, None, None);
     }
     crate::serial_println!("EXCEPTION: INVALID OPCODE (#UD) at RIP={:#x}", rip);

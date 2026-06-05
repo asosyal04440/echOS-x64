@@ -1,0 +1,16 @@
+[package]
+name = "echshell"
+version = "0.1.0"
+edition = "2021"
+description = "echOS Ring 3 user-mode shell binary"
+license = "AGPL-3.0-only"
+
+[dependencies]
+spin = "0.9"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -93,6 +93,9 @@ pub struct LineDiscipline {
     pub output_buf: TtyBuffer,
     /// Termios bayrakları (ICANON, ECHO, ISIG, ICRNL, ONLCR)
     pub flags: LdiscFlags,
+    /// Foreground process group ID — POSIX: tcgetpgrp/tcsetpgrp için
+    /// SIGINT/SIGTSTZ/SIGQUIT bu group'a dağıtılır
+    pub foreground_pgid: core::sync::atomic::AtomicUsize,
 }
 
 impl LineDiscipline {
@@ -102,7 +105,18 @@ impl LineDiscipline {
             input_buf: TtyBuffer::new(),
             output_buf: TtyBuffer::new(),
             flags: LdiscFlags::new(),
+            foreground_pgid: core::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// tcgetpgrp(): foreground process group ID'yi döndür
+    pub fn get_foreground_pgid(&self) -> usize {
+        self.foreground_pgid.load(core::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// tcsetpgrp(): foreground process group ID'yi ayarla
+    pub fn set_foreground_pgid(&self, pgid: usize) {
+        self.foreground_pgid.store(pgid, core::sync::atomic::Ordering::SeqCst);
     }
 
     /// Canonical modu aç/kapa (raw mode toggle).

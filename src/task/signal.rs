@@ -310,7 +310,7 @@ pub const SIG_SETMASK: i32 = 2;
 
 /// Signal handler tablosu (per-process)
 pub struct SignalHandlers {
-    handlers: [SignalAction; 32],
+    handlers: spin::Mutex<[SignalAction; 32]>,
     mask: AtomicU64,
     pending: AtomicU64,
 }
@@ -322,14 +322,14 @@ impl SignalHandlers {
         handlers[17] = SignalAction::Ignore;
 
         Self {
-            handlers,
+            handlers: spin::Mutex::new(handlers),
             mask: AtomicU64::new(0),
             pending: AtomicU64::new(0),
         }
     }
 
     /// Signal action ayarlar
-    pub fn set_action(&mut self, sig: Signal, action: SignalAction) -> SignalAction {
+    pub fn set_action(&self, sig: Signal, action: SignalAction) -> SignalAction {
         if !sig.is_catchable() {
             return SignalAction::Default;
         }
@@ -337,16 +337,18 @@ impl SignalHandlers {
         if idx >= 32 {
             return SignalAction::Default;
         }
-        core::mem::replace(&mut self.handlers[idx], action)
+        let mut handlers = self.handlers.lock();
+        core::mem::replace(&mut handlers[idx], action)
     }
 
     /// Signal action döndürür
-    pub fn get_action(&self, sig: Signal) -> &SignalAction {
+    pub fn get_action(&self, sig: Signal) -> SignalAction {
         let idx = sig.number() as usize;
+        let handlers = self.handlers.lock();
         if idx >= 32 {
-            return &self.handlers[0];
+            return handlers[0];
         }
-        &self.handlers[idx]
+        handlers[idx]
     }
 
     /// Signal mask ayarlar
@@ -705,7 +707,7 @@ pub fn init() {
 /// # Dönen Değer
 /// Başarıda 0, hata durumunda negatif errno
 pub fn sys_sigaction(
-    handlers: &mut SignalHandlers,
+    handlers: &SignalHandlers,
     signum: i32,
     act: Option<SigAction>,
     oldact: Option<&mut SigAction>,
@@ -728,7 +730,7 @@ pub fn sys_sigaction(
     // İsteniyorsa eski eylemi sakla
     if let Some(old) = oldact {
         let current = handlers.get_action(sig);
-        *old = match *current {
+        *old = match current {
             SignalAction::Default => SigAction {
                 sa_handler: SIG_DFL,
                 sa_mask: 0,
@@ -1050,7 +1052,7 @@ pub fn deliver_signals(handlers: &SignalHandlers, task_id: usize) -> Option<(usi
     handlers.clear_pending(sig);
 
     // İşleyiciyi al
-    let action = handlers.get_action(sig).clone();
+    let action = handlers.get_action(sig);
 
     match action {
         SignalAction::Default => {
@@ -1134,10 +1136,10 @@ mod tests {
 
     #[test]
     fn test_signal_handlers() {
-        let mut handlers = SignalHandlers::new();
+        let handlers = SignalHandlers::new();
         handlers.set_action(Signal::SIGINT, SignalAction::Ignore);
 
-        assert_eq!(handlers.get_action(Signal::SIGINT), &SignalAction::Ignore);
+        assert_eq!(handlers.get_action(Signal::SIGINT), SignalAction::Ignore);
     }
 
     #[test]

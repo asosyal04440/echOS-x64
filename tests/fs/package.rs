@@ -170,7 +170,7 @@ fn make_valid_manifest() -> Manifest {
     checksums.insert("bin/app".to_string(), cs);
 
     Manifest {
-        package_name: "test-pkg".to_string(),
+        package_name: "test-eon".to_string(),
         version: "1.0.0".to_string(),
         files,
         checksums,
@@ -183,7 +183,7 @@ fn make_unsigned_manifest() -> Manifest {
     files.insert("bin/app".to_string(), b"content".to_vec());
 
     Manifest {
-        package_name: "unsigned-pkg".to_string(),
+        package_name: "unsigned-eon".to_string(),
         version: "1.0.0".to_string(),
         files,
         checksums: HashMap::new(),
@@ -240,7 +240,7 @@ fn rollback_on_failure() {
     let initial = make_valid_manifest();
     pm.stage_package(initial.clone()).unwrap();
     pm.commit().unwrap();
-    assert!(pm.is_installed("test-pkg"));
+    assert!(pm.is_installed("test-eon"));
 
     let prev_state = pm.installed.clone();
 
@@ -260,16 +260,16 @@ fn atomic_commit() {
     let manifest = make_valid_manifest();
     pm.stage_package(manifest.clone()).unwrap();
 
-    assert!(!pm.is_installed("test-pkg"));
+    assert!(!pm.is_installed("test-eon"));
     assert!(pm.staging.is_some());
 
     pm.commit().unwrap();
 
-    assert!(pm.is_installed("test-pkg"));
+    assert!(pm.is_installed("test-eon"));
     assert!(pm.staging.is_none());
 
-    let installed = pm.get_installed("test-pkg").unwrap();
-    assert_eq!(installed.package_name, "test-pkg");
+    let installed = pm.get_installed("test-eon").unwrap();
+    assert_eq!(installed.package_name, "test-eon");
     assert_eq!(installed.version, "1.0.0");
 }
 
@@ -283,17 +283,17 @@ fn ghost_state_impossible() {
     pm.stage_package(manifest).unwrap();
 
     assert!(pm.staging.is_some());
-    assert!(!pm.is_installed("test-pkg"));
+    assert!(!pm.is_installed("test-eon"));
 
     pm.commit().unwrap();
 
     assert!(pm.staging.is_none());
-    assert!(pm.is_installed("test-pkg"));
+    assert!(pm.is_installed("test-eon"));
 
     let prev = pm.previous_state.clone();
     pm.rollback().unwrap();
 
     assert!(pm.staging.is_none());
-    assert!(!pm.is_installed("test-pkg"));
+    assert!(!pm.is_installed("test-eon"));
     assert_eq!(pm.installed, prev.unwrap_or_default());
 }

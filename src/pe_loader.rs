@@ -274,10 +274,11 @@ fn register_user_stack_region(
 ) -> Result<(u64, u64), PeError> {
     kernel_memory::set_active_address_space(Some(space.clone()));
     let (stack_base, stack_top) = kernel_memory::user_stack_bounds();
-    let lazy_size = (kernel_memory::USER_STACK_PAGES as u64)
-        .saturating_mul(kernel_memory::PAGE_SIZE as u64)
-        .saturating_sub(kernel_memory::PAGE_SIZE as u64);
-    let guard_start = stack_base.saturating_add(kernel_memory::PAGE_SIZE as u64);
+    let lazy_size = kernel_memory::USER_STACK_USABLE_BYTES;
+    let guard_start = stack_base.saturating_add(
+        (kernel_memory::USER_STACK_GUARD_PAGES as u64)
+            .saturating_mul(kernel_memory::PAGE_SIZE as u64),
+    );
     let flags =
         PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
     let ok = kernel_memory::register_lazy_region(guard_start, lazy_size, flags);

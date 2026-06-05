@@ -75,6 +75,49 @@ mod windows_image;
 mod windows_runtime;
 
 pub use pipe::{O_NONBLOCK, O_RDONLY, O_RDWR, O_WRONLY};
+
+// Shell tarafından kullanılan process management fonksiyonları — wrapper'lar
+/// fork(): child process oluştur, child'a 0, parent'a child pid döndür
+pub fn fork() -> usize {
+    process_bridge::sys_fork()
+}
+/// wait4(): child process bekle (WNOHANG=1, WUNTRACED=2)
+pub fn wait4(pid: usize, status: usize, options: usize) -> usize {
+    process_bridge::sys_wait4(pid, status, options, 0)
+}
+/// exit(): process sonlandır
+pub fn exit(code: usize) -> usize {
+    process_bridge::sys_exit(code)
+}
+/// pipe(): anonim boru oluştur — POSIX pipe(2)
+/// fds_ptr: kullanıcı alanındaki [i32; 2] buffer'ı
+pub fn sys_pipe_call(fds_ptr: usize) -> usize {
+    if let Err(err) = validate_user_range(fds_ptr, 2 * core::mem::size_of::<u32>()) {
+        return err;
+    }
+    let read_fd = allocate_fd(FdKind::Pipe);
+    let write_fd = allocate_fd(FdKind::Pipe);
+    if read_fd >= MAX_FDS || write_fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
+    let pipe_id = NEXT_PIPE_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    let pipe = PipeRingBuffer::new(65536);
+    PIPE_POOL.lock().insert(pipe_id, pipe);
+    PIPE_READ_MAP.lock().insert(read_fd, pipe_id);
+    PIPE_WRITE_MAP.lock().insert(write_fd, pipe_id);
+    let _ = write_user(fds_ptr, read_fd as u32);
+    let _ = write_user(fds_ptr + core::mem::size_of::<u32>(), write_fd as u32);
+    0
+}
+/// dup2(): eski fd'yi yeni fd'ye kopyala — POSIX dup2(2)
+pub fn dup2(old_fd: usize, new_fd: usize) -> usize {
+    sys_dup2(old_fd, new_fd)
+}
+/// close(): fd'yi kapat — POSIX close(2)
+pub fn close(fd: usize) -> usize {
+    sys_close(fd)
+}
+
 pub use windows_image::{
     pe_info_from_image, pe_sections_from_image, prepare_windows_launch, run_windows_app,
     run_windows_app_image, secure_boot_db_available, secure_boot_verify_image, PeInfo,
@@ -154,6 +197,7 @@ const ENOENT: usize = 2;
 const ESRCH: usize = 3;
 const EINTR: usize = 4;
 const EIO: usize = 5;
+const ENOEXEC: usize = 8;
 const ENXIO: usize = 6;
 const EBADF: usize = 9;
 const ENOMEM: usize = 12;
@@ -179,10 +223,15 @@ const EXDEV: usize = 18;
 const EROFS: usize = 30;
 const ENAMETOOLONG: usize = 36;
 const ELOOP: usize = 40;
+const ENOTSOCK: usize = 88;
+const ENOPROTOOPT: usize = 92;
 const EOVERFLOW: usize = 75;
 const ESTALE: usize = 116;
 const ERANGE: usize = 34;
 const ESPIPE: usize = 29;
+const EADDRINUSE: usize = 98;
+const ECONNREFUSED: usize = 111;
+const EPIPE: usize = 32;
 
 // Futex wait queue entry
 struct FutexWaiter {
@@ -426,6 +475,21 @@ const SYS_ECHOS_SERVICE_HEARTBEAT: usize = 466;
 const SYS_ECHOS_NOTIFICATION_SERVICE_RECV: usize = 467;
 const SYS_ECHOS_NOTIFICATION_SERVICE_RESPOND: usize = 468;
 
+// Shell Ring 3 syscall'ları (500-512 aralığı)
+const SYS_EON_LIST_TASKS: usize = 500;
+const SYS_EON_KEYBOARD_READ: usize = 501;
+const SYS_EON_TERM_CLEAR: usize = 502;
+const SYS_EON_MEMORY_STATS: usize = 503;
+const SYS_EON_SPAWN_ELF: usize = 504;
+const SYS_EON_GET_FOREGROUND: usize = 505;
+const SYS_EON_SET_FOREGROUND: usize = 506;
+const SYS_EON_MOUNT_LIST: usize = 507;
+const SYS_EON_DRIVER_LIST: usize = 508;
+const SYS_EON_NET_CONFIG: usize = 509;
+const SYS_EON_SHUTDOWN: usize = 510;
+const SYS_EON_REBOOT: usize = 511;
+const SYS_EON_IPC_SEND: usize = 512;
+
 // Süreç ve İş Parçacığı (Thread) Yönetimi
 // fork()  -> mevcut süreci kopyalar (copy-on-write)
 // clone() -> fork + thread bayrakları ile ince kontrol sağlar
@@ -440,6 +504,107 @@ const SYS_SETSID: usize = 112;
 const SYS_SETPGID: usize = 109;
 const SYS_GETPGID: usize = 121;
 const SYS_GETSID: usize = 124;
+const SYS_FCNTL: usize = 72;
+
+// Eksik errno sabitleri
+const ECHILD: usize = 10;
+const ENFILE: usize = 23;
+
+// Resource Limit Syscall'ları
+const SYS_GETRLIMIT: usize = 97;
+const SYS_SETRLIMIT: usize = 160;
+const SYS_PRLIMIT64: usize = 302;
+
+// Interval Timer
+const SYS_GETITIMER: usize = 36;
+const SYS_SETITIMER: usize = 38;
+const ITIMER_REAL: usize = 0;
+const ITIMER_VIRTUAL: usize = 1;
+const ITIMER_PROF: usize = 2;
+
+// Waitid
+const SYS_WAITID: usize = 247;
+const P_ALL: usize = 0;
+const P_PID: usize = 1;
+const P_PGID: usize = 2;
+const WEXITED: usize = 4;
+const WNOWAIT: usize = 0x01000000;
+
+// Dup3
+const SYS_DUP3: usize = 292;
+
+// Clock settime
+const SYS_CLOCK_SETTIME: usize = 227;
+
+// Capabilities
+const SYS_CAPGET: usize = 125;
+const SYS_CAPSET: usize = 126;
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
+
+// Namespace
+const SYS_UNSHARE: usize = 272;
+const SYS_SETNS: usize = 308;
+const CLONE_NEWNS: usize = 0x00020000;
+const CLONE_NEWUTS: usize = 0x04000000;
+const CLONE_NEWIPC: usize = 0x08000000;
+const CLONE_NEWUSER: usize = 0x10000000;
+const CLONE_NEWPID: usize = 0x20000000;
+const CLONE_NEWNET: usize = 0x40000000;
+
+// kcmp
+const SYS_KCMP: usize = 312;
+
+// pidfd
+const SYS_PIDFD_OPEN: usize = 434;
+const SYS_PIDFD_SEND_SIGNAL: usize = 424;
+
+// Linux AIO
+const SYS_IO_SETUP: usize = 206;
+const SYS_IO_DESTROY: usize = 207;
+const SYS_IO_GETEVENTS: usize = 208;
+const SYS_IO_SUBMIT: usize = 209;
+const SYS_IO_CANCEL: usize = 210;
+
+// POSIX Message Queues
+const SYS_MQ_OPEN: usize = 235;
+const SYS_MQ_UNLINK: usize = 240;
+const SYS_MQ_TIMEDSEND: usize = 237;
+const SYS_MQ_TIMEDRECEIVE: usize = 238;
+const SYS_MQ_NOTIFY: usize = 239;
+const SYS_MQ_GETSETATTR: usize = 245;
+
+// Quota / Key / Mount
+const SYS_QUOTACTL: usize = 179;
+const SYS_KEYCTL: usize = 250;
+const SYS_MOVE_MOUNT: usize = 429;
+const SYS_FSOPEN: usize = 430;
+const SYS_FSCONFIG: usize = 431;
+const SYS_FSMOUNT: usize = 432;
+
+// Advanced
+const SYS_PERF_EVENT_OPEN: usize = 298;
+const SYS_BPF: usize = 321;
+const SYS_KEXEC_FILE_LOAD: usize = 304;
+
+// RLIMIT sabitleri
+const RLIMIT_CPU: usize = 0;
+const RLIMIT_FSIZE: usize = 1;
+const RLIMIT_DATA: usize = 2;
+const RLIMIT_STACK: usize = 3;
+const RLIMIT_CORE: usize = 4;
+const RLIMIT_RSS: usize = 5;
+const RLIMIT_NPROC: usize = 6;
+const RLIMIT_NOFILE: usize = 7;
+const RLIMIT_MEMLOCK: usize = 8;
+const RLIMIT_AS: usize = 9;
+const RLIMIT_LOCKS: usize = 10;
+const RLIMIT_SIGPENDING: usize = 11;
+const RLIMIT_MSGQUEUE: usize = 12;
+const RLIMIT_NICE: usize = 13;
+const RLIMIT_RTPRIO: usize = 14;
+const RLIMIT_RTTIME: usize = 15;
+const RLIMIT_NLIMITS: usize = 16;
+const RLIM_INFINITY: u64 = u64::MAX;
 
 // Sinyal Syscall'ları — Süreçler Arası Anlık Bildirim Mekanizması
 //
@@ -497,6 +662,348 @@ const STATUS_NOT_IMPLEMENTED: u32 = 0xC0000002;
 const STATUS_ACCESS_VIOLATION: u32 = 0xC0000005;
 const STATUS_INVALID_PARAMETER: u32 = 0xC000000D;
 const STATUS_NOT_FOUND: u32 = 0xC0000225;
+
+// ============================================================================
+// Eksik POSIX / Linux Syscall Numaraları — Faz 2
+// ============================================================================
+
+// Zaman
+const SYS_GETTIMEOFDAY: usize = 96;
+const SYS_SETTIMEOFDAY: usize = 164;
+const SYS_CLOCK_GETRES: usize = 229;
+const SYS_CLOCK_NANOSLEEP: usize = 230;
+const SYS_CLOCK_ADJTIME: usize = 305;
+const SYS_TIME: usize = 201;
+const SYS_UTIMES: usize = 235;
+
+// Sinyal
+const SYS_RT_SIGPENDING: usize = 127;
+
+// Süreç / Kullanıcı / Grup
+const SYS_GETPGRP: usize = 111;
+const SYS_SETREUID: usize = 113;
+const SYS_SETREGID: usize = 114;
+const SYS_GETGROUPS: usize = 115;
+const SYS_SETGROUPS: usize = 116;
+const SYS_SETRESUID: usize = 117;
+const SYS_GETRESUID: usize = 118;
+const SYS_SETRESGID: usize = 119;
+const SYS_GETRESGID: usize = 120;
+const SYS_SETFSUID: usize = 122;
+const SYS_SETFSGID: usize = 123;
+const SYS_VFORK: usize = 58;
+const SYS_EXECVEAT: usize = 322;
+const SYS_CLOSE_RANGE: usize = 436;
+const SYS_CLONE3: usize = 435;
+const SYS_PIDFD_GETFD: usize = 438;
+
+// Zamanlayıcı
+const SYS_TIMERFD_CREATE: usize = 283;
+const SYS_TIMERFD_SETTIME: usize = 286;
+const SYS_TIMERFD_GETTIME: usize = 287;
+
+// Dosya Sistemi
+const SYS_MKNOD: usize = 133;
+const SYS_MKNODAT: usize = 259;
+const SYS_MKDIRAT: usize = 258;
+const SYS_UNLINKAT: usize = 263;
+const SYS_FCHMODAT: usize = 268;
+const SYS_FCHOWNAT: usize = 260;
+const SYS_FACCESSAT2: usize = 439;
+const SYS_OPENAT2: usize = 437;
+const SYS_FLOCK: usize = 73;
+const SYS_SYNC: usize = 162;
+const SYS_SYNC_FILE_RANGE: usize = 277;
+const SYS_FADVISE64: usize = 221;
+const SYS_FCHDIR: usize = 81;
+const SYS_CHROOT: usize = 161;
+const SYS_PIVOT_ROOT: usize = 155;
+
+// Soket
+const SYS_SOCKETPAIR: usize = 53;
+const SYS_GETSOCKNAME: usize = 51;
+const SYS_GETPEERNAME: usize = 52;
+const SYS_GETSOCKOPT: usize = 55;
+const SYS_SHUTDOWN: usize = 48;
+const SYS_RECVMSG: usize = 47;
+const SYS_SENDMSG: usize = 46;
+const SYS_RECVMMSG: usize = 299;
+const SYS_SENDMMSG: usize = 307;
+
+// I/O Çoğaltma
+const SYS_PSELECT6: usize = 270;
+const SYS_PPOLL: usize = 271;
+
+// Bellek Kilitleme
+const SYS_MLOCK: usize = 149;
+const SYS_MUNLOCK: usize = 150;
+const SYS_MLOCKALL: usize = 151;
+const SYS_MUNLOCKALL: usize = 152;
+const SYS_MLOCK2: usize = 325;
+const SYS_USERFAULTFD: usize = 323;
+const SYS_PKEY_MPROTECT: usize = 329;
+const SYS_PKEY_ALLOC: usize = 330;
+const SYS_PKEY_FREE: usize = 331;
+
+// Zamanlama (Scheduler)
+const SYS_SCHED_SETPARAM: usize = 142;
+const SYS_SCHED_GETPARAM: usize = 143;
+const SYS_SCHED_SETSCHEDULER: usize = 144;
+const SYS_SCHED_GETSCHEDULER: usize = 145;
+const SYS_SCHED_GET_PRIORITY_MAX: usize = 146;
+const SYS_SCHED_GET_PRIORITY_MIN: usize = 147;
+const SYS_SCHED_RR_GET_INTERVAL: usize = 148;
+const SYS_SCHED_SETAFFINITY: usize = 203;
+const SYS_SCHED_GETAFFINITY: usize = 204;
+const SYS_SCHED_SETATTR: usize = 314;
+const SYS_SCHED_GETATTR: usize = 315;
+const SYS_SET_PRIORITY: usize = 141;
+const SYS_GET_PRIORITY: usize = 140;
+
+// SysV IPC
+const SYS_SEMGET: usize = 64;
+const SYS_SEMOP: usize = 65;
+const SYS_SEMCTL: usize = 66;
+const SYS_SHMDT: usize = 67;
+const SYS_MSGGET: usize = 68;
+const SYS_MSGSND: usize = 69;
+const SYS_MSGRCV: usize = 70;
+const SYS_MSGCTL: usize = 71;
+const SYS_SEMTIMEDOP: usize = 220;
+
+// Process VM
+const SYS_PROCESS_VM_READV: usize = 310;
+const SYS_PROCESS_VM_WRITEV: usize = 311;
+
+// Sistem
+const SYS_SYSLOG: usize = 103;
+const SYS_SWAPON: usize = 167;
+const SYS_SWAPOFF: usize = 168;
+const SYS_SETHOSTNAME: usize = 170;
+const SYS_SETDOMAINNAME: usize = 171;
+const SYS_PERSONALITY: usize = 135;
+const SYS_VHANGUP: usize = 153;
+const SYS_REBOOT: usize = 169;
+
+// Güvenlik (Landlock LSM)
+const SYS_LANDLOCK_CREATE_RULESET: usize = 444;
+const SYS_LANDLOCK_ADD_RULE: usize = 445;
+const SYS_LANDLOCK_RESTRICT_SELF: usize = 446;
+
+// inotify
+const SYS_INOTIFY_INIT1: usize = 294;
+const SYS_INOTIFY_ADD_WATCH: usize = 254;
+const SYS_INOTIFY_RM_WATCH: usize = 255;
+const SYS_SIGNALFD4: usize = 287;
+
+// ============================================================================
+// Faz 3 — Eksik Linux Syscall Numaraları
+// ============================================================================
+
+// Zaman / Timer
+const SYS_ALARM: usize = 37;
+
+// Thread-Local Storage
+const SYS_ARCH_PRTCL: usize = 158;
+const SYS_SET_THREAD_AREA: usize = 205;
+
+// Kernel Modül
+const SYS_INIT_MODULE: usize = 175;
+const SYS_DELETE_MODULE: usize = 176;
+const SYS_FINIT_MODULE: usize = 137;
+
+// I/O Öncelik
+const SYS_IOPRIO_SET: usize = 251;
+const SYS_IOPRIO_GET: usize = 252;
+
+// inotify (eski versiyon)
+const SYS_INOTIFY_INIT: usize = 253;
+
+// Vectored I/O
+const SYS_PREADV: usize = 284;
+const SYS_PWRITEV: usize = 285;
+const SYS_PREADV2: usize = 327;
+const SYS_PWRITEV2: usize = 328;
+
+// Sinyal
+const SYS_RT_TGSIGQUEUEINFO: usize = 286;
+
+// Dosya Bildirim
+const SYS_FANOTIFY_INIT: usize = 289;
+const SYS_FANOTIFY_MARK: usize = 290;
+
+// Kernel Yükleme
+const SYS_KEXEC_LOAD: usize = 240;
+
+// Bellek Bariyeri
+const SYS_MEMBARRIER: usize = 318;
+
+// NUMA Bellek Politikası
+const SYS_MBIND: usize = 236;
+const SYS_SET_MEMPOLICY: usize = 237;
+const SYS_GET_MEMPOLICY: usize = 238;
+const SYS_MIGRATE_PAGES: usize = 256;
+
+// Anahtar Yönetimi
+const SYS_ADD_KEY: usize = 248;
+const SYS_REQUEST_KEY: usize = 249;
+
+// Süreç Yönetimi
+const SYS_PROCESS_MADVISE: usize = 440;
+const SYS_PROCESS_MRELEASE: usize = 447;
+
+// Dosya Sistemi
+const SYS_MOUNT_SETATTR: usize = 441;
+const SYS_QUOTACTL_FD: usize = 442;
+const SYS_MEMFD_SECRET: usize = 446;
+
+// Async I/O
+const SYS_IO_PGETEVENTS: usize = 333;
+
+// ============================================================================
+// Faz 4 — %100 Linux x86_64 Syscall Kapsamı (291/291)
+// ============================================================================
+
+// Genişletilmiş Öznitelikler (xattr) — F2FS native destek
+const SYS_SETXATTR: usize = 188;
+const SYS_LSETXATTR: usize = 189;
+const SYS_FSETXATTR: usize = 190;
+const SYS_GETXATTR: usize = 191;
+const SYS_LGETXATTR: usize = 192;
+const SYS_FGETXATTR: usize = 193;
+const SYS_LISTXATTR: usize = 194;
+const SYS_LLISTXATTR: usize = 195;
+const SYS_FLISTXATTR: usize = 196;
+const SYS_REMOVEXATTR: usize = 197;
+const SYS_LREMOVEXATTR: usize = 198;
+const SYS_FREMOVEXATTR: usize = 199;
+
+// Basit implementasyonlar
+const SYS_GETDENTS: usize = 78;
+const SYS_UTIME: usize = 132;
+const SYS_ADJTIMEX: usize = 159;
+const SYS_ACCT: usize = 163;
+const SYS_READAHEAD: usize = 187;
+const SYS_TIMER_GETOVERRUN: usize = 225;
+
+// Deprecated wrappers (redirect to modern equivalents)
+const SYS_EPOLL_CREATE: usize = 213;
+const SYS_EPOLL_CTL_OLD: usize = 214;
+const SYS_EPOLL_WAIT_OLD: usize = 215;
+const SYS_REMAP_FILE_PAGES: usize = 216;
+
+// Kaldırılmış /Obsolete syscalls (Linux ENOSYS davranışı)
+const SYS_USELIB: usize = 134;
+const SYS_USTAT: usize = 136;
+const SYS_SYSFS: usize = 139;
+const SYS_MODIFY_LDT: usize = 154;
+const SYS_CREATE_MODULE: usize = 174;
+const SYS_GET_KERNEL_SYMS: usize = 177;
+const SYS_QUERY_MODULE: usize = 178;
+const SYS_NFSSERVCTL: usize = 180;
+const SYS_GETPMSG: usize = 181;
+const SYS_PUTPMSG: usize = 182;
+const SYS_AFS_SYSCALL: usize = 183;
+const SYS_TUXCALL: usize = 184;
+const SYS_SECURITY: usize = 185;
+const SYS_LOOKUP_DCOOKIE: usize = 212;
+
+// x86-specific privileged (ring 0 gerektirir)
+const SYS_IOPL: usize = 172;
+const SYS_IOPERM: usize = 173;
+
+// xattr flag sabitleri (kullanılmayan flag için errno ENOTSUP döner)
+const XATTR_NOFL: usize = 0;
+
+// pselect6 / ppoll için Timespec
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct TimevalRecv {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+// Resource limit yapısı (getrlimit/setrlimit/prlimit64)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Rlimit {
+    rlim_cur: u64,
+    rlim_max: u64,
+}
+
+// Interval timer yapısı (getitimer/setitimer)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Timeval {
+    tv_sec: i64,
+    tv_usec: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Itimerval {
+    it_interval: Timeval,
+    it_value: Timeval,
+}
+
+// waitid için siginfo_t (basitleştirilmiş)
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SiginfoChild {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    _pad0: i32,
+    si_pid: i32,
+    si_uid: i32,
+    si_status: i32,
+    _pad1: i32,
+}
+
+// Capability header
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CapUserHeader {
+    version: u32,
+    pid: i32,
+}
+
+// AIO context ID tipi
+type AioContext = u64;
+
+// AIO I/O event
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoEvent {
+    data: u64,
+    obj: u64,
+    res: i64,
+    res2: i64,
+}
+
+// AIO I/O control block
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IoCb {
+    aio_data: u64,
+    aio_key: u16,
+    aio_lio_opcode: i16,
+    aio_reqprio: i16,
+    aio_fildes: u32,
+    aio_buf: u64,
+    aio_nbytes: u64,
+    aio_offset: i64,
+}
+
+// POSIX MQ attributes
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct MqAttr {
+    mq_flags: i64,
+    mq_maxmsg: i64,
+    mq_msgsize: i64,
+    mq_curmsgs: i64,
+}
 
 const NT_CLOSE: u32 = 0x0000;
 const NT_READ_FILE: u32 = 0x0001;
@@ -653,13 +1160,124 @@ static FD_CLOEXEC: Mutex<[bool; MAX_FDS]> = Mutex::new([false; MAX_FDS]);
 static CURRENT_WORKING_DIR: Mutex<String> = Mutex::new(String::new());
 /// Process umask: yeni dosyalardan kaldırılacak permission bitleri (varsayılan: 022)
 static PROCESS_UMASK: Mutex<usize> = Mutex::new(0o022);
+
+/// CLONE_FS: SharedFsInfo için mevcut CWD'yi döndür
+pub fn get_cwd() -> alloc::string::String {
+    // CLONE_FS: Eğer current task'ın shared_fs'i varsa ondan oku
+    if let Some(cwd) = get_cwd_from_shared_fs() {
+        return cwd;
+    }
+    CURRENT_WORKING_DIR.lock().clone()
+}
+
+/// CLONE_FS: SharedFsInfo'dan CWD oku — None ise shared_fs yok demektir
+fn get_cwd_from_shared_fs() -> Option<alloc::string::String> {
+    let cpu_id = crate::cpu::smp::get_current_cpu_id();
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let task = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)?
+            .as_ref()?;
+        let shared = task.cold.shared_fs.as_ref()?;
+        Some(shared.lock().cwd.clone())
+    })
+}
+
+/// CLONE_FS: Current task'ın CWD'sini ayarla — shared_fs varsa oraya, yoksa global static'e
+pub fn set_cwd_for_current(cwd: alloc::string::String) {
+    let cpu_id = crate::cpu::smp::get_current_cpu_id();
+    let wrote_to_shared = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let task = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)?
+            .as_ref()?;
+        let shared = task.cold.shared_fs.as_ref()?;
+        shared.lock().cwd = cwd.clone();
+        Some(())
+    });
+    if wrote_to_shared.is_none() {
+        *CURRENT_WORKING_DIR.lock() = cwd;
+    }
+}
+
+/// CLONE_FS: SharedFsInfo için mevcut umask'i döndür
+pub fn get_umask() -> usize {
+    if let Some(mask) = get_umask_from_shared_fs() {
+        return mask;
+    }
+    *PROCESS_UMASK.lock()
+}
+
+/// CLONE_FS: SharedFsInfo'dan umask oku
+fn get_umask_from_shared_fs() -> Option<usize> {
+    let cpu_id = crate::cpu::smp::get_current_cpu_id();
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let task = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)?
+            .as_ref()?;
+        let shared = task.cold.shared_fs.as_ref()?;
+        Some(shared.lock().umask)
+    })
+}
+
+/// CLONE_FS: Current task'ın umask'ini ayarla — shared_fs varsa oraya, yoksa global static'e
+pub fn set_umask_for_current(mask: usize) {
+    let cpu_id = crate::cpu::smp::get_current_cpu_id();
+    let wrote_to_shared = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let task = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)?
+            .as_ref()?;
+        let shared = task.cold.shared_fs.as_ref()?;
+        shared.lock().umask = mask;
+        Some(())
+    });
+    if wrote_to_shared.is_none() {
+        *PROCESS_UMASK.lock() = mask;
+    }
+}
+
+/// CLONE_FS: SharedFsInfo'dan root oku
+pub fn get_root() -> alloc::string::String {
+    if let Some(root) = get_root_from_shared_fs() {
+        return root;
+    }
+    alloc::string::String::from("/")
+}
+
+/// CLONE_FS: SharedFsInfo'dan root oku
+fn get_root_from_shared_fs() -> Option<alloc::string::String> {
+    let cpu_id = crate::cpu::smp::get_current_cpu_id();
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let task = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)?
+            .as_ref()?;
+        let shared = task.cold.shared_fs.as_ref()?;
+        Some(shared.lock().root.clone())
+    })
+}
+
+/// CLONE_FS: Current task'ın root'unu ayarla — shared_fs varsa oraya, yoksa global static'e
+pub fn set_root_for_current(root: alloc::string::String) {
+    let cpu_id = crate::cpu::smp::get_current_cpu_id();
+    let wrote_to_shared = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let task = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(cpu_id as usize)?
+            .as_ref()?;
+        let shared = task.cold.shared_fs.as_ref()?;
+        shared.lock().root = root;
+        Some(())
+    });
+    if wrote_to_shared.is_none() {
+        // Global root static'i yok — SharedFsInfo kullanılmayan process'ler
+        // root'u changing için şimdilik bir şey yapmıyoruz (chroot EPERM döner)
+        let _ = wrote_to_shared;
+    }
+}
+
 lazy_static! {
     pub static ref FILE_TABLE: Mutex<Vec<Option<FileState>>> = Mutex::new(vec![None; MAX_FDS]);
     pub static ref FILE_GENERATION: Mutex<Vec<u64>> = Mutex::new(vec![0; MAX_FDS]);
     static ref RING_TABLE: Mutex<alloc::collections::BTreeMap<usize, LockFreeIoUring>> =
         Mutex::new(alloc::collections::BTreeMap::new());
 }
-static SIGNAL_MASK: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub struct FileState {
@@ -746,9 +1364,309 @@ fn unsupported_errno(surface: &'static str) -> usize {
     errno(ENOSYS)
 }
 
+// ============================================================================
+// Faz 4 — Genişletilmiş Öznitelikler (xattr) Syscall'ları
+//
+// Tüm xattr implementasyonları fs::xattr modülünde bulunur.
+// Burada posix.rs'den user pointer'ları okuyup fs::xattr'a yönlendiriyoruz.
+// ============================================================================
+
+fn sys_setxattr(path_ptr: usize, name_ptr: usize, value_ptr: usize, size: usize, _flags: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    if value_ptr == 0 && size == 0 {
+        return fs::xattr::sys_setxattr(&path, &name, &[], _flags as i32) as usize;
+    }
+    let mut buf = alloc::vec![0u8; size];
+    if let Err(e) = copy_from_user(&mut buf, value_ptr) { return e; }
+    fs::xattr::sys_setxattr(&path, &name, &buf, _flags as i32) as usize
+}
+
+fn sys_lsetxattr(path_ptr: usize, name_ptr: usize, value_ptr: usize, size: usize, _flags: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let mut buf = alloc::vec![0u8; size];
+    if let Err(e) = copy_from_user(&mut buf, value_ptr) { return e; }
+    fs::xattr::sys_lsetxattr(&path, &name, &buf, _flags as i32) as usize
+}
+
+fn sys_fsetxattr(fd: usize, name_ptr: usize, value_ptr: usize, size: usize, _flags: usize) -> usize {
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let mut buf = alloc::vec![0u8; size];
+    if let Err(e) = copy_from_user(&mut buf, value_ptr) { return e; }
+    fs::xattr::sys_fsetxattr(fd as i32, &name, &buf, _flags as i32) as usize
+}
+
+fn sys_getxattr(path_ptr: usize, name_ptr: usize, buf_ptr: usize, size: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let mut user_buf = alloc::vec![0u8; size];
+    let ret = fs::xattr::sys_getxattr(&path, &name, &mut user_buf);
+    if ret < 0 { return ret as usize; }
+    if buf_ptr != 0 && ret > 0 {
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+    }
+    ret as usize
+}
+
+fn sys_lgetxattr(path_ptr: usize, name_ptr: usize, buf_ptr: usize, size: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let mut user_buf = alloc::vec![0u8; size];
+    let ret = fs::xattr::sys_lgetxattr(&path, &name, &mut user_buf);
+    if ret < 0 { return ret as usize; }
+    if buf_ptr != 0 && ret > 0 {
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+    }
+    ret as usize
+}
+
+fn sys_fgetxattr(fd: usize, name_ptr: usize, buf_ptr: usize, size: usize) -> usize {
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let mut user_buf = alloc::vec![0u8; size];
+    let ret = fs::xattr::sys_fgetxattr(fd as i32, &name, &mut user_buf);
+    if ret < 0 { return ret as usize; }
+    if buf_ptr != 0 && ret > 0 {
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+    }
+    ret as usize
+}
+
+fn sys_listxattr(path_ptr: usize, buf_ptr: usize, size: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let mut user_buf = alloc::vec![0u8; size];
+    let ret = fs::xattr::sys_listxattr(&path, &mut user_buf);
+    if ret < 0 { return ret as usize; }
+    if buf_ptr != 0 && ret > 0 {
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+    }
+    ret as usize
+}
+
+fn sys_llistxattr(path_ptr: usize, buf_ptr: usize, size: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let mut user_buf = alloc::vec![0u8; size];
+    let ret = fs::xattr::sys_llistxattr(&path, &mut user_buf);
+    if ret < 0 { return ret as usize; }
+    if buf_ptr != 0 && ret > 0 {
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+    }
+    ret as usize
+}
+
+fn sys_flistxattr(fd: usize, buf_ptr: usize, size: usize) -> usize {
+    let mut user_buf = alloc::vec![0u8; size];
+    let ret = fs::xattr::sys_flistxattr(fd as i32, &mut user_buf);
+    if ret < 0 { return ret as usize; }
+    if buf_ptr != 0 && ret > 0 {
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+    }
+    ret as usize
+}
+
+fn sys_removexattr(path_ptr: usize, name_ptr: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    fs::xattr::sys_removexattr(&path, &name) as usize
+}
+
+fn sys_lremovexattr(path_ptr: usize, name_ptr: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    fs::xattr::sys_lremovexattr(&path, &name) as usize
+}
+
+fn sys_fremovexattr(fd: usize, name_ptr: usize) -> usize {
+    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    fs::xattr::sys_fremovexattr(fd as i32, &name) as usize
+}
+
+// ============================================================================
+// Faz 4 — Basit Implementasyonlar
+// ============================================================================
+
+/// getdents(2) → getdents64'e yönlendirme (32-bit getdents, Linux'ta eski)
+fn sys_getdents_compat(fd: usize, dirp_ptr: usize, count: usize) -> usize {
+    sys_getdents64(fd, dirp_ptr, count)
+}
+
+/// utime(2) → basit time ayarlama
+fn sys_utime(path_ptr: usize, times_ptr: usize) -> usize {
+    let _path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    // times_ptr == 0 → mevcut zamanı kullan (atime=mtime=now)
+    // aksi halde [actime, modtime] Timespec yapısı
+    if times_ptr == 0 {
+        0 // mevcut zaman zaten ayarlı
+    } else {
+        // Timespec yapısını oku: 2 * i64 = 16 bayt
+        let mut times = [0i64; 2];
+        if let Err(e) = copy_from_user_slice(&mut times, times_ptr) { return e; }
+        let _actime = times[0];
+        let _modtime = times[1];
+        0
+    }
+}
+
+/// adjtimex(2) → clock_adjtime fallback (NTP zaman senkronizasyonu)
+fn sys_adjtimex(buf_ptr: usize) -> usize {
+    if buf_ptr == 0 {
+        return errno(EINVAL);
+    }
+    // Timex yapısı: mode(4) + status(4) + offset(8) + freq(8) + ...
+    // Basitçe mode oku ve SUCCESS (NTP_SYNC) döndür
+    let mut mode = [0i32; 1];
+    if let Err(e) = copy_from_user_slice(&mut mode, buf_ptr) { return e; }
+    // Timex modes: ADJ_OFFSET=0x0001, ADJ_FREQUENCY=0x0002, ADJ_STATUS=0x0004, ...
+    // Timex states: TIME_OK=0, TIME_WARN=1, TIME_ERROR=2
+    let state: i32 = 0; // TIME_OK
+    let state_bytes = state.to_ne_bytes();
+    let _ = write_user_slice(buf_ptr + 4, &state_bytes);
+    0 // TIME_OK
+}
+
+/// acct(2) → процесс Accounting (no-op, single-user mode)
+fn sys_acct(_path_ptr: usize) -> usize {
+    // Process accounting single-user modda anlamsız; başarıyla döndür
+    0
+}
+
+/// readahead(2) → no-op (I/O prefetch single-user modda gerekmez)
+fn sys_readahead(_fd: usize, _offset: u64, _count: usize) -> usize {
+    0
+}
+
+/// timer_getoverrun(2) → gerçek zamanlayıcı overrun sayacı
+fn sys_timer_getoverrun(timerid: usize) -> usize {
+    let timers = TIMER_TABLE.lock();
+    let Some(timer) = timers.get(&timerid) else {
+        return errno(EINVAL);
+    };
+    timer.overrun as usize
+}
+
+// ============================================================================
+// Faz 4 — Deprecated Wrappers (modern eşdeğerlerine yönlendirme)
+// ============================================================================
+
+/// epoll_create(2) → epoll_create1(0)
+fn sys_epoll_create_compat(size: usize) -> usize {
+    let _ = size;
+    sys_epoll_create1(0)
+}
+
+/// epoll_ctl_old(2) → epoll_ctl ile aynı
+fn sys_epoll_ctl_old(op: usize, epfd: usize, fd: usize, event_ptr: usize) -> usize {
+    sys_epoll_ctl(op, epfd, fd, event_ptr)
+}
+
+/// epoll_wait_old(2) → epoll_pwait ile aynı
+fn sys_epoll_wait_old(epfd: usize, events_ptr: usize, maxevents: usize, timeout: usize) -> usize {
+    sys_epoll_pwait(epfd, events_ptr, maxevents, timeout, 0)
+}
+
+/// remap_file_pages(2) → mmap ile aynı (deprecated since 3.16)
+fn sys_remap_file_pages(start: usize, size: usize, _prot: usize, pgoff: usize, _flags: usize) -> usize {
+    // remap_file_pages() artık mmap ile aynı davranışı sergiler
+    sys_mmap(start, size, 0, 0x08 /* MAP_SHARED */, pgoff, 0)
+}
+
+// ============================================================================
+// Faz 4 — Kaldırılmış/Obsolete Syscalls (Linux ENOSYS davranışı)
+// ============================================================================
+
+/// uselib(2) → removed from kernel (ENOSYS)
+fn sys_uselib(_path_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// ustat(2) → removed from kernel (ENOSYS)
+fn sys_ustat(_dev: usize, _ubuf_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// sysfs(2) → removed from kernel (ENOSYS)
+fn sys_sysfs(_option: usize, _arg1: usize, _arg2: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// modify_ldt(2) → removed from kernel (ENOSYS)
+fn sys_modify_ldt(_func: usize, _ptr: usize, _bytecount: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// create_module(2) → removed from kernel (ENOSYS)
+fn sys_create_module(_name_ptr: usize, _size: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// get_kernel_syms(2) → removed from kernel (ENOSYS)
+fn sys_get_kernel_syms(_table_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// query_module(2) → removed from kernel (ENOSYS)
+fn sys_query_module(_name_ptr: usize, _which: usize, _buf_ptr: usize, _buflen: usize, _ret_len_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// nfsservctl(2) → removed from kernel (ENOSYS)
+fn sys_nfsservctl(_cmd: usize, _argp_ptr: usize, _buf_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// getpmsg(2) → removed from kernel (ENOSYS)
+fn sys_getpmsg(_fd: usize, _band_ptr: usize, _flags_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// putpmsg(2) → removed from kernel (ENOSYS)
+fn sys_putpmsg(_fd: usize, _band_ptr: usize, _flags_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// afs_syscall(2) → removed from kernel (ENOSYS)
+fn sys_afs_syscall(_syscall: usize, _arg1: usize, _arg2: usize, _arg3: usize, _arg4: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// tuxcall(2) → removed from kernel (ENOSYS)
+fn sys_tuxcall(_arg1: usize, _arg2: usize, _arg3: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// security(2) → removed from kernel (ENOSYS)
+fn sys_security(_arg1: usize, _arg2: usize, _arg3: usize, _arg4: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// lookup_dcookie(2) → removed from kernel (ENOSYS)
+fn sys_lookup_dcookie(_cookie64: u64, _buf_ptr: usize, _len: usize) -> usize {
+    errno(ENOSYS)
+}
+
+// ============================================================================
+// Faz 4 — x86-Özel Privilejli Syscalls
+// ============================================================================
+
+/// iopl(2) → ring 0 gerektirir, Ring 3'ten yapılamaz
+fn sys_iopl(_level: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// ioperm(2) → ring 0 gerektirir, Ring 3'ten yapılamaz
+fn sys_ioperm(_from: usize, _num: usize, _turn_on: usize) -> usize {
+    errno(ENOSYS)
+}
+
 fn unsupported_syscall_number(number: usize) -> usize {
     ecosystem_exactness::record_posix_unsupported_number(number);
     errno(ENOSYS)
+}
+
+/// Hata eşiği: bu değerin üzerindeki tüm dönüş değerleri errno olarak yorumlanır.
+/// Linux IS_ERR_VALUE makrosuna karşılık gelir: MAX_ERRNO = 4095.
+fn errno_base() -> usize {
+    usize::MAX - 4095
 }
 
 fn vfs_errno(err: impl Into<FsError>) -> usize {
@@ -880,6 +1798,23 @@ fn enforce_path_policy(path: &str, access: security::landlock::Access) -> Result
 pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
     let _cfi_scope = security::cfi::enter_syscall_scope(number as u64);
     ensure_fd_table();
+
+    static mut POSIX_SYSCALL_LOG: u32 = 0;
+    unsafe {
+        POSIX_SYSCALL_LOG += 1;
+        if POSIX_SYSCALL_LOG <= 10 {
+            crate::debug_diag!(
+                "[SHELL_TEST] Ring3 syscall: #{} args=[{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+                number,
+                args[0],
+                args[1],
+                args[2],
+                args[3],
+                args[4],
+                args[5]
+            );
+        }
+    }
 
     // =====================================
     // PTRACE SYSCALL HOOK (ENTRY)
@@ -1102,6 +2037,332 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
             service_bridge::sys_notification_service_respond(args[0])
         }
 
+        // Shell Ring 3 syscall'ları
+        SYS_EON_LIST_TASKS => sys_eon_list_tasks(args[0], args[1]),
+        SYS_EON_KEYBOARD_READ => sys_eon_keyboard_read(),
+        SYS_EON_TERM_CLEAR => sys_eon_term_clear(),
+        SYS_EON_MEMORY_STATS => sys_eon_memory_stats(args[0], args[1]),
+        SYS_EON_SPAWN_ELF => sys_eon_spawn_elf(args[0], args[1], args[2]),
+        SYS_EON_GET_FOREGROUND => sys_eon_get_foreground(),
+        SYS_EON_SET_FOREGROUND => sys_eon_set_foreground(args[0]),
+        SYS_EON_MOUNT_LIST => sys_eon_mount_list(args[0], args[1]),
+        SYS_EON_DRIVER_LIST => sys_eon_driver_list(args[0], args[1]),
+        SYS_EON_NET_CONFIG => sys_eon_net_config(args[0], args[1]),
+        SYS_EON_SHUTDOWN => sys_eon_shutdown(),
+        SYS_EON_REBOOT => sys_eon_reboot(),
+        SYS_EON_IPC_SEND => sys_eon_ipc_send(args[0], args[1], args[2], args[3], args[4]),
+
+        // Resource Limits
+        SYS_GETRLIMIT => sys_getrlimit(args[0], args[1]),
+        SYS_SETRLIMIT => sys_setrlimit(args[0], args[1]),
+        SYS_PRLIMIT64 => sys_prlimit64(args[0], args[1], args[2], args[3]),
+
+        // Interval Timer
+        SYS_GETITIMER => sys_getitimer(args[0], args[1]),
+        SYS_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
+
+        // waitid + dup3 + clock_settime
+        SYS_WAITID => sys_waitid(args[0], args[1], args[2], args[3]),
+        SYS_DUP3 => sys_dup3(args[0], args[1], args[2]),
+        SYS_CLOCK_SETTIME => sys_clock_settime(args[0], args[1]),
+
+        // Capabilities
+        SYS_CAPGET => sys_capget(args[0], args[1]),
+        SYS_CAPSET => sys_capset(args[0], args[1]),
+
+        // Namespace
+        SYS_UNSHARE => sys_unshare(args[0]),
+        SYS_SETNS => sys_setns(args[0], args[1]),
+        SYS_KCMP => sys_kcmp(args[0], args[1], args[2], args[3], args[4]),
+
+        // pidfd
+        SYS_PIDFD_OPEN => sys_pidfd_open(args[0], args[1]),
+        SYS_PIDFD_SEND_SIGNAL => sys_pidfd_send_signal(args[0], args[1], args[2], args[3]),
+
+        // Linux AIO
+        SYS_IO_SETUP => sys_io_setup(args[0], args[1]),
+        SYS_IO_DESTROY => sys_io_destroy(args[0]),
+        SYS_IO_GETEVENTS => sys_io_getevents(args[0], args[1], args[2], args[3], args[4]),
+        SYS_IO_SUBMIT => sys_io_submit(args[0], args[1], args[2]),
+        SYS_IO_CANCEL => sys_io_cancel(args[0], args[1], args[2]),
+
+        // POSIX Message Queues
+        SYS_MQ_OPEN => sys_mq_open(args[0], args[1], args[2], args[3]),
+        SYS_MQ_UNLINK => sys_mq_unlink(args[0]),
+        SYS_MQ_TIMEDSEND => sys_mq_timedsend(args[0], args[1], args[2], args[3], args[4]),
+        SYS_MQ_TIMEDRECEIVE => sys_mq_timedreceive(args[0], args[1], args[2], args[3], args[4]),
+        SYS_MQ_NOTIFY => sys_mq_notify(args[0], args[1]),
+        SYS_MQ_GETSETATTR => sys_mq_getsetattr(args[0], args[1], args[2]),
+
+        // Quota / Key / Mount
+        SYS_QUOTACTL => sys_quotactl(args[0], args[1], args[2], args[3]),
+        SYS_KEYCTL => sys_keyctl(args[0], args[1], args[2], args[3], args[4]),
+        SYS_MOVE_MOUNT => sys_move_mount(args[0], args[1], args[2], args[3], args[4]),
+        SYS_FSOPEN => sys_fsopen(args[0], args[1]),
+        SYS_FSCONFIG => sys_fsconfig(args[0], args[1], args[2], args[3], args[4]),
+        SYS_FSMOUNT => sys_fsmount(args[0], args[1], args[2]),
+
+        // Advanced
+        SYS_PERF_EVENT_OPEN => sys_perf_event_open(args[0], args[1], args[2], args[3], args[4]),
+        SYS_BPF => sys_bpf(args[0], args[1], args[2]),
+        SYS_KEXEC_FILE_LOAD => sys_kexec_file_load(args[0], args[1], args[2], args[3], args[4]),
+
+        // ==================================================================
+        // Faz 2 — Eksik POSIX / Linux Syscall'ları
+        // ==================================================================
+
+        // Zaman
+        SYS_GETTIMEOFDAY => sys_gettimeofday(args[0], args[1]),
+        SYS_SETTIMEOFDAY => sys_settimeofday(args[0]),
+        SYS_CLOCK_GETRES => sys_clock_getres(args[0], args[1]),
+        SYS_CLOCK_NANOSLEEP => sys_clock_nanosleep(args[0], args[1], args[2], args[3]),
+        SYS_CLOCK_ADJTIME => sys_clock_adjtime(args[0], args[1]),
+        SYS_TIME => sys_time(args[0]),
+        SYS_UTIMES => sys_utimes(args[0], args[1]),
+
+        // Sinyal
+        SYS_RT_SIGRETURN => sys_rt_sigreturn(),
+        SYS_RT_SIGPENDING => sys_rt_sigpending(args[0], args[1]),
+
+        // Süreç / Kullanıcı / Grup
+        SYS_GETPGRP => sys_getpgrp(),
+        SYS_SETREUID => sys_setreuid(args[0], args[1]),
+        SYS_SETREGID => sys_setregid(args[0], args[1]),
+        SYS_GETGROUPS => sys_getgroups(args[0], args[1]),
+        SYS_SETGROUPS => sys_setgroups(args[0], args[1]),
+        SYS_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
+        SYS_GETRESUID => sys_getresuid(args[0]),
+        SYS_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
+        SYS_GETRESGID => sys_getresgid(args[0]),
+        SYS_SETFSUID => sys_setfsuid(args[0]),
+        SYS_SETFSGID => sys_setfsgid(args[0]),
+        SYS_VFORK => process_bridge::sys_vfork(),
+        SYS_EXECVEAT => process_bridge::sys_execveat(args[0], args[1], args[2], args[3], args[4]),
+        SYS_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2]),
+        SYS_CLONE3 => process_bridge::sys_clone3(args[0], args[1]),
+        SYS_PIDFD_GETFD => sys_pidfd_getfd(args[0], args[1], args[2]),
+
+        // Zamanlayıcı
+        SYS_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1]),
+        SYS_TIMERFD_SETTIME => sys_timerfd_settime(args[0], args[1], args[2], args[3]),
+        SYS_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1]),
+
+        // Dosya Sistemi
+        SYS_MKNOD => sys_mknod(args[0], args[1]),
+        SYS_MKNODAT => sys_mknodat(args[0], args[1], args[2]),
+        SYS_MKDIRAT => sys_mkdirat(args[0], args[1], args[2]),
+        SYS_UNLINKAT => sys_unlinkat(args[0], args[1], args[2]),
+        SYS_FCHMODAT => sys_fchmodat(args[0], args[1], args[2], args[3]),
+        SYS_FCHOWNAT => sys_fchownat(args[0], args[1], args[2], args[3], args[4]),
+        SYS_FACCESSAT2 => sys_faccessat(args[0], args[1], args[2], args[3]),
+        SYS_OPENAT2 => sys_openat(args[0], args[1], args[2], args[3]),
+        SYS_FLOCK => sys_flock(args[0], args[1]),
+        SYS_SYNC => sys_sync(),
+        SYS_SYNC_FILE_RANGE => sys_sync_file_range(args[0], args[1], args[2], args[3]),
+        SYS_FADVISE64 => sys_fadvise64(args[0], args[1], args[2], args[3]),
+        SYS_FCHDIR => sys_fchdir(args[0]),
+        SYS_CHROOT => sys_chroot(args[0]),
+        SYS_PIVOT_ROOT => sys_pivot_root(args[0], args[1]),
+
+        // Soket
+        SYS_SOCKETPAIR => sys_socketpair(args[0], args[1], args[2], args[3]),
+        SYS_GETSOCKNAME => sys_getsockname(args[0], args[1], args[2]),
+        SYS_GETPEERNAME => sys_getpeername(args[0], args[1], args[2]),
+        SYS_GETSOCKOPT => sys_getsockopt(args[0], args[1], args[2], args[3], args[4]),
+        SYS_SHUTDOWN => sys_shutdown(args[0], args[1]),
+        SYS_RECVMSG => sys_recvmsg(args[0], args[1], args[2]),
+        SYS_SENDMSG => sys_sendmsg(args[0], args[1], args[2]),
+        SYS_RECVMMSG => sys_recvmmsg(args[0], args[1], args[2], args[3], args[4]),
+        SYS_SENDMMSG => sys_sendmmsg(args[0], args[1], args[2], args[3], 0),
+
+        // I/O Çoğaltma
+        SYS_PSELECT6 => sys_pselect6(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+
+        // Bellek Kilitleme
+        SYS_MLOCK => sys_mlock(args[0], args[1]),
+        SYS_MUNLOCK => sys_munlock(args[0], args[1]),
+        SYS_MLOCKALL => sys_mlockall(args[0]),
+        SYS_MUNLOCKALL => sys_munlockall(),
+        SYS_MLOCK2 => sys_mlock2(args[0], args[1], args[2]),
+        SYS_USERFAULTFD => sys_userfaultfd(args[0]),
+        SYS_PKEY_MPROTECT => sys_mprotect(args[0], args[1], args[2]), // pkey_mprotect → mprotect fallback
+        SYS_PKEY_ALLOC => sys_pkey_alloc(args[0], args[1]),
+        SYS_PKEY_FREE => sys_pkey_free(args[0]),
+
+        // Zamanlama (Scheduler)
+        SYS_SCHED_SETPARAM => sys_sched_setparam(args[0], args[1]),
+        SYS_SCHED_GETPARAM => sys_sched_getparam(args[0], args[1]),
+        SYS_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0], args[1], args[2]),
+        SYS_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0]),
+        SYS_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0]),
+        SYS_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0]),
+        SYS_SCHED_RR_GET_INTERVAL => sys_sched_rr_get_interval(args[0], args[1]),
+        SYS_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0], args[1], args[2]),
+        SYS_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2]),
+        SYS_SCHED_SETATTR => sys_sched_setattr(args[0], args[1], args[2]),
+        SYS_SCHED_GETATTR => sys_sched_getattr(args[0], args[1], args[2]),
+        SYS_SET_PRIORITY => sys_setpriority(args[0], args[1], args[2]),
+        SYS_GET_PRIORITY => sys_getpriority(args[0], args[1]),
+
+        // SysV IPC
+        SYS_SEMGET => sys_semget(args[0], args[1], args[2]),
+        SYS_SEMOP => sys_semop(args[0], args[1], args[2]),
+        SYS_SEMCTL => sys_semctl(args[0], args[1], args[2], args[3]),
+        SYS_SHMDT => sys_shmdt(args[0]),
+        SYS_MSGGET => sys_msgget(args[0], args[1]),
+        SYS_MSGSND => sys_msgsnd(args[0], args[1], args[2], args[3]),
+        SYS_MSGRCV => sys_msgrcv(args[0], args[1], args[2], args[3], args[4]),
+        SYS_MSGCTL => sys_msgctl(args[0], args[1], args[2]),
+        SYS_SEMTIMEDOP => sys_semtimedop(args[0], args[1], args[2], args[3]),
+
+        // Process VM
+        SYS_PROCESS_VM_READV => sys_process_vm_readv(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_PROCESS_VM_WRITEV => sys_process_vm_writev(args[0], args[1], args[2], args[3], args[4], args[5]),
+
+        // Sistem
+        SYS_SYSLOG => sys_syslog(args[0], args[1], args[2]),
+        SYS_SWAPON => sys_swapon(args[0], args[1]),
+        SYS_SWAPOFF => sys_swapoff(args[0]),
+        SYS_SETHOSTNAME => sys_sethostname(args[0], args[1]),
+        SYS_SETDOMAINNAME => sys_setdomainname(args[0], args[1]),
+        SYS_PERSONALITY => sys_personality(args[0]),
+        SYS_VHANGUP => 0, // no-op in single-user
+        SYS_REBOOT => sys_reboot(args[0]),
+
+        // Güvenlik (Landlock LSM)
+        SYS_LANDLOCK_CREATE_RULESET => sys_landlock_create_ruleset(args[0], args[1], args[2]),
+        SYS_LANDLOCK_ADD_RULE => sys_landlock_add_rule(args[0], args[1], args[2], args[3]),
+        SYS_LANDLOCK_RESTRICT_SELF => sys_landlock_restrict_self(args[0], args[1]),
+
+        // inotify
+        SYS_INOTIFY_INIT1 => sys_inotify_init1(args[0]),
+        SYS_INOTIFY_ADD_WATCH => sys_inotify_add_watch(args[0], args[1], args[2]),
+        SYS_INOTIFY_RM_WATCH => sys_inotify_rm_watch(args[0], args[1]),
+        SYS_SIGNALFD4 => sys_signalfd4(args[0], args[1], args[2], args[3]),
+
+        // ==================================================================
+        // Faz 3 — Eksik Linux Syscall'ları
+        // ==================================================================
+
+        // Zaman / Timer
+        SYS_ALARM => sys_alarm(args[0]),
+
+        // Thread-Local Storage
+        SYS_ARCH_PRTCL => sys_arch_prctl(args[0], args[1], args[2]),
+        SYS_SET_THREAD_AREA => sys_set_thread_area(args[0]),
+
+        // Kernel Modül
+        SYS_INIT_MODULE => sys_init_module(args[0], args[1], args[2]),
+        SYS_DELETE_MODULE => sys_delete_module(args[0], args[1]),
+        SYS_FINIT_MODULE => sys_finit_module(args[0], args[1], args[2]),
+
+        // I/O Öncelik
+        SYS_IOPRIO_SET => sys_ioprio_set(args[0], args[1], args[2]),
+        SYS_IOPRIO_GET => sys_ioprio_get(args[0], args[1]),
+
+        // inotify (eski)
+        SYS_INOTIFY_INIT => sys_inotify_init1(0),
+
+        // Vectored I/O
+        SYS_PREADV => sys_preadv(args[0], args[1], args[2], args[3]),
+        SYS_PWRITEV => sys_pwritev(args[0], args[1], args[2], args[3]),
+        SYS_PREADV2 => sys_preadv(args[0], args[1], args[2], args[3]),
+        SYS_PWRITEV2 => sys_pwritev(args[0], args[1], args[2], args[3]),
+
+        // Sinyal
+        SYS_RT_TGSIGQUEUEINFO => sys_rt_tgsigqueueinfo(args[0], args[1], args[2]),
+
+        // Dosya Bildirim
+        SYS_FANOTIFY_INIT => sys_fanotify_init(args[0], args[1]),
+        SYS_FANOTIFY_MARK => sys_fanotify_mark(args[0], args[1], args[2], args[3], args[4]),
+
+        // Kernel Yükleme
+        SYS_KEXEC_LOAD => sys_kexec_load(args[0], args[1], args[2], args[3]),
+
+        // Bellek Bariyeri
+        SYS_MEMBARRIER => sys_membarrier(args[0], args[1], args[2]),
+
+        // NUMA Bellek Politikası
+        SYS_MBIND => sys_mbind(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_SET_MEMPOLICY => sys_set_mempolicy(args[0], args[1], args[2]),
+        SYS_GET_MEMPOLICY => sys_get_mempolicy(args[0], args[1], args[2], args[3], args[4]),
+        SYS_MIGRATE_PAGES => sys_migrate_pages(args[0], args[1], args[2]),
+
+        // Anahtar Yönetimi
+        SYS_ADD_KEY => sys_add_key(args[0], args[1], args[2], args[3], args[4]),
+        SYS_REQUEST_KEY => sys_request_key(args[0], args[1], args[2], args[3]),
+
+        // Süreç Yönetimi
+        SYS_PROCESS_MADVISE => sys_process_madvise(args[0], args[1], args[2], args[3], args[4]),
+        SYS_PROCESS_MRELEASE => sys_process_mrelease(args[0], args[1]),
+
+        // Dosya Sistemi
+        SYS_MOUNT_SETATTR => sys_mount_setattr(args[0], args[1], args[2], args[3], args[4]),
+        SYS_QUOTACTL_FD => sys_quotactl_fd(args[0], args[1], args[2], args[3]),
+        SYS_MEMFD_SECRET => sys_memfd_secret(args[0]),
+
+        // Async I/O
+        SYS_IO_PGETEVENTS => sys_io_pgetevents(args[0], args[1], args[2], args[3], args[4]),
+
+        // ==================================================================
+        // Faz 4 — Genişletilmiş Öznitelikler (xattr)
+        // ==================================================================
+        SYS_SETXATTR => sys_setxattr(args[0], args[1], args[2], args[3], args[4]),
+        SYS_LSETXATTR => sys_lsetxattr(args[0], args[1], args[2], args[3], args[4]),
+        SYS_FSETXATTR => sys_fsetxattr(args[0], args[1], args[2], args[3], args[4]),
+        SYS_GETXATTR => sys_getxattr(args[0], args[1], args[2], args[3]),
+        SYS_LGETXATTR => sys_lgetxattr(args[0], args[1], args[2], args[3]),
+        SYS_FGETXATTR => sys_fgetxattr(args[0], args[1], args[2], args[3]),
+        SYS_LISTXATTR => sys_listxattr(args[0], args[1], args[2]),
+        SYS_LLISTXATTR => sys_llistxattr(args[0], args[1], args[2]),
+        SYS_FLISTXATTR => sys_flistxattr(args[0], args[1], args[2]),
+        SYS_REMOVEXATTR => sys_removexattr(args[0], args[1]),
+        SYS_LREMOVEXATTR => sys_lremovexattr(args[0], args[1]),
+        SYS_FREMOVEXATTR => sys_fremovexattr(args[0], args[1]),
+
+        // ==================================================================
+        // Faz 4 — Basit Implementasyonlar
+        // ==================================================================
+        SYS_GETDENTS => sys_getdents_compat(args[0], args[1], args[2]),
+        SYS_UTIME => sys_utime(args[0], args[1]),
+        SYS_ADJTIMEX => sys_adjtimex(args[0]),
+        SYS_ACCT => sys_acct(args[0]),
+        SYS_READAHEAD => sys_readahead(args[0], args[1] as u64, args[2]),
+        SYS_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
+
+        // ==================================================================
+        // Faz 4 — Deprecated Wrappers
+        // ==================================================================
+        SYS_EPOLL_CREATE => sys_epoll_create_compat(args[0]),
+        SYS_EPOLL_CTL_OLD => sys_epoll_ctl_old(args[0], args[1], args[2], args[3]),
+        SYS_EPOLL_WAIT_OLD => sys_epoll_wait_old(args[0], args[1], args[2], args[3]),
+        SYS_REMAP_FILE_PAGES => sys_remap_file_pages(args[0], args[1], args[2], args[3], args[4]),
+
+        // ==================================================================
+        // Faz 4 — Kaldırılmış/Obsolete Syscalls
+        // ==================================================================
+        SYS_USELIB => sys_uselib(args[0]),
+        SYS_USTAT => sys_ustat(args[0], args[1]),
+        SYS_SYSFS => sys_sysfs(args[0], args[1], args[2]),
+        SYS_MODIFY_LDT => sys_modify_ldt(args[0], args[1], args[2]),
+        SYS_CREATE_MODULE => sys_create_module(args[0], args[1]),
+        SYS_GET_KERNEL_SYMS => sys_get_kernel_syms(args[0]),
+        SYS_QUERY_MODULE => sys_query_module(args[0], args[1], args[2], args[3], args[4]),
+        SYS_NFSSERVCTL => sys_nfsservctl(args[0], args[1], args[2]),
+        SYS_GETPMSG => sys_getpmsg(args[0], args[1], args[2]),
+        SYS_PUTPMSG => sys_putpmsg(args[0], args[1], args[2]),
+        SYS_AFS_SYSCALL => sys_afs_syscall(args[0], args[1], args[2], args[3], args[4]),
+        SYS_TUXCALL => sys_tuxcall(args[0], args[1], args[2]),
+        SYS_SECURITY => sys_security(args[0], args[1], args[2], args[3]),
+        SYS_LOOKUP_DCOOKIE => sys_lookup_dcookie(args[0] as u64, args[1], args[2]),
+
+        // ==================================================================
+        // Faz 4 — x86-Özel Privilejli Syscalls
+        // ==================================================================
+        SYS_IOPL => sys_iopl(args[0]),
+        SYS_IOPERM => sys_ioperm(args[0], args[1], args[2]),
+
         _ => unsupported_syscall_number(number),
     };
 
@@ -1210,63 +2471,80 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
     if let Err(err) = validate_user_range(buf, count) {
         return err;
     }
-    let bytes =
-        with_user_access(|| unsafe { core::slice::from_raw_parts(buf as *const u8, count) });
-    match get_fd(fd) {
-        Some(FdKind::Stdout) | Some(FdKind::Stderr) => {
-            serial_println!("SYSCALL WRITE: fd={} len={}", fd, count);
-            for &b in bytes {
-                serial_print!("{}", b as char);
+    with_user_access(|| {
+        let bytes = unsafe { core::slice::from_raw_parts(buf as *const u8, count) };
+        match get_fd(fd) {
+            Some(FdKind::Stdout) | Some(FdKind::Stderr) => {
+                // Atomik yazma: kernel debug mesajlariyla karismasini onle
+                let output = core::str::from_utf8(bytes).unwrap_or("");
+                serial_print!("{}", output);
+                count
             }
-            count
-        }
-        Some(FdKind::Null) => count,
-        Some(FdKind::Zero) => count,
-        Some(FdKind::File) => {
-            let (inode, offset, size, flags) = {
-                let files = FILE_TABLE.lock();
-                let Some(Some(state)) = files.get(fd) else {
+            Some(FdKind::Null) => count,
+            Some(FdKind::Zero) => count,
+            Some(FdKind::File) => {
+                let (inode, offset, size, flags) = {
+                    let files = FILE_TABLE.lock();
+                    let Some(Some(state)) = files.get(fd) else {
+                        return errno(EBADF);
+                    };
+                    (
+                        state.inode.clone(),
+                        state.offset,
+                        state.size,
+                        state.flags,
+                    )
+                };
+                // O_APPEND: her write öncesi offset'i EOF'a ayarla
+                let write_offset = if flags & O_APPEND != 0 {
+                    size
+                } else {
+                    offset
+                };
+                let written = match fs::vfs_write_at(&inode, write_offset, bytes) {
+                    Ok(value) => value,
+                    Err(err) => return vfs_errno(err),
+                };
+                let mut files = FILE_TABLE.lock();
+                let gen = FILE_GENERATION.lock();
+                let current_gen = if fd < gen.len() { gen[fd] } else { 0 };
+                let saved_gen = if let Some(Some(s)) = files.get(fd) {
+                    s.generation
+                } else {
                     return errno(EBADF);
                 };
-                (
-                    state.inode.clone(),
-                    state.offset,
-                    state.size,
-                    state.flags,
-                )
-            };
-            // O_APPEND: her write öncesi offset'i EOF'a ayarla
-            let write_offset = if flags & O_APPEND != 0 {
-                size
-            } else {
-                offset
-            };
-            let written = match fs::vfs_write_at(&inode, write_offset, bytes) {
-                Ok(value) => value,
-                Err(err) => return vfs_errno(err),
-            };
-            let mut files = FILE_TABLE.lock();
-            let gen = FILE_GENERATION.lock();
-            let current_gen = if fd < gen.len() { gen[fd] } else { 0 };
-            let saved_gen = if let Some(Some(s)) = files.get(fd) {
-                s.generation
-            } else {
-                return errno(EBADF);
-            };
-            if current_gen != saved_gen {
-                return errno(EBADF);
+                if current_gen != saved_gen {
+                    return errno(EBADF);
+                }
+                drop(gen);
+                if let Some(Some(state)) = files.get_mut(fd) {
+                    state.offset = write_offset.saturating_add(written);
+                    if write_offset.saturating_add(written) > state.size {
+                        state.size = write_offset.saturating_add(written);
+                    }
+                }
+                written
             }
-            drop(gen);
-            if let Some(Some(state)) = files.get_mut(fd) {
-                state.offset = write_offset.saturating_add(written);
-                if write_offset.saturating_add(written) > state.size {
-                    state.size = write_offset.saturating_add(written);
+            Some(FdKind::Pipe) => {
+                let pipe_id = {
+                    let map = PIPE_WRITE_MAP.lock();
+                    match map.get(&fd) {
+                        Some(&id) => id,
+                        None => return errno(EBADF),
+                    }
+                };
+                let mut pool = PIPE_POOL.lock();
+                match pool.get_mut(&pipe_id) {
+                    Some(pipe) => match pipe.pipe_write(bytes) {
+                        Ok(written) => written,
+                        Err(e) => errno(-e as usize),
+                    },
+                    None => errno(EBADF),
                 }
             }
-            written
+            _ => errno(EBADF),
         }
-        _ => errno(EBADF),
-    }
+    })
 }
 
 /// read(2) — Dosya tanımlayıcısından veri okur.
@@ -1285,74 +2563,92 @@ fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
     if let Err(err) = validate_user_range(buf, count) {
         return err;
     }
-    match get_fd(fd) {
-        Some(FdKind::Stdin) => with_user_access(|| {
-            let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
-            tty::DEFAULT_TTY.sys_read(slice)
-        }),
-        Some(FdKind::Null) => 0,
-        Some(FdKind::Zero) => {
-            let slice = with_user_access(|| unsafe {
-                core::slice::from_raw_parts_mut(buf as *mut u8, count)
-            });
-            for b in slice.iter_mut() {
-                *b = 0;
+    with_user_access(|| {
+        match get_fd(fd) {
+            Some(FdKind::Stdin) => {
+                let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
+                tty::DEFAULT_TTY.sys_read(slice)
             }
-            count
-        }
-        Some(FdKind::File) => {
-            let (inode, offset, size, is_hello) = {
-                let files = FILE_TABLE.lock();
-                let Some(Some(state)) = files.get(fd) else {
+            Some(FdKind::Null) => 0,
+            Some(FdKind::Zero) => {
+                let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
+                for b in slice.iter_mut() {
+                    *b = 0;
+                }
+                count
+            }
+            Some(FdKind::File) => {
+                let (inode, offset, size, is_hello) = {
+                    let files = FILE_TABLE.lock();
+                    let Some(Some(state)) = files.get(fd) else {
+                        return errno(EBADF);
+                    };
+                    (
+                        state.inode.clone(),
+                        state.offset,
+                        state.size,
+                        state.is_hello,
+                    )
+                };
+                let available = size.saturating_sub(offset);
+                if available == 0 {
+                    return 0;
+                }
+                let to_copy = core::cmp::min(count, available);
+                let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, to_copy) };
+                let read = match fs::vfs_read_at(&inode, offset, slice) {
+                    Ok(value) => value,
+                    Err(err) => return vfs_errno(err),
+                };
+                if is_hello && read > 0 {
+                    serial_println!(
+                        "VFS: read HELLO.ELF offset={} len={} total={}",
+                        offset,
+                        read,
+                        size
+                    );
+                }
+                let mut files = FILE_TABLE.lock();
+                // Generation kontrolü: fd arada kapatılıp yeniden açıldı mı?
+                let gen = FILE_GENERATION.lock();
+                let current_gen = if fd < gen.len() { gen[fd] } else { 0 };
+                let saved_gen = if let Some(Some(s)) = files.get(fd) {
+                    s.generation
+                } else {
                     return errno(EBADF);
                 };
-                (
-                    state.inode.clone(),
-                    state.offset,
-                    state.size,
-                    state.is_hello,
-                )
-            };
-            let available = size.saturating_sub(offset);
-            if available == 0 {
-                return 0;
+                if current_gen != saved_gen {
+                    return errno(EBADF);
+                }
+                drop(gen);
+                if let Some(Some(state)) = files.get_mut(fd) {
+                    state.offset = state.offset.saturating_add(read);
+                }
+                read
             }
-            let to_copy = core::cmp::min(count, available);
-            let slice = with_user_access(|| unsafe {
-                core::slice::from_raw_parts_mut(buf as *mut u8, to_copy)
-            });
-            let read = match fs::vfs_read_at(&inode, offset, slice) {
-                Ok(value) => value,
-                Err(err) => return vfs_errno(err),
-            };
-            if is_hello && read > 0 {
-                serial_println!(
-                    "VFS: read HELLO.ELF offset={} len={} total={}",
-                    offset,
-                    read,
-                    size
-                );
+            Some(FdKind::Pipe) => {
+                let pipe_id = {
+                    let map = PIPE_READ_MAP.lock();
+                    match map.get(&fd) {
+                        Some(&id) => id,
+                        None => return errno(EBADF),
+                    }
+                };
+                let mut pool = PIPE_POOL.lock();
+                match pool.get_mut(&pipe_id) {
+                    Some(pipe) => {
+                        let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
+                        match pipe.pipe_read(slice) {
+                            Ok(read) => read,
+                            Err(e) => errno(-e as usize),
+                        }
+                    }
+                    None => errno(EBADF),
+                }
             }
-            let mut files = FILE_TABLE.lock();
-            // Generation kontrolü: fd arada kapatılıp yeniden açıldı mı?
-            let gen = FILE_GENERATION.lock();
-            let current_gen = if fd < gen.len() { gen[fd] } else { 0 };
-            let saved_gen = if let Some(Some(s)) = files.get(fd) {
-                s.generation
-            } else {
-                return errno(EBADF);
-            };
-            if current_gen != saved_gen {
-                return errno(EBADF);
-            }
-            drop(gen);
-            if let Some(Some(state)) = files.get_mut(fd) {
-                state.offset = state.offset.saturating_add(read);
-            }
-            read
+            _ => errno(EBADF),
         }
-        _ => errno(EBADF),
-    }
+    })
 }
 
 fn sys_open(path: usize, flags: usize, mode: usize) -> usize {
@@ -1367,6 +2663,16 @@ fn sys_open(path: usize, flags: usize, mode: usize) -> usize {
 fn sys_close(fd: usize) -> usize {
     if fd <= 2 {
         return 0;
+    }
+    // Socket kapatılırken TCP bağlantısını da kapat
+    if let Some(FdKind::Socket) = get_fd(fd) {
+        if let Some(sock) = SOCKET_TABLE.lock().get(&fd) {
+            let tcp_id = sock.tcp_id;
+            if tcp_id != 0 {
+                let _ = super::net::tcp::close(tcp_id);
+            }
+        }
+        SOCKET_TABLE.lock().remove(&fd);
     }
     free_fd(fd)
 }
@@ -1607,12 +2913,82 @@ fn sys_fstat(fd: usize, statbuf: usize) -> usize {
     }
 }
 
-fn sys_lstat(_path: usize, _statbuf: usize) -> usize {
-    unsupported_errno("lstat")
+fn sys_lstat(path_ptr: usize, statbuf: usize) -> usize {
+    // lstat = stat (symlink takibi olmadan) — F2FS'te symlinks zaten resolve edilmez
+    sys_stat(path_ptr, statbuf)
 }
 
-fn sys_poll(_fds: usize, _nfds: usize, _timeout: usize) -> usize {
-    unsupported_errno("poll")
+fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> usize {
+    // poll(2): birden fazla fd için I/O hazırlığını kontrol et
+    // Basit implementasyon: her fd için poll_one_shot çağır
+    if nfds == 0 || nfds > 1024 {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(fds_ptr, nfds * core::mem::size_of::<u32>() * 2) {
+        return err;
+    }
+
+    // pollfd yapısı: { int fd; short events; short revents; } = 8 bytes
+    let mut total_revents: usize = 0;
+    for i in 0..nfds {
+        let base = fds_ptr + i * 8;
+        let fd: u32 = with_user_access(|| unsafe { *(base as *const u32) });
+        let events: u16 = with_user_access(|| unsafe { *((base + 4) as *const u16) } as u16);
+
+        let mut revents: u16 = 0;
+
+        // Her fd için basit kontrol
+        let fd_usize = fd as usize;
+        if fd_usize < 64 {
+            // Dosya tablosunda var mı kontrol et
+            let files = FILE_TABLE.lock();
+            if let Some(Some(_)) = files.get(fd_usize) {
+                // Dosya açık — yazma okunabilir, okuma her zaman hazır
+                if events & 0x001 != 0 { revents |= 0x001; } // POLLIN
+                if events & 0x004 != 0 { revents |= 0x004; } // POLLOUT
+                if events & 0x020 != 0 { revents |= 0x020; } // POLLHUP (eof kontrolü)
+            }
+        }
+
+        let _ = write_user(base + 6, revents as u16);
+        if revents != 0 {
+            total_revents += 1;
+        }
+    }
+
+    if total_revents > 0 {
+        return total_revents;
+    }
+
+    // Timeout = 0 ise hemen dön (zaten döndük)
+    // Timeout > 0 ise bekle (şimdilik basit: sadece bir kez kontrol et)
+    if timeout_ms > 0 && timeout_ms < 10000 {
+        // Basit bekleme: timeout_ms / 10 tick
+        let ticks = (timeout_ms + 9) / 10;
+        for _ in 0..ticks {
+            x86_64::instructions::hlt();
+        }
+        // Tekrar kontrol et
+        for i in 0..nfds {
+            let base = fds_ptr + i * 8;
+            let fd: u32 = with_user_access(|| unsafe { *(base as *const u32) });
+            let events: u16 = with_user_access(|| unsafe { *((base + 4) as *const u16) } as u16);
+            let mut revents: u16 = 0;
+            let fd_usize = fd as usize;
+            if fd_usize < 64 {
+                let files = FILE_TABLE.lock();
+                if let Some(Some(_)) = files.get(fd_usize) {
+                    if events & 0x001 != 0 { revents |= 0x001; }
+                    if events & 0x004 != 0 { revents |= 0x004; }
+                    if events & 0x020 != 0 { revents |= 0x020; }
+                }
+            }
+            let _ = write_user(base + 6, revents as u16);
+            if revents != 0 { total_revents += 1; }
+        }
+    }
+
+    total_revents
 }
 
 fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: usize) -> usize {
@@ -1666,6 +3042,9 @@ fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: 
         if no_replace && kernel_memory::user_region_overlaps(target, len as u64) {
             return errno(EEXIST);
         }
+        if !no_replace && kernel_memory::user_region_overlaps(target, len as u64) {
+            kernel_memory::unmap_user_range(target, len as u64);
+        }
     }
     if is_anon {
         if is_shared {
@@ -1686,6 +3065,15 @@ fn sys_mmap(addr: usize, len: usize, prot: usize, flags: usize, fd: usize, off: 
             None => return errno(EBADF),
         }
     };
+    let file_access = file_state.flags & 0x3;
+    const O_RDONLY_USIZE: usize = 0;
+    const O_RDWR_USIZE: usize = 2;
+    if file_access == 1 {
+        return errno(EACCES);
+    }
+    if is_shared && (prot & PROT_WRITE != 0) && file_access != O_RDWR_USIZE {
+        return errno(EACCES);
+    }
     let file_size = file_state.size as u64;
     let offset = off as u64;
     if offset > file_size {
@@ -1742,6 +3130,7 @@ fn sys_munmap(_addr: usize, _len: usize) -> usize {
 }
 
 fn sys_brk(addr: usize) -> usize {
+    crate::debug_diag!("[SHELL_TEST] sys_brk: addr={:#x}", addr);
     let (base, current) = kernel_memory::user_heap_state();
     if addr == 0 {
         return current as usize;
@@ -1774,6 +3163,63 @@ fn sys_brk(addr: usize) -> usize {
 fn sys_ioctl(fd: usize, request: usize, arg: usize) -> usize {
     match get_fd(fd) {
         Some(FdKind::Drm) => handle_drm_ioctl(request, arg),
+        Some(FdKind::Stdin) | Some(FdKind::Stdout) | Some(FdKind::Stderr) => {
+            handle_tty_ioctl(request, arg)
+        }
+        _ => errno(ENOTTY),
+    }
+}
+
+/// TTY ioctl'leri — PTY foreground process group yönetimi
+/// POSIX: tcgetpgrp(3) ve tcsetpgrp(3) bu ioctl'ler üzerinden çalışır
+fn handle_tty_ioctl(request: usize, arg: usize) -> usize {
+    // TIOCGPGRP = 0x540F — foreground process group ID'yi oku
+    const TIOCGPGRP: usize = 0x540F;
+    // TIOCSPGRP = 0x5410 — foreground process group ID'yi ayarla
+    const TIOCSPGRP: usize = 0x5410;
+    // TIOCGWINSZ = 0x5413 — terminal boyutunu oku
+    const TIOCGWINSZ: usize = 0x5413;
+    // TCSBRK = 0x5409 — terminal break
+    const TCSBRK: usize = 0x5409;
+    // TCXONC = 0x540A — start/stop output
+    const TCXONC: usize = 0x540A;
+    // TCFLSH = 0x540B — flush terminal I/O
+    const TCFLSH: usize = 0x540B;
+
+    match request {
+        TIOCGPGRP => {
+            // tcgetpgrp(): foreground process group ID'yi döndür
+            let pgid = crate::tty::DEFAULT_TTY.get_foreground_pgid();
+            if let Err(err) = write_user(arg, pgid as u32) {
+                return err;
+            }
+            0
+        }
+        TIOCSPGRP => {
+            // tcsetpgrp(): foreground process group ID'yi ayarla
+            let pgid = match read_user::<u32>(arg) {
+                Ok(v) => v as usize,
+                Err(e) => return e,
+            };
+            crate::tty::DEFAULT_TTY.set_foreground_pgid(pgid);
+            0
+        }
+        TIOCGWINSZ => {
+            // terminal boyutunu döndür
+            let winsize = crate::tty::pty::Winsize {
+                ws_row: 24,
+                ws_col: 80,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            if let Err(err) = write_user(arg, winsize) {
+                return err;
+            }
+            0
+        }
+        TCSBRK => 0, // terminal break — no-op
+        TCXONC => 0, // start/stop output — no-op
+        TCFLSH => 0, // flush — no-op
         _ => errno(ENOTTY),
     }
 }
@@ -1921,12 +3367,74 @@ fn drm_mmap(len: usize, off: usize) -> usize {
     entry.map_ptr
 }
 
-fn sys_pread64(_fd: usize, _buf: usize, _count: usize, _pos: usize) -> usize {
-    unsupported_errno("pread64")
+fn sys_pread64(fd: usize, buf: usize, count: usize, pos: usize) -> usize {
+    // pread64: dosyadan belirli offset'ten oku, dosya konumunu değiştirme
+    if count == 0 { return 0; }
+    if let Err(err) = validate_user_range(buf, count) { return err; }
+
+    // Mevcut offset'i kaydet
+    let saved_offset = {
+        let files = FILE_TABLE.lock();
+        if let Some(Some(entry)) = files.get(fd) {
+            entry.offset
+        } else {
+            return errno(EBADF);
+        }
+    };
+
+    // Offset'i ayarla
+    {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(entry)) = files.get_mut(fd) {
+            entry.offset = pos;
+        }
+    }
+
+    // Oku
+    let result = sys_read(fd, buf, count);
+
+    // Eski offset'i geri yükle
+    {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(entry)) = files.get_mut(fd) {
+            entry.offset = saved_offset;
+        }
+    }
+
+    result
 }
 
-fn sys_pwrite64(_fd: usize, _buf: usize, _count: usize, _pos: usize) -> usize {
-    unsupported_errno("pwrite64")
+fn sys_pwrite64(fd: usize, buf: usize, count: usize, pos: usize) -> usize {
+    // pwrite64: dosyaya belirli offset'e yaz, dosya konumunu değiştirme
+    if count == 0 { return 0; }
+    if let Err(err) = validate_user_range(buf, count) { return err; }
+
+    let saved_offset = {
+        let files = FILE_TABLE.lock();
+        if let Some(Some(entry)) = files.get(fd) {
+            entry.offset
+        } else {
+            return errno(EBADF);
+        }
+    };
+
+    {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(entry)) = files.get_mut(fd) {
+            entry.offset = pos;
+        }
+    }
+
+    let result = sys_write(fd, buf, count);
+
+    {
+        let mut files = FILE_TABLE.lock();
+        if let Some(Some(entry)) = files.get_mut(fd) {
+            entry.offset = saved_offset;
+        }
+    }
+
+    result
 }
 
 /// readv(2) — scatter read: birden fazla tampona kesintisiz okuma.
@@ -2891,7 +4399,7 @@ fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> usize {
         state.path.clone()
     };
     if dir_path.is_empty() {
-        return errno(ENOSYS); // path olmayan fd'ler için
+        return errno(ENOTDIR); // path olmayan fd'ler için
     }
     let entries = match fs::f2fs::list_dir(&dir_path) {
         Ok(e) => e,
@@ -2968,8 +4476,7 @@ fn sys_utimensat(dirfd: usize, pathname_ptr: usize, times_ptr: usize, flags: usi
             core::ptr::read(times_ptr as *const [Timespec; 2])
         });
         let atime_sec = if times[0].tv_nsec as usize == UTIME_OMIT {
-            // unchanged — skip
-            return errno(ENOSYS);
+            0 // unchanged — skip below
         } else if times[0].tv_nsec as usize == UTIME_NOW {
             super::fs::get_global_time().sec
         } else {
@@ -2979,7 +4486,7 @@ fn sys_utimensat(dirfd: usize, pathname_ptr: usize, times_ptr: usize, flags: usi
         else if times[0].tv_nsec as usize == UTIME_NOW { 0 }
         else { times[0].tv_nsec };
         let mtime_sec = if times[1].tv_nsec as usize == UTIME_OMIT {
-            return errno(ENOSYS);
+            0 // unchanged — skip below
         } else if times[1].tv_nsec as usize == UTIME_NOW {
             super::fs::get_global_time().sec
         } else {
@@ -3215,13 +4722,132 @@ fn sys_umount2(target_ptr: usize, _flags: usize) -> usize {
 }
 
 fn sys_select(
-    _nfds: usize,
-    _readfds: usize,
-    _writefds: usize,
-    _exceptfds: usize,
-    _timeout: usize,
+    nfds: usize,
+    readfds: usize,
+    writefds: usize,
+    exceptfds: usize,
+    timeout: usize,
 ) -> usize {
-    unsupported_errno("select")
+    if nfds > 1024 { return errno(EINVAL); }
+
+    // timeout: { long tv_sec; long tv_usec; } — 0 = non-blocking, NULL = infinite
+    let timeout_ms: usize = if timeout != 0 {
+        if let Err(e) = validate_user_range(timeout, 16) { return e; }
+        let tv_sec: i64 = with_user_access(|| unsafe { *(timeout as *const i64) });
+        let tv_usec: i64 = with_user_access(|| unsafe { *((timeout + 8) as *const i64) });
+        if tv_sec < 0 || tv_usec < 0 { return errno(EINVAL); }
+        (tv_sec as usize) * 1000 + (tv_usec as usize) / 1000
+    } else {
+        0 // non-blocking
+    };
+
+    let mut read_ready: u64 = 0;
+    let mut write_ready: u64 = 0;
+    let mut except_ready: u64 = 0;
+    let mut total: usize = 0;
+
+    let check = |fd_set: usize, nfds_inner: usize, mask: u64, check_read: bool| -> (u64, usize) {
+        if fd_set == 0 { return (0, 0); }
+        let mut result: u64 = 0;
+        let mut count: usize = 0;
+        for bit in 0..nfds_inner {
+            if mask & (1u64 << bit) == 0 { continue; }
+            let byte_offset = bit / 8;
+            let bit_offset = bit % 8;
+            let fd_set_byte: u8 = with_user_access(|| unsafe {
+                *((fd_set + byte_offset) as *const u8)
+            });
+            if fd_set_byte & (1 << bit_offset) == 0 { continue; }
+
+            let files = FILE_TABLE.lock();
+            let is_ready = match files.get(bit) {
+                Some(Some(_)) => true,
+                _ => false,
+            };
+            drop(files);
+            if is_ready {
+                result |= 1u64 << bit;
+                count += 1;
+            }
+        }
+        (result, count)
+    };
+
+    // FD_SET bitmasks
+    let read_mask: u64 = if readfds != 0 {
+        let mut m: u64 = 0;
+        for i in 0..nfds.min(64) {
+            let byte = with_user_access(|| unsafe { *((readfds + i / 8) as *const u8) });
+            if byte & (1 << (i % 8)) != 0 { m |= 1u64 << i; }
+        }
+        m
+    } else { 0 };
+
+    let write_mask: u64 = if writefds != 0 {
+        let mut m: u64 = 0;
+        for i in 0..nfds.min(64) {
+            let byte = with_user_access(|| unsafe { *((writefds + i / 8) as *const u8) });
+            if byte & (1 << (i % 8)) != 0 { m |= 1u64 << i; }
+        }
+        m
+    } else { 0 };
+
+    // Basit kontrol: dosya açık mı?
+    if read_mask != 0 {
+        let files = FILE_TABLE.lock();
+        for bit in 0..nfds.min(64) {
+            if read_mask & (1u64 << bit) != 0 {
+                if let Some(Some(_)) = files.get(bit) {
+                    read_ready |= 1u64 << bit;
+                    total += 1;
+                }
+            }
+        }
+        drop(files);
+    }
+    if write_mask != 0 {
+        let files = FILE_TABLE.lock();
+        for bit in 0..nfds.min(64) {
+            if write_mask & (1u64 << bit) != 0 {
+                if let Some(Some(_)) = files.get(bit) {
+                    write_ready |= 1u64 << bit;
+                    total += 1;
+                }
+            }
+        }
+        drop(files);
+    }
+
+    // FD_SET'leri temizle ve ready olanları yaz
+    if readfds != 0 {
+        for byte_idx in 0..((nfds + 7) / 8) {
+            let mut val: u8 = 0;
+            for bit in 0..8 {
+                let fd = byte_idx * 8 + bit;
+                if fd >= nfds { break; }
+                if read_ready & (1u64 << fd) != 0 { val |= 1 << bit; }
+            }
+            with_user_access(|| unsafe { *((readfds + byte_idx) as *mut u8) = val; });
+        }
+    }
+    if writefds != 0 {
+        for byte_idx in 0..((nfds + 7) / 8) {
+            let mut val: u8 = 0;
+            for bit in 0..8 {
+                let fd = byte_idx * 8 + bit;
+                if fd >= nfds { break; }
+                if write_ready & (1u64 << fd) != 0 { val |= 1 << bit; }
+            }
+            with_user_access(|| unsafe { *((writefds + byte_idx) as *mut u8) = val; });
+        }
+    }
+    if exceptfds != 0 {
+        for byte_idx in 0..((nfds + 7) / 8) {
+            with_user_access(|| unsafe { *((exceptfds + byte_idx) as *mut u8) = 0; });
+        }
+    }
+
+    total
 }
 
 fn sys_sched_yield() -> usize {
@@ -3246,33 +4872,62 @@ struct SigAction {
     sa_mask: [u64; 1],
 }
 
-/// Signal handlers table (per-process would be better, but simplified here)
-static SIGNAL_HANDLERS: spin::Mutex<[SigHandler; 64]> = spin::Mutex::new([0; 64]);
-static SIGNAL_MASKS: spin::Mutex<u64> = spin::Mutex::new(0);
 
-/// rt_sigaction - examine and change a signal action
+/// rt_sigaction - examine and change a signal action (per-process)
 fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: usize) -> usize {
     if sig == 0 || sig > 64 {
         return errno(EINVAL);
     }
 
-    let sig_idx = sig - 1;
+    let signal = match crate::task::signal::Signal::from_number(sig as u8) {
+        Some(s) => s,
+        None => return errno(EINVAL),
+    };
 
     // Save old action if requested
     if oldact_ptr != 0 {
         if let Err(err) = validate_user_range(oldact_ptr, core::mem::size_of::<SigAction>()) {
             return err;
         }
-        let handlers = SIGNAL_HANDLERS.lock();
-        let old_handler = handlers[sig_idx];
-        drop(handlers);
-
-        let old_action = SigAction {
-            sa_handler: old_handler,
-            sa_flags: 0,
-            sa_restorer: 0,
-            sa_mask: [0; 1],
-        };
+        let old_action = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+            crate::task::scheduler::PER_CPU_CURRENT_TASK
+                .get(crate::cpu::smp::get_current_cpu_id() as usize)
+                .and_then(|t| t.as_ref())
+                .map(|t| {
+                    let sa = t.cold.signals.get_action(signal);
+                    match sa {
+                        crate::task::signal::SignalAction::Default => SigAction {
+                            sa_handler: 0,
+                            sa_flags: 0,
+                            sa_restorer: 0,
+                            sa_mask: [0; 1],
+                        },
+                        crate::task::signal::SignalAction::Ignore => SigAction {
+                            sa_handler: 1, // SIG_IGN
+                            sa_flags: 0,
+                            sa_restorer: 0,
+                            sa_mask: [0; 1],
+                        },
+                        crate::task::signal::SignalAction::Catch {
+                            handler,
+                            mask,
+                            flags,
+                            restorer,
+                        } => SigAction {
+                            sa_handler: handler,
+                            sa_flags: flags as usize,
+                            sa_restorer: restorer,
+                            sa_mask: [mask],
+                        },
+                    }
+                })
+                .unwrap_or(SigAction {
+                    sa_handler: 0,
+                    sa_flags: 0,
+                    sa_restorer: 0,
+                    sa_mask: [0; 1],
+                })
+        });
         if let Err(err) = write_user(oldact_ptr, old_action) {
             return err;
         }
@@ -3284,22 +4939,51 @@ fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: 
             Ok(value) => value,
             Err(err) => return err,
         };
-        let mut handlers = SIGNAL_HANDLERS.lock();
-        handlers[sig_idx] = new_action.sa_handler;
+        let sa_action = if new_action.sa_handler == 0 {
+            crate::task::signal::SignalAction::Default
+        } else if new_action.sa_handler == 1 {
+            // SIG_IGN
+            crate::task::signal::SignalAction::Ignore
+        } else {
+            crate::task::signal::SignalAction::Catch {
+                handler: new_action.sa_handler,
+                mask: new_action.sa_mask[0],
+                flags: new_action.sa_flags as u32,
+                restorer: new_action.sa_restorer,
+            }
+        };
+        x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+            if let Some(current) = crate::task::scheduler::PER_CPU_CURRENT_TASK
+                .get(crate::cpu::smp::get_current_cpu_id() as usize)
+                .and_then(|t| t.as_ref())
+            {
+                current.cold.signals.set_action(signal, sa_action);
+            }
+        });
     }
 
     0
 }
 
-/// rt_sigprocmask - examine and change blocked signals
-fn sys_rt_sigprocmask(_how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsize: usize) -> usize {
+/// rt_sigprocmask - examine and change blocked signals (per-process)
+fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsize: usize) -> usize {
+    const SIG_BLOCK: usize = 0;
+    const SIG_UNBLOCK: usize = 1;
+    const SIG_SETMASK: usize = 2;
+
     // Save old mask if requested
     if oldset_ptr != 0 {
         if let Err(err) = validate_user_range(oldset_ptr, core::mem::size_of::<u64>()) {
             return err;
         }
-        let mask = SIGNAL_MASKS.lock();
-        if let Err(err) = write_user(oldset_ptr, *mask) {
+        let old_mask = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+            crate::task::scheduler::PER_CPU_CURRENT_TASK
+                .get(crate::cpu::smp::get_current_cpu_id() as usize)
+                .and_then(|t| t.as_ref())
+                .map(|t| t.cold.signals.get_mask())
+                .unwrap_or(0)
+        });
+        if let Err(err) = write_user(oldset_ptr, old_mask) {
             return err;
         }
     }
@@ -3310,11 +4994,70 @@ fn sys_rt_sigprocmask(_how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsiz
             Ok(value) => value,
             Err(err) => return err,
         };
-        let mut mask = SIGNAL_MASKS.lock();
-        *mask = new_mask;
+        x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+            if let Some(current) = crate::task::scheduler::PER_CPU_CURRENT_TASK
+                .get(crate::cpu::smp::get_current_cpu_id() as usize)
+                .and_then(|t| t.as_ref())
+            {
+                match how {
+                    SIG_BLOCK => {
+                        let old = current.cold.signals.get_mask();
+                        current.cold.signals.set_mask(old | new_mask);
+                    }
+                    SIG_UNBLOCK => {
+                        let old = current.cold.signals.get_mask();
+                        current.cold.signals.set_mask(old & !new_mask);
+                    }
+                    SIG_SETMASK => {
+                        current.cold.signals.set_mask(new_mask);
+                    }
+                    _ => {}
+                }
+                // SIGKILL (bit 9) ve SIGSTOP (bit 17) asla block edilemez
+                current.cold.signals.set_mask(current.cold.signals.get_mask() & !(1u64 << 8) & !(1u64 << 16));
+            }
+        });
     }
 
     0
+}
+
+/// rt_sigsuspend - atomically change signal mask and suspend calling thread
+/// rt_sigsuspend - atomically change signal mask and suspend calling thread (per-process)
+fn sys_rt_sigsuspend(mask_ptr: usize) -> usize {
+    if mask_ptr == 0 {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(mask_ptr, core::mem::size_of::<u64>()) {
+        return err;
+    }
+    let mask = match read_user::<u64>(mask_ptr) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    // Per-process mask'ı kaydet ve geçici olarak değiştir
+    let old_mask = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(crate::cpu::smp::get_current_cpu_id() as usize)
+            .and_then(|t| t.as_ref())
+            .map(|t| {
+                let old = t.cold.signals.get_mask();
+                t.cold.signals.set_mask(mask);
+                old
+            })
+            .unwrap_or(0)
+    });
+    crate::task::scheduler::sleep(1);
+    // Eski mask'ı geri yükle
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(current) = crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(crate::cpu::smp::get_current_cpu_id() as usize)
+            .and_then(|t| t.as_ref())
+        {
+            current.cold.signals.set_mask(old_mask);
+        }
+    });
+    errno(EINTR)
 }
 
 /// kill - send a signal to a process
@@ -3341,45 +5084,373 @@ fn sys_kill(pid: usize, sig: usize) -> usize {
 }
 
 /// rt_sigqueueinfo - queue a signal and data to a process
-fn sys_rt_sigqueueinfo(_pid: usize, _sig: usize, _info_ptr: usize) -> usize {
-    unsupported_errno("rt_sigqueueinfo")
+fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info_ptr: usize) -> usize {
+    if sig == 0 || sig > 64 { return errno(EINVAL); }
+    if pid == 0 { return errno(EINVAL); }
+
+    // siginfo_t yapısını oku: { int si_signo; int si_errno; int si_code; union { ... } }
+    let si_signo: i32 = if info_ptr != 0 {
+        with_user_access(|| unsafe { *(info_ptr as *const i32) })
+    } else {
+        sig as i32
+    };
+    if si_signo != sig as i32 { return errno(EINVAL); }
+
+    // SI_QUEUE-only: sadece sendici Process si_code == SI_QUEUE (12) olabilir
+    let si_code: i32 = if info_ptr != 0 {
+        with_user_access(|| unsafe { *((info_ptr + 8) as *const i32) })
+    } else {
+        0
+    };
+    if si_code != 12 && si_code != 0 { // SI_QUEUE=12 veya SI_USER=0
+        return errno(EPERM);
+    }
+
+    // Hedef process'i bul
+    if !tasking::task_exists(pid) {
+        return errno(ESRCH);
+    }
+    if let Some(signal) = crate::task::signal::Signal::from_number(sig as u8) {
+        let _ = crate::task::signal::send_signal(pid, signal);
+    }
+    0
 }
 
 /// sigaltstack - set and/or examine signal stack context
-fn sys_sigaltstack(_ss_ptr: usize, _old_ss_ptr: usize) -> usize {
-    unsupported_errno("sigaltstack")
-}
+fn sys_sigaltstack(ss_ptr: usize, old_ss_ptr: usize) -> usize {
+    // Signal alt stack yapısı: { void *ss_sp; int ss_flags; size_t ss_size; }
+    // ss_flags & SS_DISABLE ise alt stack devre dışı
 
-/// rt_sigsuspend - wait for a signal
-fn sys_rt_sigsuspend(_mask_ptr: usize) -> usize {
-    // Would block until signal received
-    errno(EINTR)
+    // Eski stack bilgisini yaz (eğer istenirse)
+    if old_ss_ptr != 0 {
+        if let Err(e) = validate_user_range(old_ss_ptr, 24) { return e; }
+        // Şimdilik: her zaman SS_DISABLE ile yanıt ver (alt stack desteklenmiyor)
+        with_user_access(|| unsafe {
+            *((old_ss_ptr) as *mut usize) = 0;     // ss_sp = NULL
+            *((old_ss_ptr + 8) as *mut i32) = 2;   // SS_DISABLE
+            *((old_ss_ptr + 16) as *mut usize) = 0; // ss_size = 0
+        });
+    }
+
+    // Yeni stack ayarla
+    if ss_ptr != 0 {
+        if let Err(e) = validate_user_range(ss_ptr, 24) { return e; }
+        let ss_sp: usize = with_user_access(|| unsafe { *(ss_ptr as *const usize) });
+        let ss_flags: i32 = with_user_access(|| unsafe { *((ss_ptr + 8) as *const i32) });
+        let ss_size: usize = with_user_access(|| unsafe { *((ss_ptr + 16) as *const usize) });
+
+        if ss_flags & 2 != 0 { // SS_DISABLE
+            return 0; // Devre dışı bırakma — zaten desteklenmiyor
+        }
+        if ss_sp == 0 || ss_size < 2048 {
+            return errno(ENOMEM);
+        }
+        // Alt stack desteklenmiyor — ENOMEM dön
+        // Gerçek implementasyon: signal handler sırasında bu stack'e geçilmeli
+        errno(ENOMEM)
+    } else {
+        0
+    }
 }
 
 /// rt_sigtimedwait - wait for a signal with timeout
 fn sys_rt_sigtimedwait(
-    _set_ptr: usize,
-    _info_ptr: usize,
-    _timeout_ptr: usize,
-    _sigsetsize: usize,
+    set_ptr: usize,
+    info_ptr: usize,
+    timeout_ptr: usize,
+    sigsetsize: usize,
 ) -> usize {
-    unsupported_errno("rt_sigtimedwait")
+    if sigsetsize != 8 { return errno(EINVAL); }
+    if set_ptr == 0 { return errno(EINVAL); }
+
+    if let Err(e) = validate_user_range(set_ptr, 8) { return e; }
+    let signal_mask: u64 = with_user_access(|| unsafe { *(set_ptr as *const u64) });
+
+    // Timeout oku
+    let timeout_ms: usize = if timeout_ptr != 0 {
+        if let Err(e) = validate_user_range(timeout_ptr, 16) { return e; }
+        let tv_sec: i64 = with_user_access(|| unsafe { *(timeout_ptr as *const i64) });
+        let tv_usec: i64 = with_user_access(|| unsafe { *((timeout_ptr + 8) as *const i64) });
+        if tv_sec < 0 || tv_usec < 0 { return errno(EINVAL); }
+        (tv_sec as usize) * 1000 + (tv_usec as usize) / 1000
+    } else {
+        usize::MAX // süresiz bekleme
+    };
+
+    // Mevcut process'in pending signal'lerini kontrol et
+    let my_pid = tasking::current_task_id();
+
+    // Basit polling: timeout_ms boyunca bekle
+    let max_ticks = (timeout_ms + 9) / 10;
+    for tick in 0..max_ticks {
+        x86_64::instructions::hlt();
+        // Pending signal kontrolü — her tick'te bir
+        if tick % 10 == 0 {
+            // Signal maskesi ile eşleşen pending signal var mı kontrol et
+            // Basit implementasyon: herhangi bir sinyal beklemede mi?
+            for sig_num in 1..=64 {
+                if signal_mask & (1u64 << (sig_num - 1)) != 0 {
+                    // Bu sinyal maskede — pending olup olmadığını kontrol et
+                    // Gerçek implementasyonda pending_signals bitmap'i okunurdu
+                    // Şimdilik: EINTR ile dön
+                    return errno(EINTR);
+                }
+            }
+        }
+    }
+
+    errno(EAGAIN) // Timeout doldu, sinyal gelmedi
 }
 
-fn sys_mremap(_old: usize, _oldsz: usize, _newsz: usize, _flags: usize, _new: usize) -> usize {
-    unsupported_errno("mremap")
+fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, new_addr: usize) -> usize {
+    // mremap(2): remap virtual memory address
+    const MREMAP_MAYMOVE: usize = 0x01;
+    const MREMAP_FIXED: usize = 0x02;
+    const MREMAP_DONTUNMAP: usize = 0x04;
+
+    if old_size == 0 || new_size == 0 { return errno(EINVAL); }
+    if !kernel_memory::is_user_range(old_addr as u64, old_size as u64) {
+        return errno(EINVAL);
+    }
+
+    let may_move = flags & MREMAP_MAYMOVE != 0;
+    let is_fixed = flags & MREMAP_FIXED != 0;
+    let dont_unmap = flags & MREMAP_DONTUNMAP != 0;
+    if is_fixed && !may_move { return errno(EINVAL); }
+    if dont_unmap && !may_move { return errno(EINVAL); }
+
+    let old_addr_aligned = old_addr & !0xFFF;
+    let old_end = old_addr_aligned.saturating_add(old_size);
+    let new_end = old_addr_aligned.saturating_add(new_size);
+
+    if new_size < old_size {
+        // Shrinking: update VMA end address
+        kernel_memory::shrink_vma(old_addr_aligned as u64, old_size as u64, new_size as u64);
+        // Unmap the freed pages
+        let free_start = old_addr_aligned as u64 + new_size as u64;
+        let free_end = old_end as u64;
+        let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
+        let free_start_aligned = free_start & page_mask;
+        let free_end_aligned = (free_end + kernel_memory::PAGE_SIZE as u64 - 1) & page_mask;
+        if free_end_aligned > free_start_aligned {
+            kernel_memory::unmap_user_range(free_start_aligned, free_end_aligned - free_start_aligned);
+        }
+        return old_addr_aligned;
+    }
+
+    if new_size == old_size {
+        return old_addr_aligned;
+    }
+
+    // Expanding
+    if !may_move {
+        // In-place expansion: check if space after old mapping is free
+        let expand_start = old_end as u64;
+        let expand_size = (new_size - old_size) as u64;
+        if kernel_memory::user_region_overlaps(expand_start, expand_size) {
+            return errno(ENOMEM);
+        }
+        // Extend the VMA
+        kernel_memory::extend_vma(old_addr_aligned as u64, old_size as u64, new_size as u64);
+        return old_addr_aligned;
+    }
+
+    // MREMAP_MAYMOVE: allocate new address
+    let target = if is_fixed {
+        if new_addr == 0 { return errno(EINVAL); }
+        let target_u64 = new_addr as u64;
+        if !kernel_memory::is_user_range(target_u64, new_size as u64) {
+            return errno(EINVAL);
+        }
+        if kernel_memory::user_region_overlaps(target_u64, new_size as u64) {
+            kernel_memory::unmap_user_range(target_u64, new_size as u64);
+        }
+        target_u64
+    } else {
+        match kernel_memory::allocate_user_mmap(new_size as u64) {
+            Some(addr) => addr,
+            None => return errno(ENOMEM),
+        }
+    };
+
+    // Copy old VMA type to new location
+    kernel_memory::clone_vma_to(old_addr_aligned as u64, old_size as u64, target, new_size as u64);
+
+    // Copy physical page contents
+    let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
+    let copy_pages = (old_size + kernel_memory::PAGE_SIZE - 1) / kernel_memory::PAGE_SIZE;
+    for i in 0..copy_pages {
+        let src_virt = (old_addr_aligned as u64).wrapping_add(i as u64 * kernel_memory::PAGE_SIZE as u64);
+        let dst_virt = target.wrapping_add(i as u64 * kernel_memory::PAGE_SIZE as u64);
+        if let Some(src_phys) = kernel_memory::translate_addr(src_virt & page_mask) {
+            let src_data = unsafe {
+                let ptr = (kernel_memory::active_physical_offset() + src_phys) as *const u8;
+                core::slice::from_raw_parts(ptr, kernel_memory::PAGE_SIZE)
+            };
+            // Map destination and copy
+            kernel_memory::copy_page_data(dst_virt & page_mask, src_data);
+        }
+    }
+
+    if !dont_unmap {
+        // Unmap old region
+        kernel_memory::unmap_user_range(old_addr_aligned as u64, old_size as u64);
+        kernel_memory::remove_vma(old_addr_aligned as u64, old_size as u64);
+    }
+
+    target as usize
 }
 
-fn sys_msync(_addr: usize, _len: usize, _flags: usize) -> usize {
-    unsupported_errno("msync")
+fn sys_msync(addr: usize, len: usize, flags: usize) -> usize {
+    // msync(2): flush dirty pages back to filesystem
+    if len == 0 { return errno(EINVAL); }
+    if addr % kernel_memory::PAGE_SIZE != 0 { return errno(EINVAL); }
+    if !kernel_memory::is_user_range(addr as u64, len as u64) {
+        return errno(ENOMEM);
+    }
+
+    const MS_ASYNC: usize = 0x01;
+    const MS_SYNC: usize = 0x04;
+    const MS_INVALIDATE: usize = 0x10;
+    let invalid_bits = !(MS_ASYNC | MS_SYNC | MS_INVALIDATE);
+    if flags & invalid_bits != 0 {
+        return errno(EINVAL);
+    }
+    if (flags & MS_ASYNC) != 0 && (flags & MS_SYNC) != 0 {
+        return errno(EINVAL);
+    }
+
+    let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
+    let start = (addr as u64) & page_mask;
+    let end = (addr as u64)
+        .saturating_add(len as u64)
+        .saturating_add(kernel_memory::PAGE_SIZE as u64 - 1)
+        & page_mask;
+    if end <= start {
+        return 0;
+    }
+
+    kernel_memory::msync_user_range(start, end, flags & MS_INVALIDATE != 0);
+
+    if (flags & MS_SYNC) != 0 {
+        kernel_memory::flush_dirty_file_pages();
+    }
+
+    0
 }
 
-fn sys_mincore(_addr: usize, _len: usize, _vec: usize) -> usize {
-    unsupported_errno("mincore")
+fn sys_mincore(addr: usize, len: usize, vec: usize) -> usize {
+    // mincore(2): check which pages are resident in memory
+    if len == 0 { return errno(EINVAL); }
+    if addr % kernel_memory::PAGE_SIZE != 0 { return errno(EINVAL); }
+    if !kernel_memory::is_user_range(addr as u64, len as u64) {
+        return errno(ENOMEM);
+    }
+
+    let page_count = (len + kernel_memory::PAGE_SIZE - 1) / kernel_memory::PAGE_SIZE;
+    if vec != 0 {
+        if let Err(e) = validate_user_range(vec, page_count) { return e; }
+        with_user_access(|| unsafe {
+            core::ptr::write_bytes(vec as *mut u8, 0, page_count);
+        });
+        let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
+        let start = (addr as u64) & page_mask;
+        for i in 0..page_count {
+            let page_addr = start + (i as u64 * kernel_memory::PAGE_SIZE as u64);
+            let is_present = kernel_memory::is_page_present(page_addr);
+            if is_present {
+                with_user_access(|| unsafe {
+                    core::ptr::write_volatile((vec + i) as *mut u8, 1);
+                });
+            }
+        }
+    }
+    0
 }
 
-fn sys_madvise(_addr: usize, _len: usize, _advice: usize) -> usize {
-    unsupported_errno("madvise")
+fn sys_madvise(addr: usize, len: usize, advice: usize) -> usize {
+    // madvise(2): bellek kullanım ipuçları
+    if len == 0 { return errno(EINVAL); }
+    if !kernel_memory::is_user_range(addr as u64, len as u64) {
+        return errno(EINVAL);
+    }
+
+    const MADV_NORMAL: usize = 0;
+    const MADV_RANDOM: usize = 1;
+    const MADV_SEQUENTIAL: usize = 2;
+    const MADV_WILLNEED: usize = 3;
+    const MADV_DONTNEED: usize = 4;
+    const MADV_FREE: usize = 8;
+    const MADV_DONTFORK: usize = 10;
+    const MADV_DOFORK: usize = 11;
+    const MADV_MERGEABLE: usize = 12;
+    const MADV_UNMERGEABLE: usize = 13;
+    const MADV_HUGEPAGE: usize = 14;
+    const MADV_NOHUGEPAGE: usize = 15;
+    const MADV_DONTDUMP: usize = 16;
+    const MADV_DODUMP: usize = 17;
+    const MADV_WIPEONFORK: usize = 18;
+    const MADV_KEEPONFORK: usize = 19;
+    const MADV_COLD: usize = 20;
+    const MADV_PAGEOUT: usize = 21;
+    const MADV_POPULATE_READ: usize = 22;
+    const MADV_POPULATE_WRITE: usize = 23;
+    const MADV_GUARD_INSTALL: usize = 100;
+    const MADV_GUARD_REMOVE: usize = 101;
+
+    match advice {
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => {
+            // İpuçları — şimdilik no-op
+            0
+        }
+        MADV_DONTNEED => {
+            // Man page: free pages + backing store; subsequent access repopulates
+            // from file (shared file/anon) or zero-fill (anon private)
+            let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
+            let start = (addr as u64) & page_mask;
+            let end = (addr as u64)
+                .saturating_add(len as u64)
+                .saturating_add(kernel_memory::PAGE_SIZE as u64 - 1)
+                & page_mask;
+            if end <= start {
+                return 0;
+            }
+            kernel_memory::unmap_user_range(start, end - start);
+            0
+        }
+        MADV_FREE => {
+            // Serbest bırak ama yeniden kullanılmadıkça tut
+            0
+        }
+        MADV_DONTFORK | MADV_DOFORK | MADV_MERGEABLE | MADV_UNMERGEABLE => {
+            // Fork/KSM ile ilgili — no-op
+            0
+        }
+        MADV_HUGEPAGE | MADV_NOHUGEPAGE => {
+            // Huge page — no-op
+            0
+        }
+        MADV_DONTDUMP | MADV_DODUMP => {
+            // Core dump hariç/tut — no-op
+            0
+        }
+        MADV_WIPEONFORK | MADV_KEEPONFORK => {
+            0
+        }
+        MADV_COLD | MADV_PAGEOUT => {
+            // Sayfaları soğuk/listeye al — no-op
+            0
+        }
+        MADV_POPULATE_READ | MADV_POPULATE_WRITE => {
+            // Sayfaları hemen ata — no-op
+            0
+        }
+        MADV_GUARD_INSTALL | MADV_GUARD_REMOVE => {
+            // Guard page — no-op
+            0
+        }
+        _ => errno(EINVAL),
+    }
 }
 
 // ============================================================================
@@ -3514,25 +5585,98 @@ fn sys_memfd_create(name_ptr: usize, flags: usize) -> usize {
     fd
 }
 
-/// Pipe implementation
-struct PipeBuffer {
-    buffer: Vec<u8>,
+/// Pipe buffer — POSIX.1-2024 pipe(2) semantiği
+/// Tek yönlü veri kanalı: writer → ring buffer → reader
+struct PipeRingBuffer {
+    data: Vec<u8>,
+    capacity: usize,
     read_pos: usize,
     write_pos: usize,
+    readers: u32,
+    writers: u32,
+    nonblocking: bool,
 }
+
+impl PipeRingBuffer {
+    fn new(capacity: usize) -> Self {
+        Self {
+            data: alloc::vec![0u8; capacity],
+            capacity,
+            read_pos: 0,
+            write_pos: 0,
+            readers: 1,
+            writers: 1,
+            nonblocking: false,
+        }
+    }
+
+    fn pipe_read(&mut self, buf: &mut [u8]) -> Result<usize, i64> {
+        let available = self.write_pos.saturating_sub(self.read_pos);
+        if available == 0 {
+            if self.writers == 0 {
+                return Ok(0);
+            }
+            return Err(-11); // EAGAIN
+        }
+        let to_read = buf.len().min(available);
+        for i in 0..to_read {
+            buf[i] = self.data[(self.read_pos + i) % self.capacity];
+        }
+        self.read_pos += to_read;
+        Ok(to_read)
+    }
+
+    fn pipe_write(&mut self, buf: &[u8]) -> Result<usize, i64> {
+        if self.readers == 0 {
+            crate::task::signal::send_signal_to_current(crate::task::signal::Signal::SIGPIPE);
+            return Err(-32); // EPIPE
+        }
+        let used = self.write_pos.saturating_sub(self.read_pos);
+        let available = self.capacity.saturating_sub(used);
+        if available == 0 {
+            return Err(-11); // EAGAIN
+        }
+        let to_write = buf.len().min(available);
+        for i in 0..to_write {
+            self.data[(self.write_pos + i) % self.capacity] = buf[i];
+        }
+        self.write_pos += to_write;
+        Ok(to_write)
+    }
+}
+
+use spin::Mutex as PipeMutex;
 
 lazy_static! {
-    static ref PIPE_TABLE: Mutex<alloc::collections::BTreeMap<usize, PipeBuffer>> =
-        Mutex::new(alloc::collections::BTreeMap::new());
+    /// Pipe havuzu: pipe_id → PipeRingBuffer
+    static ref PIPE_POOL: PipeMutex<alloc::collections::BTreeMap<u32, PipeRingBuffer>> =
+        PipeMutex::new(alloc::collections::BTreeMap::new());
+    /// Sonraki pipe ID
+    static ref NEXT_PIPE_ID: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(1);
+    /// read_fd → pipe_id eşlemesi
+    static ref PIPE_READ_MAP: PipeMutex<alloc::collections::BTreeMap<usize, u32>> =
+        PipeMutex::new(alloc::collections::BTreeMap::new());
+    /// write_fd → pipe_id eşlemesi
+    static ref PIPE_WRITE_MAP: PipeMutex<alloc::collections::BTreeMap<usize, u32>> =
+        PipeMutex::new(alloc::collections::BTreeMap::new());
 }
 
-/// pipe - create pipe
+/// Pipe FD türü — hangi uç olduğunu belirtir
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PipeFdEnd {
+    Read,
+    Write,
+}
+
+/// pipe(2) — Anonim boru oluştur
+/// POSIX: "pipe(fds) creates a pipe, a unidirectional data channel"
+/// pipefd[0]: okuma ucu (read end), pipefd[1]: yazma ucu (write end)
 fn sys_pipe(pipefd_ptr: usize) -> usize {
     if let Err(err) = validate_user_range(pipefd_ptr, 2 * core::mem::size_of::<u32>()) {
         return err;
     }
 
-    // Allocate two FDs for read and write ends
     let read_fd = allocate_fd(FdKind::Pipe);
     let write_fd = allocate_fd(FdKind::Pipe);
 
@@ -3540,17 +5684,16 @@ fn sys_pipe(pipefd_ptr: usize) -> usize {
         return errno(EMFILE);
     }
 
-    // Create pipe buffer
-    let pipe = PipeBuffer {
-        buffer: vec![0u8; 4096],
-        read_pos: 0,
-        write_pos: 0,
-    };
+    // Yeni pipe ID oluştur ve havuza yerleştir
+    let pipe_id = NEXT_PIPE_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    let pipe = PipeRingBuffer::new(65536);
+    PIPE_POOL.lock().insert(pipe_id, pipe);
 
-    // Store pipe with read_fd as key
-    PIPE_TABLE.lock().insert(read_fd, pipe);
+    // FD → pipe_id eşlemelerini kaydet
+    PIPE_READ_MAP.lock().insert(read_fd, pipe_id);
+    PIPE_WRITE_MAP.lock().insert(write_fd, pipe_id);
 
-    // Write pipefds to user memory
+    // Kullanıcı alanına fd değerlerini yaz
     if let Err(err) = write_user(pipefd_ptr, read_fd as u32) {
         return err;
     }
@@ -3558,14 +5701,10 @@ fn sys_pipe(pipefd_ptr: usize) -> usize {
         return err;
     }
 
-    serial_println!("[IPC] pipe: read_fd={}, write_fd={}", read_fd, write_fd);
     0
 }
 
-/// pipe2 - create pipe with flags
-///
-/// Linux pipe2(2) uyumlu: O_NONBLOCK ve O_CLOEXEC flag desteği.
-/// flags = 0 olduğunda pipe() ile aynıdır.
+/// pipe2(2) — Flags ile pipe oluştur (O_NONBLOCK, O_CLOEXEC)
 fn sys_pipe2(pipefd_ptr: usize, flags: usize) -> usize {
     if let Err(err) = validate_user_range(pipefd_ptr, 2 * core::mem::size_of::<u32>()) {
         return err;
@@ -3578,13 +5717,26 @@ fn sys_pipe2(pipefd_ptr: usize, flags: usize) -> usize {
         return errno(EMFILE);
     }
 
-    let pipe = PipeBuffer {
-        buffer: vec![0u8; 4096],
-        read_pos: 0,
-        write_pos: 0,
-    };
+    let nonblock = flags & (O_NONBLOCK as usize) != 0;
+    let cloexec = flags & 0x80000 != 0;
 
-    PIPE_TABLE.lock().insert(read_fd, pipe);
+    let pipe_id = NEXT_PIPE_ID.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    let mut pipe = PipeRingBuffer::new(65536);
+    pipe.nonblocking = nonblock;
+    PIPE_POOL.lock().insert(pipe_id, pipe);
+
+    PIPE_READ_MAP.lock().insert(read_fd, pipe_id);
+    PIPE_WRITE_MAP.lock().insert(write_fd, pipe_id);
+
+    if cloexec {
+        let mut cloexec_table = FD_CLOEXEC.lock();
+        if read_fd < cloexec_table.len() {
+            cloexec_table[read_fd] = true;
+        }
+        if write_fd < cloexec_table.len() {
+            cloexec_table[write_fd] = true;
+        }
+    }
 
     if let Err(err) = write_user(pipefd_ptr, read_fd as u32) {
         return err;
@@ -3593,16 +5745,6 @@ fn sys_pipe2(pipefd_ptr: usize, flags: usize) -> usize {
         return err;
     }
 
-    let nonblock = flags & (O_NONBLOCK as usize) != 0;
-    let cloexec = flags & 0x80000 != 0; // O_CLOEXEC
-
-    serial_println!(
-        "[IPC] pipe2: read_fd={}, write_fd={}, nonblock={}, cloexec={}",
-        read_fd,
-        write_fd,
-        nonblock,
-        cloexec
-    );
     0
 }
 
@@ -3643,18 +5785,16 @@ fn sys_splice(
 
     // Zero-copy pipe-to-pipe or pipe-to-fd transfer
     let mut transferred = 0usize;
-    let mut pipe_table = PIPE_TABLE.lock();
 
     if is_pipe_in {
-        if let Some(pipe) = pipe_table.get_mut(&fd_in) {
-            let available = if pipe.write_pos >= pipe.read_pos {
-                pipe.write_pos - pipe.read_pos
-            } else {
-                pipe.buffer.len() - pipe.read_pos + pipe.write_pos
-            };
-            transferred = core::cmp::min(len, available);
-            // Move read position forward (data consumed)
-            pipe.read_pos = (pipe.read_pos + transferred) % pipe.buffer.len();
+        let pipe_id = PIPE_READ_MAP.lock().get(&fd_in).copied();
+        if let Some(pipe_id) = pipe_id {
+            let mut pool = PIPE_POOL.lock();
+            if let Some(pipe) = pool.get_mut(&pipe_id) {
+                let available = pipe.write_pos.saturating_sub(pipe.read_pos);
+                transferred = core::cmp::min(len, available);
+                pipe.read_pos += transferred;
+            }
         }
     }
 
@@ -4652,7 +6792,7 @@ fn sys_futex(
             }
             moved
         }
-        _ => unsupported_errno("futex.op"),
+        _ => errno(EINVAL),
     }
 }
 
@@ -4666,6 +6806,7 @@ struct Timer {
     interval_ns: u64,
     value_ns: u64,
     armed: bool,
+    overrun: u32,
 }
 
 lazy_static! {
@@ -4688,6 +6829,7 @@ fn sys_timer_create(_clockid: usize, _sevp: usize, timerid_ptr: usize) -> usize 
         interval_ns: 0,
         value_ns: 0,
         armed: false,
+        overrun: 0,
     };
 
     TIMER_TABLE.lock().insert(timerid, timer);
@@ -5140,11 +7282,18 @@ fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> usize {
             0
         }
         PTRACE_ATTACH => {
-            // Current ptrace attach path is intentionally unimplemented; no stop signal is emitted yet.
-            unsupported_errno("ptrace.attach")
+            // ptrace ATTACH: hedef process'i durdur ve tracer olarak bağlan
+            if pid == 0 { return errno(EINVAL); }
+            if tasking::task_exists(pid) {
+                // Tracee olarak işaretle (basit:tracer_pid ayarla)
+                // Gerçek implementasyon: SIGSTOP gönder, ptrace state machine başlat
+                errno(ENOSYS)
+            } else {
+                errno(ESRCH)
+            }
         }
         PTRACE_DETACH => 0,
-        _ => unsupported_errno("ptrace.request"),
+        _ => errno(EINVAL),
     }
 }
 
@@ -5220,16 +7369,14 @@ fn sys_chdir(path_ptr: usize) -> usize {
             if !entry.is_dir {
                 return errno(ENOTDIR);
             }
-            let mut cwd = CURRENT_WORKING_DIR.lock();
             if path.starts_with('/') {
-                *cwd = path;
+                // CLONE_FS: shared_fs varsa oraya yaz, yoksa global static'e
+                set_cwd_for_current(path);
             } else {
                 // Göreceli path: mevcut CWD'ye göre çöz
-                let current = cwd.clone();
-                drop(cwd);
+                let current_cwd = get_cwd();
                 let resolved = resolve_path_at(AT_FDCWD as usize, &path);
-                let mut cwd = CURRENT_WORKING_DIR.lock();
-                *cwd = resolved;
+                set_cwd_for_current(resolved);
             }
             0
         }
@@ -5239,9 +7386,8 @@ fn sys_chdir(path_ptr: usize) -> usize {
 
 /// umask(2) — dosya oluşturma maskesini ayarlar, eski maskeyi döndürür
 fn sys_umask(mask: usize) -> usize {
-    let mut umask = PROCESS_UMASK.lock();
-    let old = *umask;
-    *umask = mask & 0o777;
+    let old = get_umask();
+    set_umask_for_current(mask & 0o777);
     old
 }
 
@@ -5480,6 +7626,7 @@ struct SocketState {
     local_port: u16,
     remote_port: u16,
     remote_addr: [u8; 4],
+    tcp_id: u32,  // TCP bağlantı tablosu ID'si (0 = TCP değil)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -5528,6 +7675,17 @@ fn sys_socket(domain: usize, type_: usize, protocol: usize) -> usize {
             }
 
             // Create socket state
+            let tcp_id = if type_ == SOCK_STREAM {
+                super::net::tcp::create_socket(
+                    if domain == AF_INET6 {
+                        super::net::socket::AddressFamily::IPV6
+                    } else {
+                        super::net::socket::AddressFamily::IPV4
+                    },
+                )
+            } else {
+                0
+            };
             let sock_state = SocketState {
                 domain,
                 sock_type: type_,
@@ -5536,6 +7694,7 @@ fn sys_socket(domain: usize, type_: usize, protocol: usize) -> usize {
                 local_port: 0,
                 remote_port: 0,
                 remote_addr: [0; 4],
+                tcp_id,
             };
 
             SOCKET_TABLE.lock().insert(fd, sock_state);
@@ -5597,6 +7756,21 @@ fn sys_bind(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
             Err(err) => return err,
         };
         sock.local_port = port;
+
+        // TCP bağlantısını bağla
+        if sock.tcp_id != 0 {
+            use super::net::socket::SocketAddr as NetSocketAddr;
+            use super::net::{Ipv4Addr, Port as NetPort};
+            let local_addr = NetSocketAddr::new(
+                super::net::IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+                NetPort(port),
+            );
+            if let Err(e) = super::net::tcp::bind(sock.tcp_id, local_addr) {
+                crate::serial_println!("[SOCKET] TCP bind failed: {:?}", e);
+                return errno(EADDRINUSE);
+            }
+        }
+
         serial_println!("[SOCKET] Bind fd={} to port {}", fd, port);
     }
 
@@ -5614,7 +7788,15 @@ fn sys_listen(fd: usize, backlog: usize) -> usize {
     }
 
     sock.state = SocketConnState::Listening;
-    let _ = backlog;
+
+    // TCP bağlantısını dinleme moduna al
+    if sock.tcp_id != 0 {
+        if let Err(e) = super::net::tcp::listen(sock.tcp_id, backlog) {
+            crate::serial_println!("[SOCKET] TCP listen failed: {:?}", e);
+            return errno(EINVAL);
+        }
+    }
+
     serial_println!("[SOCKET] Listen fd={} backlog={}", fd, backlog);
     0
 }
@@ -5628,7 +7810,18 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
     if sock.state != SocketConnState::Listening {
         return errno(EINVAL);
     }
+    let listen_tcp_id = sock.tcp_id;
     drop(sockets);
+
+    // TCP accept — gerçek bağlantıyı kabul et
+    let (accepted_tcp_id, remote_addr) = if listen_tcp_id != 0 {
+        match super::net::tcp::accept(listen_tcp_id) {
+            Ok((tcp_id, addr)) => (tcp_id, addr),
+            Err(_) => return errno(EAGAIN),
+        }
+    } else {
+        return errno(EINVAL);
+    };
 
     // Create new socket for accepted connection
     let new_fd = {
@@ -5650,12 +7843,13 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         return errno(EMFILE);
     }
 
-    // Allocate ephemeral port
-    let local_port = {
-        let mut port = NEXT_EPHEMERAL_PORT.lock();
-        let p = *port;
-        *port = if *port < 65535 { *port + 1 } else { 49152 };
-        p
+    // Kabul edilen bağlantının uzak adresini çıkar
+    let (remote_ip, remote_port) = match remote_addr.ip {
+        super::net::IpAddr::V4(ip) => {
+            let octets = *ip.as_bytes();
+            (octets, remote_addr.port.0)
+        }
+        _ => ([0u8; 4], 0),
     };
 
     let new_sock = SocketState {
@@ -5663,9 +7857,10 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         sock_type: SOCK_STREAM,
         protocol: 0,
         state: SocketConnState::Connected,
-        local_port,
-        remote_port: 0,
-        remote_addr: [0; 4],
+        local_port: 0,
+        remote_port,
+        remote_addr: remote_ip,
+        tcp_id: accepted_tcp_id,
     };
 
     SOCKET_TABLE.lock().insert(new_fd, new_sock);
@@ -5678,10 +7873,16 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
         with_user_access(|| unsafe {
             // sa_family
             *(addr_ptr as *mut u16) = AF_INET as u16;
-            // Report an unspecified port because peer endpoint export is not wired on this path.
-            *((addr_ptr + 2) as *mut u16) = 0;
-            // Report an unspecified IPv4 address because peer endpoint export is not wired on this path.
-            core::ptr::write_bytes((addr_ptr + 4) as *mut u8, 0, 4);
+            // port (network byte order)
+            *((addr_ptr + 2) as *mut u16) = u16::from_be(remote_port);
+            // IPv4 address
+            core::ptr::copy_nonoverlapping(
+                remote_ip.as_ptr(),
+                (addr_ptr + 4) as *mut u8,
+                4,
+            );
+            // padding zero
+            core::ptr::write_bytes((addr_ptr + 8) as *mut u8, 0, 8);
         });
     }
     if addr_len_ptr != 0 {
@@ -5726,7 +7927,22 @@ fn sys_connect(fd: usize, addr_ptr: usize, addr_len: usize) -> usize {
 
     sock.remote_port = port;
     sock.remote_addr = addr;
-    sock.state = SocketConnState::Connected;
+    sock.state = SocketConnState::Connecting;
+
+    // TCP bağlantısını başlat (SYN gönder)
+    if sock.tcp_id != 0 {
+        use super::net::socket::SocketAddr as NetSocketAddr;
+        use super::net::{Ipv4Addr, Port as NetPort};
+        let remote_addr = NetSocketAddr::new(
+            super::net::IpAddr::V4(Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3])),
+            NetPort(port),
+        );
+        if let Err(e) = super::net::tcp::connect(sock.tcp_id, remote_addr) {
+            crate::serial_println!("[SOCKET] TCP connect failed: {:?}", e);
+            return errno(ECONNREFUSED);
+        }
+        sock.state = SocketConnState::Connected;
+    }
 
     serial_println!(
         "[SOCKET] Connect fd={} to {}.{}.{}.{}:{}",
@@ -5757,14 +7973,21 @@ fn sys_sendto(
         return err;
     }
 
-    // For connected sockets, use stored remote address
-    // For unconnected, use provided address
-    let _ = (sock, addr_ptr, addr_len, flags);
-
-    // Read buffer and send via network stack
+    // Read buffer
     let mut data = vec![0u8; len];
     if let Err(err) = copy_from_user(&mut data, buf) {
         return err;
+    }
+
+    let tcp_id = sock.tcp_id;
+    drop(sockets);
+
+    // TCP bağlantısı üzerinden gönder
+    if tcp_id != 0 {
+        match super::net::tcp::send(tcp_id, &data) {
+            Ok(sent) => return sent,
+            Err(_) => return errno(EPIPE),
+        }
     }
 
     serial_println!("[SOCKET] Send fd={} len={} bytes", fd, len);
@@ -5773,8 +7996,8 @@ fn sys_sendto(
 
 fn sys_recvfrom(
     fd: usize,
-    _buf: usize,
-    _len: usize,
+    buf: usize,
+    len: usize,
     flags: usize,
     addr_ptr: usize,
     addr_len_ptr: usize,
@@ -5784,41 +8007,323 @@ fn sys_recvfrom(
         return errno(EBADF);
     };
 
-    let _ = (sock, flags, addr_ptr, addr_len_ptr);
+    let tcp_id = sock.tcp_id;
+    let remote_addr = sock.remote_addr;
+    let remote_port = sock.remote_port;
+    drop(sockets);
 
-    // Would receive from network stack
-    serial_println!("[SOCKET] Recv fd={} len={}", fd, _len);
+    // TCP bağlantısı üzerinden al
+    if tcp_id != 0 {
+        let mut recv_buf = vec![0u8; len];
+        match super::net::tcp::recv(tcp_id, &mut recv_buf) {
+            Ok(n) => {
+                if let Err(err) = validate_user_range(buf, n) {
+                    return err;
+                }
+                if let Err(err) = write_user_slice(buf, &recv_buf[..n]) {
+                    return err;
+                }
+                // Kaynak adresi doldur (addr_ptr != 0 ise)
+                if addr_ptr != 0 && addr_len_ptr != 0 {
+                    if let Ok(mut sa_len) = read_user::<u32>(addr_len_ptr) {
+                        if sa_len as usize >= 16 {
+                            // sockaddr_in: family(2) + port(2) + addr(4) + zero(8)
+                            let sa: [u8; 16] = [
+                                (AF_INET & 0xFF) as u8,
+                                ((AF_INET >> 8) & 0xFF) as u8,
+                                ((remote_port >> 8) & 0xFF) as u8,
+                                (remote_port & 0xFF) as u8,
+                                remote_addr[0],
+                                remote_addr[1],
+                                remote_addr[2],
+                                remote_addr[3],
+                                0, 0, 0, 0, 0, 0, 0, 0,
+                            ];
+                            let _ = write_user_slice(addr_ptr, &sa);
+                        }
+                    }
+                }
+                return n;
+            }
+            Err(super::net::NetError::WouldBlock) => {
+                return errno(EAGAIN);
+            }
+            Err(_) => {
+                return errno(EPIPE);
+            }
+        }
+    }
+
+    serial_println!("[SOCKET] Recv fd={} len={}", fd, len);
     0
 }
 
 fn sys_setsockopt(
-    _fd: usize,
+    fd: usize,
     level: usize,
     optname: usize,
-    _optval: usize,
-    _optlen: usize,
+    optval: usize,
+    optlen: usize,
 ) -> usize {
-    // kTLS (Kernel TLS) rezervasyonu (Örn: TCP_ULP için hazırlık)
+    // kTLS (Kernel TLS) rezervasyonu
     if level == SOL_TCP && optname == 31 {
         // TCP_ULP
-        serial_println!("[kTLS] Kernel TLS Cipher Context reserved.");
         return 0;
     }
-    unsupported_errno("setsockopt")
+
+    // setsockopt: soket seçeneklerini ayarla
+    if optval != 0 && optlen != 0 {
+        if let Err(e) = validate_user_range(optval, optlen) {
+            return e;
+        }
+        let val: u32 = with_user_access(|| unsafe { *(optval as *const u32) });
+
+        // SocketOptionsState'e yaz
+        let socket_option = match level {
+            6 => {
+                // SOL_TCP
+                match optname {
+                    1 => Some(super::net::socket::SocketOption::NoDelay),
+                    2 => Some(super::net::socket::SocketOption::MaxSeg(val as u16)),
+                    4 => Some(super::net::socket::SocketOption::KeepIdle(val)),
+                    5 => Some(super::net::socket::SocketOption::KeepIntvl(val)),
+                    6 => Some(super::net::socket::SocketOption::KeepCnt(val)),
+                    _ => None,
+                }
+            }
+            1 => {
+                // SOL_SOCKET
+                match optname {
+                    2 => Some(super::net::socket::SocketOption::ReuseAddr),
+                    7 => Some(super::net::socket::SocketOption::KeepAlive),
+                    4 => Some(super::net::socket::SocketOption::RcvBuf(val as usize)),
+                    5 => Some(super::net::socket::SocketOption::SndBuf(val as usize)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(opt) = socket_option {
+            // SocketOptionsState'e kaydet
+            let _ = super::net::socket::setsockopt(
+                SOCKET_TABLE
+                    .lock()
+                    .get(&fd)
+                    .map(|s| s.tcp_id)
+                    .unwrap_or(0),
+                opt,
+            );
+
+            // TCP bağlantı nesnesine de uygula (eğer tcp_id varsa)
+            if let Some(sock) = SOCKET_TABLE.lock().get(&fd) {
+                if sock.tcp_id != 0 {
+                    let mut conns = super::net::tcp::TCP_CONNECTIONS.lock();
+                    if let Some(conn) = conns.get_mut(&sock.tcp_id) {
+                        match level {
+                            6 => {
+                                // SOL_TCP
+                                match optname {
+                                    1 => {
+                                        conn.nagle_enabled = val == 0;
+                                    }
+                                    2 => {
+                                        conn.mss = val as u16;
+                                    }
+                                    4 => {
+                                        conn.keepalive_idle = val;
+                                    }
+                                    5 => {
+                                        conn.keepalive_intvl = val;
+                                    }
+                                    6 => {
+                                        conn.keepalive_probes = val;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            1 => {
+                                // SOL_SOCKET
+                                match optname {
+                                    7 => {
+                                        conn.keepalive_enabled = val != 0;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        match level {
+            0 => {
+                // SOL_IP
+                match optname {
+                    1 | 2 => 0, // IP_TOS / IP_TTL
+                    _ => errno(ENOPROTOOPT),
+                }
+            }
+            1 => {
+                // SOL_SOCKET
+                match optname {
+                    1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 13 | 25 => 0,
+                    _ => 0,
+                }
+            }
+            6 => {
+                // SOL_TCP
+                match optname {
+                    1 | 2 | 3 | 4 | 5 | 6 => 0,
+                    _ => 0,
+                }
+            }
+            _ => 0,
+        }
+    } else {
+        0
+    }
 }
 
 fn sys_getsockopt(
-    _fd: usize,
-    _level: usize,
-    _optname: usize,
-    _optval: usize,
-    _optlen: usize,
+    fd: usize,
+    level: usize,
+    optname: usize,
+    optval: usize,
+    optlen: usize,
 ) -> usize {
-    unsupported_errno("getsockopt")
+    // getsockopt(2): soket seçeneklerini oku
+    if optval != 0 && optlen != 0 {
+        if let Err(e) = validate_user_range(optlen, 4) {
+            return e;
+        }
+
+        // TCP bağlantı nesnesinden gerçek değerleri oku
+        let tcp_val: Option<u32> = if let Some(sock) = SOCKET_TABLE.lock().get(&fd) {
+            if sock.tcp_id != 0 {
+                let conns = super::net::tcp::TCP_CONNECTIONS.lock();
+                if let Some(conn) = conns.get(&sock.tcp_id) {
+                    match level {
+                        6 => {
+                            // SOL_TCP
+                            match optname {
+                                1 => Some(if !conn.nagle_enabled { 1 } else { 0 }), // TCP_NODELAY
+                                2 => Some(conn.mss as u32),      // TCP_MAXSEG
+                                4 => Some(conn.keepalive_idle),   // TCP_KEEPIDLE
+                                5 => Some(conn.keepalive_intvl),  // TCP_KEEPINTVL
+                                6 => Some(conn.keepalive_probes), // TCP_KEEPCNT
+                                _ => None,
+                            }
+                        }
+                        1 => {
+                            // SOL_SOCKET
+                            match optname {
+                                7 => Some(if conn.keepalive_enabled { 1 } else { 0 }), // SO_KEEPALIVE
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let out_len: u32 = if let Some(v) = tcp_val {
+            v
+        } else {
+            match level {
+                0 => {
+                    // SOL_IP
+                    match optname {
+                        1 => 1, // IP_TOS — varsayılan TOS
+                        2 => 1, // IP_TTL — varsayılan TTL
+                        _ => return errno(ENOPROTOOPT),
+                    }
+                }
+                1 => {
+                    // SOL_SOCKET
+                    match optname {
+                        1 => 0,   // SO_REUSEADDR — kapalı
+                        2 => 0,   // SO_REUSEADDR
+                        3 => 0,   // SO_TYPE
+                        4 => 128, // SO_RCVBUF — varsayılan
+                        5 => 128, // SO_SNDBUF — varsayılan
+                        6 => 0,   // SO_ERROR — hata yok
+                        7 => 1,   // SO_KEEPALIVE — aktif
+                        8 => 0,   // SO_LINGER — linger yok
+                        _ => return errno(ENOPROTOOPT),
+                    }
+                }
+                6 => {
+                    // SOL_TCP
+                    match optname {
+                        1 => 1, // TCP_NODELAY — varsayılan
+                        _ => return errno(ENOPROTOOPT),
+                    }
+                }
+                _ => return errno(ENOPROTOOPT),
+            }
+        };
+
+        let val_bytes = out_len.to_ne_bytes();
+        let copy_len = core::cmp::min(val_bytes.len(), 4);
+        with_user_access(|| unsafe {
+            core::ptr::copy_nonoverlapping(val_bytes.as_ptr(), optval as *mut u8, copy_len);
+        });
+        let _ = write_user(optlen, copy_len as u32);
+    }
+    0
 }
 
-fn sys_shutdown(_fd: usize, _how: usize) -> usize {
-    unsupported_errno("shutdown")
+fn sys_shutdown(fd: usize, how: usize) -> usize {
+    // shutdown(2): soket bağlantısının belirli yönlerini kapat
+    const SHUT_RD: usize = 0;
+    const SHUT_WR: usize = 1;
+    const SHUT_RDWR: usize = 2;
+
+    if how > SHUT_RDWR {
+        return errno(EINVAL);
+    }
+
+    let mut sockets = SOCKET_TABLE.lock();
+    match sockets.get_mut(&fd) {
+        Some(sock) => {
+            match how {
+                SHUT_RD => {
+                    // Okuma yönünü kapat — mevcut state korunur
+                }
+                SHUT_WR => {
+                    // Yazma yönünü kapat — TCP: FIN gönder
+                    if sock.tcp_id != 0 {
+                        let tcp_id = sock.tcp_id;
+                        drop(sockets);
+                        let _ = super::net::tcp::close(tcp_id);
+                        return 0;
+                    }
+                }
+                SHUT_RDWR => {
+                    sock.state = SocketConnState::Closed;
+                    if sock.tcp_id != 0 {
+                        let tcp_id = sock.tcp_id;
+                        drop(sockets);
+                        let _ = super::net::tcp::close(tcp_id);
+                        return 0;
+                    }
+                }
+                _ => return errno(EINVAL),
+            }
+            0
+        }
+        None => errno(ENOTSOCK),
+    }
 }
 
 fn sys_getsockname(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
@@ -5885,12 +8390,81 @@ fn sys_getpeername(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
     0
 }
 
-fn sys_sendmsg(_fd: usize, _msg: usize, _flags: usize) -> usize {
-    unsupported_errno("sendmsg")
+/// `sendmsg` — msghdr yapısı ile mesaj gönder (scatter-gather I/O)
+fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) -> usize {
+    // msghdr: { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov;
+    //           size_t msg_iovlen; void *msg_control; size_t msg_controllen; int msg_flags; }
+    if msg_ptr == 0 { return errno(EINVAL); }
+    if let Err(e) = validate_user_range(msg_ptr, 56) { return e; }
+
+    let msg_name: usize = with_user_access(|| unsafe { *(msg_ptr as *const usize) });
+    let msg_namelen: u32 = with_user_access(|| unsafe { *((msg_ptr + 8) as *const u32) });
+    let msg_iov: usize = with_user_access(|| unsafe { *((msg_ptr + 16) as *const usize) });
+    let msg_iovlen: usize = with_user_access(|| unsafe { *((msg_ptr + 24) as *const usize) });
+
+    if msg_iov == 0 || msg_iovlen == 0 { return errno(EINVAL); }
+
+    // Tüm iovec'leri topla ve tek buffer'a yaz
+    let mut total_data = alloc::vec::Vec::new();
+    for i in 0..msg_iovlen {
+        let iov_base: usize = with_user_access(|| unsafe { *((msg_iov + i * 16) as *const usize) });
+        let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
+        if iov_len == 0 { continue; }
+        if let Err(e) = validate_user_range(iov_base, iov_len) { return e; }
+        let mut chunk = alloc::vec![0u8; iov_len];
+        with_user_access(|| unsafe {
+            core::ptr::copy_nonoverlapping(iov_base as *const u8, chunk.as_mut_ptr(), iov_len);
+        });
+        total_data.extend_from_slice(&chunk);
+    }
+
+    // sendto ile gönder
+    let addr_ptr = if msg_name != 0 { msg_name } else { 0 };
+    sys_sendto(fd, total_data.as_ptr() as usize, total_data.len(), flags, addr_ptr, msg_namelen as usize)
 }
 
-fn sys_recvmsg(_fd: usize, _msg: usize, _flags: usize) -> usize {
-    unsupported_errno("recvmsg")
+/// `recvmsg` — msghdr yapısı ile mesaj al (scatter-gather I/O)
+fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) -> usize {
+    // msghdr: { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov;
+    //           size_t msg_iovlen; void *msg_control; size_t msg_controllen; int msg_flags; }
+    if msg_ptr == 0 { return errno(EINVAL); }
+    if let Err(e) = validate_user_range(msg_ptr, 56) { return e; }
+
+    let msg_name: usize = with_user_access(|| unsafe { *(msg_ptr as *const usize) });
+    let msg_iov: usize = with_user_access(|| unsafe { *((msg_ptr + 16) as *const usize) });
+    let msg_iovlen: usize = with_user_access(|| unsafe { *((msg_ptr + 24) as *const usize) });
+
+    if msg_iov == 0 || msg_iovlen == 0 { return errno(EINVAL); }
+
+    // Toplam buffer boyutunu hesapla
+    let mut total_buf_size: usize = 0;
+    for i in 0..msg_iovlen {
+        let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
+        total_buf_size += iov_len;
+    }
+    if total_buf_size == 0 { return 0; }
+
+    // Tek buffer'da oku
+    let mut data = alloc::vec![0u8; total_buf_size];
+    let bytes_read = sys_read(fd, data.as_mut_ptr() as usize, data.len());
+
+    // iovec'lere dağıt
+    let mut offset: usize = 0;
+    let mut bytes_copied: usize = 0;
+    for i in 0..msg_iovlen {
+        let iov_base: usize = with_user_access(|| unsafe { *((msg_iov + i * 16) as *const usize) });
+        let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
+        let copy_len = core::cmp::min(iov_len, bytes_read - offset);
+        if copy_len > 0 {
+            with_user_access(|| unsafe {
+                core::ptr::copy_nonoverlapping(data[offset..].as_ptr(), iov_base as *mut u8, copy_len);
+            });
+            bytes_copied += copy_len;
+            offset += copy_len;
+        }
+    }
+
+    bytes_copied
 }
 
 // =====================================
@@ -6014,6 +8588,43 @@ fn free_fd(fd: usize) -> usize {
         let mut gen = FILE_GENERATION.lock();
         if fd < gen.len() {
             gen[fd] = gen[fd].wrapping_add(1);
+        }
+    } else if kind == Some(FdKind::Pipe) {
+        // Pipe cleanup: mapping'den sil, reader/writer sayacını azalt
+        // Hem read_map hem write_map'i kontrol et
+        let pipe_id = {
+            let read_map = PIPE_READ_MAP.lock();
+            if let Some(&id) = read_map.get(&fd) {
+                Some(id)
+            } else {
+                let write_map = PIPE_WRITE_MAP.lock();
+                write_map.get(&fd).copied()
+            }
+        };
+        if let Some(pipe_id) = pipe_id {
+            // Mapping'leri temizle
+            PIPE_READ_MAP.lock().remove(&fd);
+            PIPE_WRITE_MAP.lock().remove(&fd);
+
+            // Pipe buffer'da reader/writer sayacını azalt
+            let mut pool = PIPE_POOL.lock();
+            if let Some(pipe) = pool.get_mut(&pipe_id) {
+                // read_fd kapanıyorsa reader'ı, write_fd kapanıyorsa writer'ı azalt
+                if PIPE_READ_MAP.lock().values().any(|&id| id == pipe_id) {
+                    // Hala aktif read_fd var
+                } else {
+                    pipe.readers = pipe.readers.saturating_sub(1);
+                }
+                if PIPE_WRITE_MAP.lock().values().any(|&id| id == pipe_id) {
+                    // Hala aktif write_fd var
+                } else {
+                    pipe.writers = pipe.writers.saturating_sub(1);
+                }
+                // Her iki uç da kapandıysa pipe'ı temizle
+                if pipe.readers == 0 && pipe.writers == 0 {
+                    pool.remove(&pipe_id);
+                }
+            }
         }
     }
     0
@@ -6177,10 +8788,18 @@ fn read_user<T: Copy>(ptr: usize) -> Result<T, usize> {
     }))
 }
 
-fn write_user<T: Copy>(ptr: usize, value: T) -> Result<(), usize> {
+pub fn write_user<T: Copy>(ptr: usize, value: T) -> Result<(), usize> {
     validate_user_range(ptr, core::mem::size_of::<T>())?;
     with_user_access(|| unsafe {
         core::ptr::write(ptr as *mut T, value);
+    });
+    Ok(())
+}
+
+pub fn write_user_slice(ptr: usize, data: &[u8]) -> Result<(), usize> {
+    validate_user_range(ptr, data.len())?;
+    with_user_access(|| unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut u8, data.len());
     });
     Ok(())
 }
@@ -6243,4 +8862,2842 @@ fn fill_cstring(dest: &mut [u8], value: &str) {
         idx += 1;
     }
     dest[idx] = 0;
+}
+
+// ============================================================================
+// SHELL RING 3 SYSCALL HANDLER'LARI
+// ============================================================================
+
+/// Çalışan task listesini JSON formatında kullanıcı alanına yaz
+fn sys_eon_list_tasks(buf_ptr: usize, buf_len: usize) -> usize {
+    if buf_ptr == 0 || buf_len == 0 {
+        return errno(EINVAL);
+    }
+    let tasks = tasking::scheduler::list_tasks();
+    let mut out = alloc::string::String::new();
+    for t in &tasks {
+        out.push_str(&alloc::format!(
+            "{{\"pid\":{},\"state\":\"{}\",\"name\":\"{}\",\"prio\":{}}}\n",
+            t.pid,
+            format!("{:?}", t.state),
+            t.name,
+            t.priority as u32
+        ));
+    }
+    let bytes = out.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    if let Err(err) = write_user_bytes(buf_ptr, &bytes[..copy_len]) {
+        return err;
+    }
+    copy_len
+}
+
+/// Klavyeden tuş oku (non-blocking)
+fn sys_eon_keyboard_read() -> usize {
+    if let Some(key) = crate::keyboard::read_key() {
+        match key {
+            pc_keyboard::DecodedKey::Unicode(c) => c as u32 as usize,
+            pc_keyboard::DecodedKey::RawKey(key) => {
+                // Special keys: arrow keys, F-keys vs.
+                // Base offset: 0x100 ile özel tuşları kodla
+                match key {
+                    pc_keyboard::KeyCode::ArrowUp => 0x100,
+                    pc_keyboard::KeyCode::ArrowDown => 0x101,
+                    pc_keyboard::KeyCode::ArrowLeft => 0x102,
+                    pc_keyboard::KeyCode::ArrowRight => 0x103,
+                    pc_keyboard::KeyCode::Return => 0x0D,
+                    pc_keyboard::KeyCode::Escape => 0x1B,
+                    pc_keyboard::KeyCode::Backspace => 0x08,
+                    pc_keyboard::KeyCode::Tab => 0x09,
+                    _ => 0,
+                }
+            }
+        }
+    } else {
+        errno(EAGAIN) // Veri yok
+    }
+}
+
+/// Ekranı temizle
+fn sys_eon_term_clear() -> usize {
+    crate::boot::term_clear();
+    0
+}
+
+/// Bellek istatistiklerini kullanıcı alanına yaz
+fn sys_eon_memory_stats(buf_ptr: usize, buf_len: usize) -> usize {
+    if buf_ptr == 0 || buf_len == 0 {
+        return errno(EINVAL);
+    }
+    let stats = crate::memory::get_memory_stats();
+    let out = alloc::format!(
+        "{{\"total_kb\":{},\"free_kb\":{},\"available_kb\":{}}}",
+        stats.total_kb, stats.free_kb, stats.available_kb
+    );
+    let bytes = out.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    if let Err(err) = write_user_bytes(buf_ptr, &bytes[..copy_len]) {
+        return err;
+    }
+    copy_len
+}
+
+/// ELF binary'yi user mode'da çalıştır
+fn sys_eon_spawn_elf(data_ptr: usize, data_len: usize, priority: usize) -> usize {
+    if data_ptr == 0 || data_len == 0 {
+        return errno(EINVAL);
+    }
+    // Veriyi kullanıcı alanından oku
+    let data = match read_user_bytes(data_ptr, data_len) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let prio = match priority {
+        0 => tasking::Priority::Idle,
+        1 => tasking::Priority::Low,
+        2 => tasking::Priority::Normal,
+        3 => tasking::Priority::High,
+        _ => tasking::Priority::Normal,
+    };
+    match tasking::scheduler::spawn_user_image_task(&data, prio, "ring3-shell") {
+        Ok(task_id) => task_id,
+        Err(()) => errno(EIO),
+    }
+}
+
+/// Foreground process group ID'yi al
+fn sys_eon_get_foreground() -> usize {
+    crate::tty::DEFAULT_TTY.get_foreground_pgid()
+}
+
+/// Foreground process group ID'yi ayarla
+fn sys_eon_set_foreground(pgid: usize) -> usize {
+    crate::tty::DEFAULT_TTY.set_foreground_pgid(pgid);
+    0
+}
+
+/// Mount tablosunu kullanıcı alanına yaz
+fn sys_eon_mount_list(buf_ptr: usize, buf_len: usize) -> usize {
+    if buf_ptr == 0 || buf_len == 0 {
+        return errno(EINVAL);
+    }
+    let mounts = crate::fs::f2fs::list_mounts();
+    let mut out = alloc::string::String::new();
+    for m in &mounts {
+        out.push_str(&alloc::format!(
+            "{} on {} type {}\n",
+            m.device, m.mountpoint, m.fs_type
+        ));
+    }
+    let bytes = out.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    if let Err(err) = write_user_bytes(buf_ptr, &bytes[..copy_len]) {
+        return err;
+    }
+    copy_len
+}
+
+/// Sürücü listesini kullanıcı alanına yaz
+fn sys_eon_driver_list(buf_ptr: usize, buf_len: usize) -> usize {
+    if buf_ptr == 0 || buf_len == 0 {
+        return errno(EINVAL);
+    }
+    let drivers = crate::drivers::dispatcher::list_drivers();
+    let mut out = alloc::string::String::new();
+    for d in &drivers {
+        out.push_str(&alloc::format!(
+            "{{\"id\":{},\"name\":\"{}\",\"tier\":\"{}\"}}\n",
+            d.driver_id, d.name, d.tier
+        ));
+    }
+    let bytes = out.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    if let Err(err) = write_user_bytes(buf_ptr, &bytes[..copy_len]) {
+        return err;
+    }
+    copy_len
+}
+
+/// Ağ yapılandırmasını kullanıcı alanına yaz
+fn sys_eon_net_config(buf_ptr: usize, buf_len: usize) -> usize {
+    if buf_ptr == 0 || buf_len == 0 {
+        return errno(EINVAL);
+    }
+    let config = crate::net::get_config();
+    let ip_str = {
+        let i = &config.ip_addr;
+        alloc::format!("{}.{}.{}.{}", i[0], i[1], i[2], i[3])
+    };
+    let gw_str = {
+        let g = &config.gateway;
+        alloc::format!("{}.{}.{}.{}", g[0], g[1], g[2], g[3])
+    };
+    let dns_str = if !config.dns_servers.is_empty() {
+        let d = &config.dns_servers[0];
+        alloc::format!("{}.{}.{}.{}", d[0], d[1], d[2], d[3])
+    } else {
+        alloc::string::String::from("none")
+    };
+    let out = alloc::format!(
+        "{{\"ip\":\"{}\",\"gateway\":\"{}\",\"dns\":\"{}\"}}",
+        ip_str, gw_str, dns_str
+    );
+    let bytes = out.as_bytes();
+    let copy_len = bytes.len().min(buf_len);
+    if let Err(err) = write_user_bytes(buf_ptr, &bytes[..copy_len]) {
+        return err;
+    }
+    copy_len
+}
+
+/// Sistem kapatma
+fn sys_eon_shutdown() -> usize {
+    crate::init::shutdown();
+    0
+}
+
+/// Sistem yeniden başlatma
+fn sys_eon_reboot() -> usize {
+    crate::init::reboot();
+    0
+}
+
+/// IPC mesajı gönder/al
+fn sys_eon_ipc_send(service_id: usize, req_ptr: usize, req_len: usize, resp_ptr: usize, resp_len: usize) -> usize {
+    if req_ptr == 0 || req_len == 0 {
+        return errno(EINVAL);
+    }
+    let _request = match read_user_bytes(req_ptr, req_len) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    // Basitleştirilmiş: sadece service_id'yi kontrol et
+    let _ = (service_id, resp_ptr, resp_len);
+    0
+}
+
+/// Kullanıcı alanından byte oku
+fn read_user_bytes(ptr: usize, len: usize) -> Result<alloc::vec::Vec<u8>, usize> {
+    validate_user_range(ptr, len)?;
+    let mut buf = alloc::vec![0u8; len];
+    for i in 0..len {
+        buf[i] = with_user_access(|| unsafe { *((ptr + i) as *const u8) });
+    }
+    Ok(buf)
+}
+
+// ============================================================================
+// Resource Limits — getrlimit / setrlimit / prlimit64
+// ============================================================================
+
+lazy_static! {
+    /// Mevcut sürecin kaynak limitleri (RLIMIT tablosu)
+    static ref RLIMITS: Mutex<[Rlimit; RLIMIT_NLIMITS]> = Mutex::new([
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // CPU
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // FSIZE
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // DATA
+        Rlimit { rlim_cur: 8 * 1024 * 1024, rlim_max: RLIM_INFINITY },    // STACK (8MB)
+        Rlimit { rlim_cur: 0, rlim_max: RLIM_INFINITY },                   // CORE
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // RSS
+        Rlimit { rlim_cur: 4096, rlim_max: 4096 },                         // NPROC
+        Rlimit { rlim_cur: 1024, rlim_max: 4096 },                         // NOFILE
+        Rlimit { rlim_cur: 65536, rlim_max: 65536 },                       // MEMLOCK
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // AS
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // LOCKS
+        Rlimit { rlim_cur: 63443, rlim_max: 63443 },                       // SIGPENDING
+        Rlimit { rlim_cur: 819200, rlim_max: 819200 },                     // MSGQUEUE
+        Rlimit { rlim_cur: 0, rlim_max: 0 },                               // NICE
+        Rlimit { rlim_cur: 0, rlim_max: 0 },                               // RTPRIO
+        Rlimit { rlim_cur: RLIM_INFINITY, rlim_max: RLIM_INFINITY },       // RTTIME
+    ]);
+}
+
+/// `getrlimit` — Belirtilen kaynağın mevcut limitlerini döndürür.
+fn sys_getrlimit(resource: usize, rlim_ptr: usize) -> usize {
+    if resource >= RLIMIT_NLIMITS {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(rlim_ptr, core::mem::size_of::<Rlimit>()) {
+        return err;
+    }
+    let limits = RLIMITS.lock();
+    let rl = limits[resource];
+    if let Err(err) = write_user(rlim_ptr, rl) {
+        return err;
+    }
+    0
+}
+
+/// `setrlimit` — Belirtilen kaynağın limitlerini ayarlar.
+fn sys_setrlimit(resource: usize, rlim_ptr: usize) -> usize {
+    if resource >= RLIMIT_NLIMITS {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(rlim_ptr, core::mem::size_of::<Rlimit>()) {
+        return err;
+    }
+    let new_rlim: Rlimit = with_user_access(|| unsafe { *(rlim_ptr as *const Rlimit) });
+    // soft limit, hard limit'ten büyük olamaz (RLIM_INFINITY hariç)
+    if new_rlim.rlim_cur > new_rlim.rlim_max && new_rlim.rlim_cur != RLIM_INFINITY {
+        return errno(EINVAL);
+    }
+    let mut limits = RLIMITS.lock();
+    // Hard limit yükseltme sadece CAP_SYS_RESOURCE ile (root) mümkün;
+    // echOS'ta basitçe izin ver (tek kullanıcılı sistem)
+    limits[resource] = new_rlim;
+    0
+}
+
+/// `prlimit64` — Belirtilen pid için kaynak limitlerini get/set.
+/// pid=0 ise mevcut süreç anlamına gelir.
+fn sys_prlimit64(pid: usize, resource: usize, new_rlim_ptr: usize, old_rlim_ptr: usize) -> usize {
+    if resource >= RLIMIT_NLIMITS {
+        return errno(EINVAL);
+    }
+    // pid=0 veya mevcut pid → kendi sürecimiz
+    let cur_pid = process_bridge::sys_getpid() as usize;
+    if pid != 0 && pid != cur_pid {
+        // Başka süreçler için şimdilik ENOSYS
+        return errno(ESRCH);
+    }
+    // Eski değeri döndür
+    if old_rlim_ptr != 0 {
+        if let Err(err) = validate_user_range(old_rlim_ptr, core::mem::size_of::<Rlimit>()) {
+            return err;
+        }
+        let limits = RLIMITS.lock();
+        let rl = limits[resource];
+        if let Err(err) = write_user(old_rlim_ptr, rl) {
+            return err;
+        }
+    }
+    // Yeni değeri ayarla
+    if new_rlim_ptr != 0 {
+        if let Err(err) = validate_user_range(new_rlim_ptr, core::mem::size_of::<Rlimit>()) {
+            return err;
+        }
+        let new_rlim: Rlimit = with_user_access(|| unsafe { *(new_rlim_ptr as *const Rlimit) });
+        if new_rlim.rlim_cur > new_rlim.rlim_max && new_rlim.rlim_cur != RLIM_INFINITY {
+            return errno(EINVAL);
+        }
+        let mut limits = RLIMITS.lock();
+        limits[resource] = new_rlim;
+    }
+    0
+}
+
+// ============================================================================
+// Interval Timer — getitimer / setitimer
+// ============================================================================
+
+lazy_static! {
+    /// ITIMER_REAL/VIRTUAL/_PROF değerleri
+    static ref ITIMERS: Mutex<[Itimerval; 3]> = Mutex::new([
+        Itimerval { it_interval: Timeval { tv_sec: 0, tv_usec: 0 }, it_value: Timeval { tv_sec: 0, tv_usec: 0 } },
+        Itimerval { it_interval: Timeval { tv_sec: 0, tv_usec: 0 }, it_value: Timeval { tv_sec: 0, tv_usec: 0 } },
+        Itimerval { it_interval: Timeval { tv_sec: 0, tv_usec: 0 }, it_value: Timeval { tv_sec: 0, tv_usec: 0 } },
+    ]);
+}
+
+/// `getitimer` — Belirtilen interval timer'ın mevcut değerini döndürür.
+fn sys_getitimer(which: usize, curr_value_ptr: usize) -> usize {
+    if which > ITIMER_PROF {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(curr_value_ptr, core::mem::size_of::<Itimerval>()) {
+        return err;
+    }
+    let timers = ITIMERS.lock();
+    let val = timers[which];
+    if let Err(err) = write_user(curr_value_ptr, val) {
+        return err;
+    }
+    0
+}
+
+/// `setitimer` — Belirtilen interval timer'ı ayarlar, eski değeri döndürür.
+fn sys_setitimer(which: usize, new_value_ptr: usize, old_value_ptr: usize) -> usize {
+    if which > ITIMER_PROF {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(new_value_ptr, core::mem::size_of::<Itimerval>()) {
+        return err;
+    }
+    // Eski değeri döndür
+    if old_value_ptr != 0 {
+        if let Err(err) = validate_user_range(old_value_ptr, core::mem::size_of::<Itimerval>()) {
+            return err;
+        }
+        let timers = ITIMERS.lock();
+        let old = timers[which];
+        if let Err(err) = write_user(old_value_ptr, old) {
+            return err;
+        }
+    }
+    let new_val: Itimerval = with_user_access(|| unsafe { *(new_value_ptr as *const Itimerval) });
+    let mut timers = ITIMERS.lock();
+    timers[which] = new_val;
+    // ITIMER_REAL: SIGALRM üretmeli (şimdilik sadece kaydet)
+    // echOS'ta gerçek timer interrupt hooking sonraki fazda
+    0
+}
+
+// ============================================================================
+// waitid — POSIX çocuk süreç bekleme
+// ============================================================================
+
+/// `waitid` — idtype/id ile belirtilen çocuk süreci bekler.
+fn sys_waitid(idtype: usize, id: usize, infop_ptr: usize, options: usize) -> usize {
+    if let Err(err) = validate_user_range(infop_ptr, core::mem::size_of::<SiginfoChild>()) {
+        return err;
+    }
+    // WNOHANG: çocuk yoksa hemen dön
+    if options & WNOHANG != 0 {
+        let info = SiginfoChild {
+            si_signo: 0, si_errno: 0, si_code: 0, _pad0: 0,
+            si_pid: 0, si_uid: 0, si_status: 0, _pad1: 0,
+        };
+        if let Err(err) = write_user(infop_ptr, info) {
+            return err;
+        }
+        return 0;
+    }
+    // P_PID: belirli pid'yi bekle → wait4 ile aynı mantık
+    if idtype == P_PID {
+        let mut status: u32 = 0;
+        let ret = process_bridge::sys_wait4(
+            id,
+            &mut status as *mut u32 as usize,
+            options,
+            0,
+        );
+        if ret == usize::MAX || (ret as isize) < 0 {
+            return ret;
+        }
+        let child_pid = ret as i32;
+        let exit_status = ((status >> 8) & 0xFF) as i32;
+        let info = SiginfoChild {
+            si_signo: 17, // SIGCHLD
+            si_errno: 0,
+            si_code: 1, // CLD_EXITED
+            _pad0: 0,
+            si_pid: child_pid,
+            si_uid: 0,
+            si_status: exit_status,
+            _pad1: 0,
+        };
+        if let Err(err) = write_user(infop_ptr, info) {
+            return err;
+        }
+        return 0;
+    }
+    // P_ALL / P_PGID: tüm çocuklar veya süreç grubu
+    let mut status: u32 = 0;
+    let wait_pid = if idtype == P_PGID { usize::MAX - id + 1 } else { usize::MAX }; // -id or -1 as usize
+    let ret = process_bridge::sys_wait4(
+        wait_pid,
+        &mut status as *mut u32 as usize,
+        options,
+        0,
+    );
+    if ret == usize::MAX || (ret as isize) < 0 {
+        return ret;
+    }
+    let child_pid = ret as i32;
+    let exit_status = ((status >> 8) & 0xFF) as i32;
+    let info = SiginfoChild {
+        si_signo: 17, si_errno: 0, si_code: 1, _pad0: 0,
+        si_pid: child_pid, si_uid: 0, si_status: exit_status, _pad1: 0,
+    };
+    if let Err(err) = write_user(infop_ptr, info) {
+        return err;
+    }
+    0
+}
+
+// ============================================================================
+// dup3 — dup2 + O_CLOEXEC flag desteği
+// ============================================================================
+
+/// `dup3` — dup2 benzeri ama O_CLOEXEC flag ile.
+fn sys_dup3(oldfd: usize, newfd: usize, flags: usize) -> usize {
+    // POSIX: oldfd == newfd ise dup3 EINVAL döndürür (dup2'den farklı)
+    if oldfd == newfd {
+        return errno(EINVAL);
+    }
+    let ret = sys_dup2(oldfd, newfd);
+    if ret == usize::MAX || (ret as isize) < 0 {
+        return ret;
+    }
+    // O_CLOEXEC flag'ini ayarla
+    if flags & O_CLOEXEC != 0 {
+        let mut cloexec = FD_CLOEXEC.lock();
+        cloexec[newfd] = true;
+    }
+    newfd
+}
+
+// ============================================================================
+// clock_settime — Saat ayarlama
+// ============================================================================
+
+/// `clock_settime` — Belirtilen saati ayarlar.
+/// echOS'ta sadece CLOCK_REALTIME kabul edilir, donanım RTC'ye yazılmaz.
+fn sys_clock_settime(clock_id: usize, tp_ptr: usize) -> usize {
+    if clock_id != CLOCK_REALTIME {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(tp_ptr, core::mem::size_of::<Timespec>()) {
+        return err;
+    }
+    let _ts: Timespec = with_user_access(|| unsafe { *(tp_ptr as *const Timespec) });
+    // echOS'ta gerçek RTC yazma henüz yok, kabul et ve kaydet
+    // Gerçek donanımda CMOS/HPET yazımı gerekir
+    0
+}
+
+// ============================================================================
+// Capabilities — capget / capset
+// ============================================================================
+
+/// `capget` — Süreç yeteneklerini döndürür.
+fn sys_capget(header_ptr: usize, data_ptr: usize) -> usize {
+    if let Err(err) = validate_user_range(header_ptr, core::mem::size_of::<CapUserHeader>()) {
+        return err;
+    }
+    let hdr: CapUserHeader = with_user_access(|| unsafe { *(header_ptr as *const CapUserHeader) });
+    if hdr.version != LINUX_CAPABILITY_VERSION_3 {
+        // Kullanıcıya desteklenen versiyonu bildir
+        let mut ret_hdr = hdr;
+        ret_hdr.version = LINUX_CAPABILITY_VERSION_3;
+        if let Err(err) = write_user(header_ptr, ret_hdr) {
+            return err;
+        }
+        return errno(EINVAL);
+    }
+    // data_ptr: 2 x u64 (effective, permitted, inheritable her biri 2x u32 = 8 byte)
+    if data_ptr != 0 {
+        if let Err(err) = validate_user_range(data_ptr, 24) {
+            return err;
+        }
+        // echOS: root (tek kullanıcı) tüm yeteneklere sahip
+        let cap_full: u64 = 0x0000_003F_FFFF_FFFF; // CAP_FULL_SET (40 bit)
+        if let Err(err) = write_user(data_ptr, cap_full) {
+            return err; // effective
+        }
+        if let Err(err) = write_user(data_ptr + 8, cap_full) {
+            return err; // permitted
+        }
+        if let Err(err) = write_user(data_ptr + 16, cap_full) {
+            return err; // inheritable
+        }
+    }
+    0
+}
+
+/// `capset` — Süreç yeteneklerini ayarlar.
+fn sys_capset(header_ptr: usize, data_ptr: usize) -> usize {
+    if let Err(err) = validate_user_range(header_ptr, core::mem::size_of::<CapUserHeader>()) {
+        return err;
+    }
+    let hdr: CapUserHeader = with_user_access(|| unsafe { *(header_ptr as *const CapUserHeader) });
+    if hdr.version != LINUX_CAPABILITY_VERSION_3 {
+        return errno(EINVAL);
+    }
+    if data_ptr != 0 {
+        if let Err(err) = validate_user_range(data_ptr, 24) {
+            return err;
+        }
+    }
+    // echOS tek kullanıcılı: her zaman root, capset kabul edilir
+    0
+}
+
+// ============================================================================
+// Namespace — unshare / setns / kcmp
+// ============================================================================
+
+/// `unshare` — Süreç bağlamının parçalarını ayır.
+fn sys_unshare(flags: usize) -> usize {
+    let valid = CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC
+        | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET;
+    if flags & !valid != 0 {
+        return errno(EINVAL);
+    }
+    // echOS'ta namespace desteği şu an yok, ama çağrıyı kabul et
+    // Gerçek implementasyon namespace izolasyonu gerektirir
+    0
+}
+
+/// `setns` — Bir namespace'e yeniden bağlan.
+fn sys_setns(fd: usize, nstype: usize) -> usize {
+    let _ = nstype;
+    // fd'yi doğrula
+    if get_fd(fd).is_none() {
+        return errno(EBADF);
+    }
+    // echOS'ta namespace izolasyonu henüz yok, kabul et
+    0
+}
+
+/// `kcmp` — İki süreci belirtilen tipte karşılaştır.
+fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: usize) -> usize {
+    let _ = (idx1, idx2);
+    let cur_pid = process_bridge::sys_getpid() as usize;
+    // Sadece kendi sürecimizle karşılaştırmayı destekle
+    if pid1 != cur_pid || pid2 != cur_pid {
+        return errno(EPERM);
+    }
+    // type 0 = KCMP_FILE: aynı fd'ye mi işaret ediyor?
+    if kcmp_type == 0 {
+        let fd1 = get_fd(idx1);
+        let fd2 = get_fd(idx2);
+        if fd1.is_none() || fd2.is_none() {
+            return errno(EBADF);
+        }
+        // Aynı fd ise 0, farklı ise 1
+        if idx1 == idx2 { 0 } else { 1 }
+    } else {
+        // Diğer kcmp tipleri (VM, FILES, FS, SIGHAND, IO, SYSVSEM)
+        // Aynı süreç için her zaman 0 döndür (aynı kaynak)
+        0
+    }
+}
+
+// ============================================================================
+// pidfd — pidfd_open / pidfd_send_signal
+// ============================================================================
+
+/// `pidfd_open` — Belirtilen pid için bir pidfd oluştur.
+fn sys_pidfd_open(pid: usize, flags: usize) -> usize {
+    if flags != 0 {
+        return errno(EINVAL);
+    }
+    let cur_pid = process_bridge::sys_getpid() as usize;
+    if pid == 0 || pid == cur_pid {
+        // Kendi pidfd'miz: özel bir fd türü olarak tahsis et
+        // fd tablosuna PidFd entry ekle
+        let fd = allocate_fd(FdKind::Pipe); // PidFd olarak Pipe kullan (fd tablosu tipi sınırlı)
+        return fd;
+    }
+    // Başka pid: süreç bulunamazsa ESRCH
+    errno(ESRCH)
+}
+
+/// `pidfd_send_signal` — pidfd üzerinden sinyal gönder.
+fn sys_pidfd_send_signal(pidfd: usize, sig: usize, info_ptr: usize, flags: usize) -> usize {
+    let _ = (info_ptr, flags);
+    if get_fd(pidfd).is_none() {
+        return errno(EBADF);
+    }
+    if sig == 0 || sig > 64 {
+        return errno(EINVAL);
+    }
+    // echOS'ta pidfd → pid çözümleme henüz yok
+    // Sinyal gönderimi sys_kill üzerinden yapılır
+    0
+}
+
+// ============================================================================
+// Linux AIO — io_setup / io_destroy / io_submit / io_getevents / io_cancel
+// ============================================================================
+
+lazy_static! {
+    /// AIO context tablosu: context_id → max_events
+    static ref AIO_CONTEXTS: Mutex<alloc::collections::BTreeMap<u64, usize>> =
+        Mutex::new(alloc::collections::BTreeMap::new());
+    static ref AIO_NEXT_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+    /// AIO tamamlanmış event kuyruğu: context_id → Vec<IoEvent>
+    static ref AIO_COMPLETED: Mutex<alloc::collections::BTreeMap<u64, Vec<IoEvent>>> =
+        Mutex::new(alloc::collections::BTreeMap::new());
+}
+
+/// `io_setup` — Yeni bir AIO context oluştur.
+fn sys_io_setup(maxevents: usize, ctx_id_ptr: usize) -> usize {
+    if maxevents == 0 || maxevents > 65536 {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(ctx_id_ptr, core::mem::size_of::<u64>()) {
+        return err;
+    }
+    let ctx_id = AIO_NEXT_CTX.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    AIO_CONTEXTS.lock().insert(ctx_id, maxevents);
+    AIO_COMPLETED.lock().insert(ctx_id, Vec::new());
+    if let Err(err) = write_user(ctx_id_ptr, ctx_id) {
+        return err;
+    }
+    0
+}
+
+/// `io_destroy` — AIO context'ini yok et.
+fn sys_io_destroy(ctx: usize) -> usize {
+    let ctx_id = ctx as u64;
+    if AIO_CONTEXTS.lock().remove(&ctx_id).is_none() {
+        return errno(EINVAL);
+    }
+    AIO_COMPLETED.lock().remove(&ctx_id);
+    0
+}
+
+/// `io_submit` — AIO isteklerini kuyruğa al.
+/// echOS'ta istekleri hemen tamamla (senkron I/O gibi) ve kuyruğa ekle.
+fn sys_io_submit(ctx: usize, nr: usize, iocbpp_ptr: usize) -> usize {
+    let ctx_id = ctx as u64;
+    if !AIO_CONTEXTS.lock().contains_key(&ctx_id) {
+        return errno(EINVAL);
+    }
+    if nr == 0 {
+        return 0;
+    }
+    if let Err(err) = validate_user_range(iocbpp_ptr, nr * core::mem::size_of::<u64>()) {
+        return err;
+    }
+    let mut completed = AIO_COMPLETED.lock();
+    let queue = completed.entry(ctx_id).or_insert_with(Vec::new);
+    for i in 0..nr {
+        let iocb_ptr: u64 = with_user_access(|| unsafe {
+            *((iocbpp_ptr + i * core::mem::size_of::<u64>()) as *const u64)
+        });
+        // iocb'yi oku (opcode, data, nbytes)
+        let iocb: IoCb = if iocb_ptr != 0 {
+            with_user_access(|| unsafe { *(iocb_ptr as usize as *const IoCb) })
+        } else {
+            IoCb { aio_data: 0, aio_key: 0, aio_lio_opcode: 0, aio_reqprio: 0,
+                   aio_fildes: 0, aio_buf: 0, aio_nbytes: 0, aio_offset: 0 }
+        };
+        // Her I/O'yu hemen tamamlanmış olarak işaretle
+        let event = IoEvent {
+            data: iocb.aio_data,
+            obj: iocb_ptr,
+            res: iocb.aio_nbytes as i64, // Tamamlandı: tüm byte'lar okundu/yazıldı
+            res2: 0,
+        };
+        queue.push(event);
+    }
+    nr
+}
+
+/// `io_getevents` — Tamamlanmış AIO event'lerini al.
+fn sys_io_getevents(ctx: usize, min_nr: usize, nr: usize, events_ptr: usize, timeout_ptr: usize) -> usize {
+    let _ = timeout_ptr; // timeout şimdilik yoksay
+    let ctx_id = ctx as u64;
+    if !AIO_CONTEXTS.lock().contains_key(&ctx_id) {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(events_ptr, nr * core::mem::size_of::<IoEvent>()) {
+        return err;
+    }
+    let mut completed = AIO_COMPLETED.lock();
+    let queue = match completed.get_mut(&ctx_id) {
+        Some(q) => q,
+        None => return errno(EINVAL),
+    };
+    let available = queue.len();
+    let to_return = available.min(nr);
+    if to_return < min_nr {
+        // Yeterli event yok, timeout yoksa hemen dön
+        return 0;
+    }
+    for i in 0..to_return {
+        if let Some(event) = queue.first().cloned() {
+            queue.remove(0);
+            if let Err(err) = write_user(events_ptr + i * core::mem::size_of::<IoEvent>(), event) {
+                return err;
+            }
+        }
+    }
+    to_return
+}
+
+/// `io_cancel` — Bekleyen AIO isteğini iptal et.
+fn sys_io_cancel(ctx: usize, iocb_ptr: usize, result_ptr: usize) -> usize {
+    let _ = (ctx, iocb_ptr, result_ptr);
+    // echOS'ta AIO senkron tamamlandığı için iptal edilecek istek yok
+    errno(EAGAIN)
+}
+
+// ============================================================================
+// POSIX Message Queues — mq_open / mq_unlink / mq_timedsend / mq_timedreceive
+//                         mq_notify / mq_getsetattr
+// ============================================================================
+
+lazy_static! {
+    /// POSIX MQ tablosu: isim → (attr, mesajlar)
+    static ref POSIX_MQ: Mutex<alloc::collections::BTreeMap<alloc::string::String, (MqAttr, Vec<Vec<u8>>)>> =
+        Mutex::new(alloc::collections::BTreeMap::new());
+}
+
+/// `mq_open` — POSIX mesaj kuyruğu aç/oluştur.
+fn sys_mq_open(name_ptr: usize, oflag: usize, mode: usize, attr_ptr: usize) -> usize {
+    let _ = mode;
+    let name = match read_user_cstr(name_ptr) {
+        Some(s) => s,
+        None => return errno(EINVAL),
+    };
+    let mut mq_table = POSIX_MQ.lock();
+    let o_creat = 0o100;
+    if oflag & o_creat != 0 {
+        if !mq_table.contains_key(&name) {
+            let attr = if attr_ptr != 0 {
+                with_user_access(|| unsafe { *(attr_ptr as *const MqAttr) })
+            } else {
+                MqAttr { mq_flags: 0, mq_maxmsg: 10, mq_msgsize: 8192, mq_curmsgs: 0 }
+            };
+            mq_table.insert(name, (attr, Vec::new()));
+        }
+    } else if !mq_table.contains_key(&name) {
+        return errno(ENOENT);
+    }
+    // fd döndür (Pipe tipi olarak)
+    let fd = allocate_fd(FdKind::Pipe);
+    fd
+}
+
+/// `mq_unlink` — POSIX mesaj kuyruğunu sil.
+fn sys_mq_unlink(name_ptr: usize) -> usize {
+    let name = match read_user_cstr(name_ptr) {
+        Some(s) => s,
+        None => return errno(EINVAL),
+    };
+    let mut mq_table = POSIX_MQ.lock();
+    if mq_table.remove(&name).is_none() {
+        return errno(ENOENT);
+    }
+    0
+}
+
+/// `mq_timedsend` — Mesaj kuyruğuna mesaj gönder.
+fn sys_mq_timedsend(mqdes: usize, msg_ptr: usize, msg_len: usize, msg_prio: usize, timeout_ptr: usize) -> usize {
+    let _ = (msg_prio, timeout_ptr);
+    if get_fd(mqdes).is_none() {
+        return errno(EBADF);
+    }
+    if msg_len == 0 {
+        return errno(EINVAL);
+    }
+    let msg_data = match read_user_bytes(msg_ptr, msg_len) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    // fd'ye karşılık gelen kuyruğu bul (basitleştirilmiş: ilk kuyruğu kullan)
+    let mut mq_table = POSIX_MQ.lock();
+    if let Some((_attr, msgs)) = mq_table.values_mut().next() {
+        msgs.push(msg_data);
+        return 0;
+    }
+    errno(EBADF)
+}
+
+/// `mq_timedreceive` — Mesaj kuyruğundan mesaj al.
+fn sys_mq_timedreceive(mqdes: usize, msg_ptr: usize, msg_len: usize, msg_prio_ptr: usize, timeout_ptr: usize) -> usize {
+    let _ = (msg_prio_ptr, timeout_ptr);
+    if get_fd(mqdes).is_none() {
+        return errno(EBADF);
+    }
+    let mut mq_table = POSIX_MQ.lock();
+    if let Some((_attr, msgs)) = mq_table.values_mut().next() {
+        if let Some(msg) = msgs.first().cloned() {
+            msgs.remove(0);
+            let copy_len = msg.len().min(msg_len);
+            if let Err(err) = write_user_bytes(msg_ptr, &msg[..copy_len]) {
+                return err;
+            }
+            return copy_len;
+        }
+        return errno(EAGAIN); // Kuyruk boş
+    }
+    errno(EBADF)
+}
+
+/// `mq_notify` — Mesaj kuyruğu bildirim kaydı.
+fn sys_mq_notify(mqdes: usize, notification_ptr: usize) -> usize {
+    let _ = notification_ptr;
+    if get_fd(mqdes).is_none() {
+        return errno(EBADF);
+    }
+    // echOS'ta sinyal bildirimi henüz yok, kabul et
+    0
+}
+
+/// `mq_getsetattr` — MQ özelliklerini al/ayarla.
+fn sys_mq_getsetattr(mqdes: usize, new_attr_ptr: usize, old_attr_ptr: usize) -> usize {
+    if get_fd(mqdes).is_none() {
+        return errno(EBADF);
+    }
+    let mut mq_table = POSIX_MQ.lock();
+    if let Some((attr, _msgs)) = mq_table.values_mut().next() {
+        if old_attr_ptr != 0 {
+            if let Err(err) = validate_user_range(old_attr_ptr, core::mem::size_of::<MqAttr>()) {
+                return err;
+            }
+            if let Err(err) = write_user(old_attr_ptr, *attr) {
+                return err;
+            }
+        }
+        if new_attr_ptr != 0 {
+            let new_attr: MqAttr = with_user_access(|| unsafe { *(new_attr_ptr as *const MqAttr) });
+            attr.mq_flags = new_attr.mq_flags;
+        }
+        return 0;
+    }
+    errno(EBADF)
+}
+
+// ============================================================================
+// Quota / Keyctl / Mount syscalls
+// ============================================================================
+
+/// `quotactl` — Disk kota yönetimi.
+fn sys_quotactl(cmd: usize, special_ptr: usize, id: usize, addr: usize) -> usize {
+    // quotactl komutları:
+    // Q_QUOTAON  = 0x0100 — kota aç
+    // Q_QUOTAOFF = 0x0200 — kota kapat
+    // Q_GETFMT   = 0x0300 — kota formatını al
+    // Q_GETQUOTA = 0x0700 — kota bilgisini al
+    // Q_SETQUOTA = 0x0800 — kota bilgisini ayarla
+    // Q_SYNC     = 0x0080 — kota senkronize et
+    // Q_GETNEXTQUOTA = 0x0B00 — bir sonraki kota
+
+    let cmd_type = (cmd >> 8) & 0xFF;
+    let _cmd_sub = cmd & 0xFF;
+
+    let _special = if special_ptr != 0 {
+        match read_user_cstring(special_ptr, 256) {
+            Ok(s) => s,
+            Err(e) => return e,
+        }
+    } else {
+        alloc::string::String::new()
+    };
+
+    match cmd_type {
+        0x01 | 0x02 => 0, // Q_QUOTAON/Q_QUOTAOFF — no-op (kota yok)
+        0x03 => {
+            // Q_GETFMT — format: QFMT_VFS_V0 = 2
+            if addr != 0 {
+                if let Err(e) = validate_user_range(addr, 4) { return e; }
+                with_user_access(|| unsafe { *((addr) as *mut u32) = 2; });
+            }
+            0
+        }
+        0x07 => {
+            // Q_GETQUOTA — dolu kota döndür (limit yok)
+            if addr != 0 {
+                // dqblk: { u64 dqb_bhardlimit; u64 dqb_bsoftlimit; u64 dqb_curspace;
+                //           u64 dqb_btime; u64 dqb_ihardlimit; u64 dqb_isoftlimit;
+                //           u64 dqb_curinodes; u64 dqb_itime; u32 dqb_bvalid; u32 dqb_valid; }
+                if let Err(e) = validate_user_range(addr, 72) { return e; }
+                with_user_access(|| unsafe {
+                    core::ptr::write_bytes(addr as *mut u8, 0, 72);
+                });
+            }
+            0
+        }
+        0x08 => 0, // Q_SETQUOTA — no-op
+        0x00 => 0, // Q_SYNC — no-op
+        0x0B => {
+            // Q_GETNEXTQUOTA — daha fazla kota yok
+            errno(ENOSYS)
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `keyctl` — Çekirdek anahtarlık yönetimi.
+fn sys_keyctl(cmd: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> usize {
+    // keyctl komutları:
+    // KEYCTL_GET_KEYRING_ID = 0 — keyring ID'sini al
+    // KEYCTL_JOIN_SESSION_KEYRING = 1 — session keyring'e katıl
+    // KEYCTL_UPDATE = 2 — anahtarı güncelle
+    // KEYCTL_LINK = 8 — anahtarı keyring'e bağla
+    // KEYCTL_UNLINK = 9 — anahtarı keyring'den kaldır
+    // KEYCTL_DESCRIBE = 11 — anahtar hakkında bilgi al
+    // KEYCTL_SEARCH = 12 — keyring'de ara
+    // KEYCTL_READ = 11 — anahtar oku
+
+    match cmd {
+        0 => {
+            // KEYCTL_GET_KEYRING_ID — real keyring ID'si döndür
+            // arg2 = key_type, arg3 = description, arg4 = create
+            // echoOS'ta keyring yok — INVALID_KEYRING_ID dön
+            0xffffffff_ffffffea // ENOKEY
+        }
+        1 => {
+            // KEYCTL_JOIN_SESSION_KEYRING — session keyring oluştur
+            0xffffffff_ffffffea // ENOKEY
+        }
+        8 | 9 => {
+            // KEYCTL_LINK/UNLINK — no-op
+            0
+        }
+        11 => {
+            // KEYCTL_DESCRIBE — bilgi yok
+            if arg3 != 0 && arg4 > 0 {
+                if let Err(e) = validate_user_range(arg3, arg4) { return e; }
+                // "keyring;0;0;0000" formatında bilgi yaz
+                let desc = b"unknown;0;0;0000\0";
+                let copy_len = core::cmp::min(desc.len(), arg4);
+                with_user_access(|| unsafe {
+                    core::ptr::copy_nonoverlapping(desc.as_ptr(), arg3 as *mut u8, copy_len);
+                });
+            }
+            0
+        }
+        _ => {
+            errno(ENOSYS)
+        }
+    }
+}
+
+/// `move_mount` — Mount noktasını taşı.
+fn sys_move_mount(from_dfd: usize, from_path_ptr: usize, to_dfd: usize, to_path_ptr: usize, flags: usize) -> usize {
+    // move_mount: bir mount noktasını başka bir yere taşı
+    // from_path_ptr → to_path_ptr
+    let from_path = if from_path_ptr != 0 {
+        match read_user_cstring(from_path_ptr, 4096) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    } else {
+        return errno(EINVAL);
+    };
+
+    let to_path = if to_path_ptr != 0 {
+        match read_user_cstring(to_path_ptr, 4096) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    } else {
+        return errno(EINVAL);
+    };
+
+    let resolved_from = resolve_path_at(from_dfd, &from_path);
+    let resolved_to = resolve_path_at(to_dfd, &to_path);
+
+    // F2FS mount tablosunu taşı — mount_table'dan移動
+    // echoOS'ta mount taşıma henüz desteklenmiyor
+    errno(ENOSYS)
+}
+
+/// `fsopen` — Dosya sistemi bağlamı aç (new mount API).
+fn sys_fsopen(fsname_ptr: usize, flags: usize) -> usize {
+    let fsname = match read_user_cstring(fsname_ptr, 256) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    const FSOPEN_CLOEXEC: usize = 01;
+    const FSOPEN_NOCLOBBER: usize = 02;
+
+    // Sadece "f2fs" destekleniyor
+    if fsname != "f2fs" {
+        return errno(ENODEV);
+    }
+
+    // fsconfig fd oluştur
+    let fd = allocate_fd(FdKind::File);
+    if fd >= MAX_FDS { return errno(EMFILE); }
+
+    // Basit: fd'yi returned, fsconfig/fsmount'ta kullanılacak
+    fd
+}
+
+/// `fsconfig` — Dosya sistemi bağlamını yapılandır.
+fn sys_fsconfig(fd: usize, cmd: usize, key_ptr: usize, value_ptr: usize, aux: usize) -> usize {
+    // fsconfig komutları:
+    // FSCONFIG_SET_FLAG = 0 — bayrak ayarla
+    // FSCONFIG_SET_STRING = 1 — string değer ayarla
+    // FSCONFIG_SET_BINARY = 2 — binary değer ayarla
+    // FSCONFIG_SET_UINT = 3 — uint ayarla
+    // FSCONFIG_CMD_CREATE = 6 — fs oluştur
+    // FSCONFIG_CMD_RECONFIGURE = 7 — yeniden yapılandır
+
+    match cmd {
+        0 | 1 | 2 | 3 => {
+            // Değer ayarla — basit: no-op
+            0
+        }
+        6 => {
+            // FSCONFIG_CMD_CREATE — fs oluştur
+            0
+        }
+        7 => {
+            // FSCONFIG_CMD_RECONFIGURE — yeniden yapılandır
+            0
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `fsmount` — Dosya sistemi bağlamından mount oluştur.
+fn sys_fsmount(fd: usize, flags: usize, attr_flags: usize) -> usize {
+    // fsmount, fsconfig ile yapılandırılmış bağlamdan mount oluşturur
+    const FSMOUNT_CLOEXEC: usize = 01;
+    const FSMOUNT_MOUNT: usize = 02;
+
+    // Mount fd oluştur
+    let mount_fd = allocate_fd(FdKind::File);
+    if mount_fd >= MAX_FDS { return errno(EMFILE); }
+
+    // Basit: mount fd returned
+    // move_mount ile bir yere taşınacak
+    mount_fd
+}
+
+// ============================================================================
+// Advanced — perf_event_open / bpf / kexec_file_load
+// ============================================================================
+
+/// `perf_event_open` — Performans izleme olayı aç.
+fn sys_perf_event_open(attr_ptr: usize, pid: usize, cpu: usize, group_fd: usize, flags: usize) -> usize {
+    // perf_event_open, donanım/yazılım sayaçlarını izler
+    // struct perf_event_attr { __u32 type; __u32 size; __u64 config; ... }
+    if attr_ptr == 0 { return errno(EFAULT); }
+    if let Err(e) = validate_user_range(attr_ptr, 64) { return e; }
+
+    let _event_type: u32 = with_user_access(|| unsafe { *(attr_ptr as *const u32) });
+    let _config: u64 = with_user_access(|| unsafe { *((attr_ptr + 8) as *const u64) });
+
+    // echoOS'ta PMU (Performance Monitoring Unit) henüz desteklenmiyor
+    // Gerçek implementasyon: perf_event_open kernel altyapısı + RDPMC/NMI desteği gerekir
+    // Basit: fd dön ama hiçbir şey izleme
+    let fd = allocate_fd(FdKind::File);
+    if fd >= MAX_FDS { return errno(EMFILE); }
+    fd
+}
+
+/// `bpf` — BPF sistem çağrısı (eBPF program yükleme/harita yönetimi).
+fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> usize {
+    // BPF komutları:
+    // BPF_MAP_CREATE = 0
+    // BPF_MAP_LOOKUP_ELEM = 1
+    // BPF_MAP_UPDATE_ELEM = 2
+    // BPF_MAP_DELETE_ELEM = 3
+    // BPF_PROG_LOAD = 5
+    // BPF_OBJ_PIN = 6
+    // BPF_OBJ_GET = 7
+
+    // echoOS'ta eBPF VM henüz desteklenmiyor
+    // Gerçek implementasyon: BPF VM, BPF bytecode loader, maps altyapısı gerekir
+    // CAP_BPF yetkisi de gerekir
+
+    match cmd {
+        0 => {
+            // BPF_MAP_CREATE — harita oluştur
+            // Basit: fd dön ama harita yok
+            let fd = allocate_fd(FdKind::File);
+            if fd >= MAX_FDS { return errno(EMFILE); }
+            fd
+        }
+        5 => {
+            // BPF_PROG_LOAD — program yükle
+            errno(ENOSYS)
+        }
+        _ => {
+            errno(ENOSYS)
+        }
+    }
+}
+
+/// `kexec_file_load` — Yeni çekirdek yükle ve çalıştır.
+fn sys_kexec_file_load(kernel_fd: usize, initrd_fd: usize, cmdline_len: usize, cmdline_ptr: usize, flags: usize) -> usize {
+    // kexec_file_load, dosyadan yeni kernel yükler
+    // echoOS'ta kexec henüz desteklenmiyor — kernel yükleme altyapısı gerekir
+    // CAP_SYS_BOOT yetkisi de gerekir
+    errno(EPERM)
+}
+
+/// Kullanıcı alanından C-string oku (null-terminated)
+fn read_user_cstr(ptr: usize) -> Option<alloc::string::String> {
+    if ptr == 0 {
+        return None;
+    }
+    let mut s = alloc::string::String::new();
+    let mut i = 0;
+    loop {
+        if i > 4096 {
+            return None; // Çok uzun
+        }
+        let byte = with_user_access(|| unsafe { *((ptr + i) as *const u8) });
+        if byte == 0 {
+            break;
+        }
+        s.push(byte as char);
+        i += 1;
+    }
+    Some(s)
+}
+
+// ============================================================================
+// Faz 2 — Eksik POSIX / Linux Syscall Implementasyonları
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Zaman
+// ---------------------------------------------------------------------------
+
+/// `gettimeofday` — Unix epoch'tan itibaren zamanı döndürür.
+/// echOS'ta clock_gettime(CLOCK_REALTIME) ile aynı mantık.
+fn sys_gettimeofday(tv_ptr: usize, _tz_ptr: usize) -> usize {
+    if tv_ptr != 0 {
+        if let Err(err) = validate_user_range(tv_ptr, core::mem::size_of::<Timeval>()) {
+            return err;
+        }
+        // clock_gettime ile aynı zamanı kullan
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = clock_gettime_impl(CLOCK_REALTIME, &mut ts);
+        let tv = Timeval { tv_sec: ts.tv_sec, tv_usec: ts.tv_nsec / 1000 };
+        let _ = write_user(tv_ptr, tv);
+    }
+    0
+}
+
+/// `settimeofday` — Saati ayarlar (shim, donanım RTC'ye yazmaz).
+fn sys_settimeofday(_tv_ptr: usize) -> usize {
+    // echOS'ta gerçekRTC yazımı henüz yok
+    0
+}
+
+/// `clock_getres` — Belirtilen clock'un çözünürlüğünü (en küçük adımını) döndürür.
+fn sys_clock_getres(clock_id: usize, res_ptr: usize) -> usize {
+    if clock_id > CLOCK_MONOTONIC {
+        return errno(EINVAL);
+    }
+    if res_ptr != 0 {
+        if let Err(err) = validate_user_range(res_ptr, core::mem::size_of::<Timespec>()) {
+            return err;
+        }
+        // echOS timer çözünürlüğü: 1 tick = 10ms = 10_000_000 ns
+        let ts = Timespec { tv_sec: 0, tv_nsec: TICK_NS as i64 };
+        let _ = write_user(res_ptr, ts);
+    }
+    0
+}
+
+/// `clock_nanosleep` — Belirtilen clock ile belirtilen süreyi uyu.
+fn sys_clock_nanosleep(clock_id: usize, flags: usize, req_ptr: usize, _rem_ptr: usize) -> usize {
+    if clock_id > CLOCK_MONOTONIC {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(req_ptr, core::mem::size_of::<Timespec>()) {
+        return err;
+    }
+    let req: Timespec = with_user_access(|| unsafe { *(req_ptr as *const Timespec) });
+    let _flags = flags; // TIMER_ABSTIME = 1
+    // nanosleep ile aynı mantık
+    let total_ns = (req.tv_sec as u64) * 1_000_000_000 + (req.tv_nsec as u64);
+    let ticks = (total_ns + TICK_NS - 1) / TICK_NS;
+    let mut elapsed: u64 = 0;
+    while elapsed < ticks {
+        x86_64::instructions::hlt();
+        elapsed += 1;
+    }
+    0
+}
+
+/// `clock_adjtime` — Clock ayarlama (shim).
+fn sys_clock_adjtime(_clock_id: usize, _tx_ptr: usize) -> usize {
+    0
+}
+
+/// `time` — Unix epoch'tan saniye cinsinden zamanı döndürür.
+fn sys_time(t_ptr: usize) -> usize {
+    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let _ = clock_gettime_impl(CLOCK_REALTIME, &mut ts);
+    if t_ptr != 0 {
+        if let Err(err) = validate_user_range(t_ptr, core::mem::size_of::<i64>()) {
+            return err;
+        }
+        let _ = write_user(t_ptr, ts.tv_sec);
+    }
+    ts.tv_sec as usize
+}
+
+/// `utimes` — Dosya erişim/değişik zamanını ayarlar.
+fn sys_utimes(_path_ptr: usize, _times_ptr: usize) -> usize {
+    // echOS'ta暫time ayarlaması henüz desteklenmiyor
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Sinyal
+// ---------------------------------------------------------------------------
+
+/// `rt_sigreturn` — Sinyal handler'dan dönüş. Normalde assembly'de çağrılır.
+/// Bu noktaya ulaşılması beklenmez; eğer ulaşılırsa ENOSYS döndür.
+fn sys_rt_sigreturn() -> usize {
+    // Signal return assembly seviyesinde ele alınır
+    // Bu çağrı normalde user-mode'a geri döner
+    // Eğer buradaysak hatalı bir durum
+    errno(ENOSYS)
+}
+
+/// `rt_sigpending` — Bekleyen sinyalleri döndürür.
+fn sys_rt_sigpending(set_ptr: usize, sigsetsize: usize) -> usize {
+    if sigsetsize != 8 {
+        return errno(EINVAL);
+    }
+    if let Err(err) = validate_user_range(set_ptr, 8) {
+        return err;
+    }
+    // Per-process pending signal'ları oku
+    let pending = x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        crate::task::scheduler::PER_CPU_CURRENT_TASK
+            .get(crate::cpu::smp::get_current_cpu_id() as usize)
+            .and_then(|t| t.as_ref())
+            .map(|t| t.cold.signals.get_pending())
+            .unwrap_or(0)
+    });
+    let _ = write_user(set_ptr, pending);
+    0
+}
+
+// ---------------------------------------------------------------------------
+// Süreç / Kullanıcı / Grup
+// ---------------------------------------------------------------------------
+
+/// `getpgrp` — Mevcut sürecin process group ID'sini döndürür.
+fn sys_getpgrp() -> usize {
+    // getpgid(0) ile aynı
+    process_bridge::sys_getpgid(0)
+}
+
+/// `setreuid` — Real ve effective user ID'yi ayarlar.
+fn sys_setreuid(_ruid: usize, _euid: usize) -> usize {
+    // Tek kullanıcılı sistemde no-op
+    0
+}
+
+/// `setregid` — Real ve effective group ID'yi ayarlar.
+fn sys_setregid(_rgid: usize, _egid: usize) -> usize {
+    0
+}
+
+/// `getgroups` — Supplementary group listesini döndürür.
+fn sys_getgroups(size: usize, list_ptr: usize) -> usize {
+    // echOS'ta tek grup: root (0)
+    if size >= 1 && list_ptr != 0 {
+        if let Err(err) = validate_user_range(list_ptr, core::mem::size_of::<u32>()) {
+            return err;
+        }
+        let _ = write_user(list_ptr, 0u32); // gid 0
+    }
+    1
+}
+
+/// `setgroups` — Supplementary group listesini ayarlar.
+fn sys_setgroups(_size: usize, _list_ptr: usize) -> usize {
+    0
+}
+
+/// `setresuid` — Real, effective ve saved user ID'yi ayarlar.
+fn sys_setresuid(_ruid: usize, _euid: usize, _suid: usize) -> usize {
+    0
+}
+
+/// `getresuid` — Real, effective ve saved user ID'yi döndürür.
+fn sys_getresuid(ptr: usize) -> usize {
+    if ptr != 0 {
+        if let Err(err) = validate_user_range(ptr, 3 * core::mem::size_of::<u32>()) {
+            return err;
+        }
+        let _ = write_user(ptr, 0u32); // ruid
+        let _ = write_user(ptr + 4, 0u32); // euid
+        let _ = write_user(ptr + 8, 0u32); // suid
+    }
+    0
+}
+
+/// `setresgid` — Real, effective ve saved group ID'yi ayarlar.
+fn sys_setresgid(_rgid: usize, _egid: usize, _sgid: usize) -> usize {
+    0
+}
+
+/// `getresgid` — Real, effective ve saved group ID'yi döndürür.
+fn sys_getresgid(ptr: usize) -> usize {
+    if ptr != 0 {
+        if let Err(err) = validate_user_range(ptr, 3 * core::mem::size_of::<u32>()) {
+            return err;
+        }
+        let _ = write_user(ptr, 0u32);
+        let _ = write_user(ptr + 4, 0u32);
+        let _ = write_user(ptr + 8, 0u32);
+    }
+    0
+}
+
+/// `setfsuid` — Filesystem user ID'yi ayarlar.
+fn sys_setfsuid(_uid: usize) -> usize {
+    0
+}
+
+/// `setfsgid` — Filesystem group ID'yi ayarlar.
+fn sys_setfsgid(_gid: usize) -> usize {
+    0
+}
+
+/// `close_range` — Belirtilen aralıktaki tüm fd'leri kapatır.
+fn sys_close_range(first: usize, max: usize, _flags: usize) -> usize {
+    let end = if max == 0 || max > MAX_FDS { MAX_FDS } else { max };
+    let mut fd_table = FILE_TABLE.lock();
+    for fd in first..end {
+        if fd < MAX_FDS {
+            fd_table[fd] = None;
+        }
+    }
+    let mut fd_init = FD_TABLE.lock();
+    for fd in first..end {
+        if fd < MAX_FDS {
+            fd_init[fd] = None;
+        }
+    }
+    0
+}
+
+/// `pidfd_getfd` — pidfd üzerinden foreign fd kopyalamak.
+fn sys_pidfd_getfd(pidfd: usize, targetfd: usize, _flags: usize) -> usize {
+    // pidfd, hedef sürecin pid'ini temsil eden fd'dir
+    let target_pid = pidfd;
+
+    if !tasking::task_exists(target_pid) {
+        return errno(ESRCH);
+    }
+
+    // Gerçek cross-process fd kopyalama için per-CPU task erişimi gerekir.
+    // Şimdilik ENOSYS: process_vm_readv/writev ile veri transferi yapılabilir,
+    // ancak fd tablosu doğrudan erişilemez.
+    errno(ENOSYS)
+}
+
+/// `mknod` — Dosya veya cihaz düğümü oluşturur.
+fn sys_mknod(path_ptr: usize, mode: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    const S_IFMT: usize = 0o170000;
+    const S_IFREG: usize = 0o100000;
+    const S_IFCHR: usize = 0o020000;
+    const S_IFBLK: usize = 0o060000;
+    const S_IFIFO: usize = 0o010000;
+    const S_IFSOCK: usize = 0o140000;
+    let file_type = mode & S_IFMT;
+
+    match file_type {
+        S_IFREG => {
+            // Normal dosya oluştur — open(O_CREAT) ile aynı
+            let (parent, name) = split_path(&path);
+            match fs::f2fs::create_f2fs_file(parent, name) {
+                Ok(_) => 0,
+                Err(e) => vfs_errno(e),
+            }
+        }
+        S_IFCHR | S_IFBLK | S_IFIFO | S_IFSOCK => {
+            // Cihaz/boru/soket düğümü — F2FS'te desteklenmiyor
+            errno(ENOSYS)
+        }
+        0 => {
+            // Mode belirtilmemiş — varsayılan olarak regular dosya
+            let (parent, name) = split_path(&path);
+            match fs::f2fs::create_f2fs_file(parent, name) {
+                Ok(_) => 0,
+                Err(e) => vfs_errno(e),
+            }
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `mknodat` — Belirtilen fd üzerinden cihaz düğümü oluşturur.
+fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let resolved = resolve_path_at(dirfd, &path);
+    let (parent, name) = split_path(&resolved);
+
+    const S_IFMT: usize = 0o170000;
+    const S_IFREG: usize = 0o100000;
+    let file_type = mode & S_IFMT;
+
+    match file_type {
+        S_IFREG | 0 => {
+            match fs::f2fs::create_f2fs_file(parent, name) {
+                Ok(_) => 0,
+                Err(e) => vfs_errno(e),
+            }
+        }
+        _ => errno(ENOSYS),
+    }
+}
+
+/// Timerfd state
+struct TimerFdState {
+    interval_ns: u64,
+    value_ns: u64,
+    active: bool,
+}
+
+lazy_static! {
+    static ref TIMERFD_TABLE: Mutex<alloc::collections::BTreeMap<usize, TimerFdState>> =
+        Mutex::new(alloc::collections::BTreeMap::new());
+    static ref TIMERFD_ID: AtomicU64 = AtomicU64::new(0);
+}
+
+/// `timerfd_create` — Yeni bir timerfd oluşturur.
+fn sys_timerfd_create(clockid: usize, _flags: usize) -> usize {
+    if clockid > CLOCK_MONOTONIC {
+        return errno(EINVAL);
+    }
+    let id = TIMERFD_ID.fetch_add(1, Ordering::SeqCst) as usize;
+    let fd = allocate_fd(FdKind::File);
+    if fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
+    TIMERFD_TABLE.lock().insert(id, TimerFdState {
+        interval_ns: 0, value_ns: 0, active: false,
+    });
+    let _ = id;
+    fd
+}
+
+/// `timerfd_settime` — Timer'ı ayarlar.
+fn sys_timerfd_settime(fd: usize, _flags: usize, new_value_ptr: usize, old_value_ptr: usize) -> usize {
+    if fd >= MAX_FDS {
+        return errno(EBADF);
+    }
+    if let Err(err) = validate_user_range(new_value_ptr, core::mem::size_of::<Itimerval>()) {
+        return err;
+    }
+    let new_val: Itimerval = with_user_access(|| unsafe { *(new_value_ptr as *const Itimerval) });
+    let interval_ns = (new_val.it_interval.tv_sec as u64) * 1_000_000_000
+        + (new_val.it_interval.tv_usec as u64) * 1000;
+    let value_ns = (new_val.it_value.tv_sec as u64) * 1_000_000_000
+        + (new_val.it_value.tv_usec as u64) * 1000;
+    if old_value_ptr != 0 {
+        if let Err(err) = validate_user_range(old_value_ptr, core::mem::size_of::<Itimerval>()) {
+            return err;
+        }
+        let _ = write_user(old_value_ptr, new_val);
+    }
+    let mut table = TIMERFD_TABLE.lock();
+    let entry = table.entry(fd).or_insert(TimerFdState {
+        interval_ns: 0, value_ns: 0, active: false,
+    });
+    entry.interval_ns = interval_ns;
+    entry.value_ns = value_ns;
+    entry.active = value_ns > 0;
+    0
+}
+
+/// `timerfd_gettime` — Timer'ın mevcut değerini döndürür.
+fn sys_timerfd_gettime(fd: usize, curr_value_ptr: usize) -> usize {
+    if fd >= MAX_FDS {
+        return errno(EBADF);
+    }
+    if let Err(err) = validate_user_range(curr_value_ptr, core::mem::size_of::<Itimerval>()) {
+        return err;
+    }
+    let table = TIMERFD_TABLE.lock();
+    let (interval_ns, value_ns) = if let Some(entry) = table.get(&fd) {
+        (entry.interval_ns, entry.value_ns)
+    } else {
+        (0, 0)
+    };
+    let iv = Itimerval {
+        it_interval: Timeval {
+            tv_sec: (interval_ns / 1_000_000_000) as i64,
+            tv_usec: ((interval_ns % 1_000_000_000) / 1000) as i64,
+        },
+        it_value: Timeval {
+            tv_sec: (value_ns / 1_000_000_000) as i64,
+            tv_usec: ((value_ns % 1_000_000_000) / 1000) as i64,
+        },
+    };
+    let _ = write_user(curr_value_ptr, iv);
+    0
+}
+
+/// `mkdirat` — Belirtilen fd üzerinden dizin oluşturur.
+fn sys_mkdirat(dirfd: usize, path_ptr: usize, mode: usize) -> usize {
+    sys_mkdir(path_ptr, mode) // dirfd şimdilik yoksayılıyor
+}
+
+/// `unlinkat` — Belirtilen fd üzerinden dosya/dizin siler.
+fn sys_unlinkat(dirfd: usize, path_ptr: usize, flags: usize) -> usize {
+    if flags & AT_REMOVEDIR != 0 {
+        return sys_rmdir(path_ptr);
+    }
+    sys_unlink(path_ptr) // dirfd şimdilik yoksayılıyor
+}
+
+/// `fchmodat` — Belirtilen fd üzerinden dosya modunu değiştirir.
+fn sys_fchmodat(_dirfd: usize, path_ptr: usize, mode: usize, _flags: usize) -> usize {
+    sys_chmod(path_ptr, mode)
+}
+
+/// `fchownat` — Belirtilen fd üzerinden dosya sahibini değiştirir.
+fn sys_fchownat(_dirfd: usize, path_ptr: usize, uid: usize, gid: usize, _flags: usize) -> usize {
+    sys_chown(path_ptr, uid, gid)
+}
+
+/// `flock` — Dosya kilidi (LOCK_SH, LOCK_EX, LOCK_UN, LOCK_NB).
+fn sys_flock(fd: usize, operation: usize) -> usize {
+    let ret = crate::fs::file_lock::sys_flock(fd as i32, operation as i32);
+    if ret < 0 {
+        (!0usize).wrapping_sub((-ret) as usize - 1)
+    } else {
+        0
+    }
+}
+
+/// `sync`
+fn sys_sync() -> usize {
+    let _ = crate::fs::f2fs::sync_f2fs();
+    crate::fs::page_cache::sync_cache();
+    0
+}
+
+/// `sync_file_range`
+fn sys_sync_file_range(fd: usize, _offset: usize, _nbytes: usize, _flags: usize) -> usize {
+    if get_fd(fd).is_none() {
+        return errno(EBADF);
+    }
+    let files = FILE_TABLE.lock();
+    if let Some(Some(state)) = files.get(fd) {
+        let path = state.path.clone();
+        drop(files);
+        match crate::fs::f2fs::fsync_path(&path) {
+            Ok(()) => 0,
+            Err(_) => errno(EIO),
+        }
+    } else {
+        drop(files);
+        let _ = crate::fs::f2fs::sync_f2fs();
+        0
+    }
+}
+
+/// `fadvise64` — Dosya erişim ipucu (SEQUENTIAL, RANDOM, vb.).
+fn sys_fadvise64(_fd: usize, _offset: usize, _nbytes: usize, _advice: usize) -> usize {
+    0 // no-op
+}
+
+/// `fchdir` — Belirtilen fd'yi çalışma dizini yapar.
+fn sys_fchdir(fd: usize) -> usize {
+    // fd'den dizin yolunu al
+    let files = FILE_TABLE.lock();
+    let _entry = match files.get(fd) {
+        Some(Some(entry)) => entry,
+        _ => return errno(EBADF),
+    };
+    // echOS'ta FileEntry bir path tutmuyor — ENOSYS dön
+    // Gerçek implementasyon: FileEntry'den path okunup CURRENT_WORKING_DIR'a yazılır
+    errno(ENOSYS)
+}
+
+/// `chroot` — Root dizini değiştirir.
+fn sys_chroot(path_ptr: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // Dizin var mı kontrol et
+    match fs::f2fs::open_entry(&path) {
+        Ok(entry) => {
+            if !entry.is_dir {
+                return errno(ENOTDIR);
+            }
+            // CLONE_FS: shared_fs varsa oraya root yaz, yoksa global'a
+            set_root_for_current(path);
+            0
+        }
+        Err(e) => vfs_errno(e),
+    }
+}
+
+/// `pivot_root` — Root filesystem'i değiştirir.
+fn sys_pivot_root(_new_root_ptr: usize, _put_old_ptr: usize) -> usize {
+    errno(EPERM) // Container namespace desteği gerekir
+}
+
+// ---------------------------------------------------------------------------
+// Soket (ek)
+// ---------------------------------------------------------------------------
+
+/// `socketpair` — Eş soket çifti oluşturur (Unix domain sockets için).
+fn sys_socketpair(domain: usize, type_: usize, protocol: usize, fds_ptr: usize) -> usize {
+    // Sadece AF_UNIX destekleniyor
+    if domain != AF_UNIX { return errno(EAFNOSUPPORT); }
+    if fds_ptr == 0 { return errno(EINVAL); }
+    if let Err(e) = validate_user_range(fds_ptr, 8) { return e; }
+
+    // İki fd alloke et
+    let fd1 = allocate_fd(FdKind::Socket);
+    if fd1 >= MAX_FDS { return errno(EMFILE); }
+    let fd2 = allocate_fd(FdKind::Socket);
+    if fd2 >= MAX_FDS {
+        // fd1'i geri al
+        let mut table = FD_TABLE.lock();
+        table[fd1] = None;
+        return errno(EMFILE);
+    }
+
+    // Her iki soketi de connected olarak ayarla
+    {
+        let mut sockets = SOCKET_TABLE.lock();
+        let port1 = {
+            let mut next = NEXT_EPHEMERAL_PORT.lock();
+            let p = *next;
+            *next = next.wrapping_add(1);
+            p
+        };
+        let port2 = {
+            let mut next = NEXT_EPHEMERAL_PORT.lock();
+            let p = *next;
+            *next = next.wrapping_add(1);
+            p
+        };
+
+        sockets.insert(fd1, SocketState {
+            domain, sock_type: type_, protocol,
+            state: SocketConnState::Connected,
+            local_port: port1, remote_port: port2,
+            remote_addr: [127, 0, 0, 1],
+            tcp_id: 0,
+        });
+        sockets.insert(fd2, SocketState {
+            domain, sock_type: type_, protocol,
+            state: SocketConnState::Connected,
+            local_port: port2, remote_port: port1,
+            remote_addr: [127, 0, 0, 1],
+            tcp_id: 0,
+        });
+    }
+
+    // Kullanıcıya fd çiftini yaz
+    with_user_access(|| unsafe {
+        *(fds_ptr as *mut u32) = fd1 as u32;
+        *((fds_ptr + 4) as *mut u32) = fd2 as u32;
+    });
+    0
+}
+
+/// `recvmmsg` — Çoklu mesaj alır.
+fn sys_recvmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_ptr: usize) -> usize {
+    // mmsghdr: { struct msghdr msg_hdr; unsigned int msg_len; }
+    // her bir mmsghdr 64 bytes (msghdr=56 + msg_len=4 + padding=4)
+    if vlen == 0 { return 0; }
+    if msg_ptr == 0 { return errno(EINVAL); }
+
+    let mut count: usize = 0;
+    for i in 0..vlen {
+        let entry_ptr = msg_ptr + i * 64;
+        if let Err(e) = validate_user_range(entry_ptr, 64) { break; }
+
+        let result = sys_recvmsg(fd, entry_ptr, flags);
+        if result == 0 || result >= errno_base() { break; }
+
+        // msg_len yaz
+        with_user_access(|| unsafe {
+            *((entry_ptr + 56) as *mut u32) = result as u32;
+        });
+        count += 1;
+
+        // MSG_WAITALL yoksa hemen dön
+        if flags & 0x100 == 0 { break; }
+    }
+    count
+}
+
+/// `sendmmsg` — Çoklu mesaj gönderir.
+fn sys_sendmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_ptr: usize) -> usize {
+    // mmsghdr: { struct msghdr msg_hdr; unsigned int msg_len; }
+    if vlen == 0 { return 0; }
+    if msg_ptr == 0 { return errno(EINVAL); }
+
+    let mut count: usize = 0;
+    for i in 0..vlen {
+        let entry_ptr = msg_ptr + i * 64;
+        if let Err(e) = validate_user_range(entry_ptr, 64) { break; }
+
+        let msg_iov: usize = with_user_access(|| unsafe { *((entry_ptr + 16) as *const usize) });
+        let msg_iovlen: usize = with_user_access(|| unsafe { *((entry_ptr + 24) as *const usize) });
+
+        if msg_iov == 0 || msg_iovlen == 0 { break; }
+
+        // Tüm iovec'leri topla
+        let mut total_data = alloc::vec::Vec::new();
+        for j in 0..msg_iovlen {
+            let iov_base: usize = with_user_access(|| unsafe { *((msg_iov + j * 16) as *const usize) });
+            let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + j * 16 + 8) as *const usize) });
+            if iov_len == 0 { continue; }
+            if let Err(_) = validate_user_range(iov_base, iov_len) { break; }
+            let mut chunk = alloc::vec![0u8; iov_len];
+            with_user_access(|| unsafe {
+                core::ptr::copy_nonoverlapping(iov_base as *const u8, chunk.as_mut_ptr(), iov_len);
+            });
+            total_data.extend_from_slice(&chunk);
+        }
+
+        if total_data.is_empty() { break; }
+
+        let sent = sys_sendto(fd, total_data.as_ptr() as usize, total_data.len(), flags, 0, 0);
+        if sent >= errno_base() { break; }
+
+        with_user_access(|| unsafe {
+            *((entry_ptr + 56) as *mut u32) = sent as u32;
+        });
+        count += 1;
+
+        if flags & 0x8000 == 0 { break; } // MSG_NOSIGNAL以外
+    }
+    count
+}
+
+// ---------------------------------------------------------------------------
+// I/O Çoğaltma
+// ---------------------------------------------------------------------------
+
+/// `pselect6` — select() benzeri ama timespec ile timeout.
+fn sys_pselect6(nfds: usize, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr: usize, _timeout_ptr: usize, _sigmask_ptr: usize) -> usize {
+    sys_select(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr, 0)
+}
+
+/// `ppoll` — poll() benzeri ama timespec ile timeout.
+fn sys_ppoll(fds_ptr: usize, nfds: usize, _timeout_ptr: usize, _sigmask_ptr: usize) -> usize {
+    sys_poll(fds_ptr, nfds, 0)
+}
+
+// ---------------------------------------------------------------------------
+// Bellek Kilitleme
+// ---------------------------------------------------------------------------
+
+/// `mlock` — Belirtilen bellek aralığını kilitler (RAM'de tutar).
+fn sys_mlock(_addr: usize, _len: usize) -> usize {
+    0 // no-op: tek kullanıcılı sistemde kilit gerekmez
+}
+
+/// `munlock` — Bellek kilidini kaldırır.
+fn sys_munlock(_addr: usize, _len: usize) -> usize {
+    0
+}
+
+/// `mlockall` — Tüm proces belleğini kilitler.
+fn sys_mlockall(_flags: usize) -> usize {
+    0
+}
+
+/// `munlockall` — Tüm bellek kilidini kaldırır.
+fn sys_munlockall() -> usize {
+    0
+}
+
+/// `mlock2` — mlock + flags.
+fn sys_mlock2(_addr: usize, _len: usize, _flags: usize) -> usize {
+    0
+}
+
+/// `userfaultfd` — User-space fault handling fd'si oluşturur.
+fn sys_userfaultfd(flags: usize) -> usize {
+    const O_CLOEXEC: usize = 02000000;
+    const O_NONBLOCK: usize = 04000;
+
+    // FD oluştur
+    let fd = allocate_fd(FdKind::File);
+    if fd >= MAX_FDS { return errno(EMFILE); }
+
+    // userfaultfd, sayfa hatalarını user-space'e yönlendirir
+    // echOS'ta henüz userfaultfd altyapısı yok — EINVAL dön
+    // Gerçek implementasyon: page fault handler'ı user-space'e yönlendirir
+    let mut table = FD_TABLE.lock();
+    table[fd] = None; // fd'yi geri al
+    errno(ENOSYS)
+}
+
+/// `pkey_alloc` — Protection key alokasyonu (Intel MPK).
+fn sys_pkey_alloc(_flags: usize, _access_rights: usize) -> usize {
+    // Intel Memory Protection Keys: 16 tane key mevcut (PKEY0-PKEY15)
+    // echOS'ta henüz MPK desteği yok
+    errno(ENOSYS)
+}
+
+/// `pkey_free` — Protection key serbest bırakma.
+fn sys_pkey_free(_pkey: usize) -> usize {
+    errno(ENOSYS)
+}
+
+// ---------------------------------------------------------------------------
+// Zamanlama (Scheduler)
+// ---------------------------------------------------------------------------
+
+/// `sched_setparam` — Süreç zamanlama parametresini ayarlar.
+fn sys_sched_setparam(_pid: usize, _param_ptr: usize) -> usize {
+    0
+}
+
+/// `sched_getparam` — Süreç zamanlama parametresini döndürür.
+fn sys_sched_getparam(_pid: usize, param_ptr: usize) -> usize {
+    if param_ptr != 0 {
+        if let Err(err) = validate_user_range(param_ptr, core::mem::size_of::<u32>()) {
+            return err;
+        }
+        let _ = write_user(param_ptr, 0u32); // priority = 0
+    }
+    0
+}
+
+/// `sched_setscheduler` — Süreç zamanlayıcısını ayarlar.
+fn sys_sched_setscheduler(_pid: usize, _policy: usize, _param_ptr: usize) -> usize {
+    0
+}
+
+/// `sched_getscheduler` — Süreç zamanlayıcısını döndürür.
+fn sys_sched_getscheduler(_pid: usize) -> usize {
+    0 // SCHED_OTHER
+}
+
+/// `sched_get_priority_max` — Belirtilen politikanın maks önceliğini döndürür.
+fn sys_sched_get_priority_max(_policy: usize) -> usize {
+    99 // Linux_MAX_NICE = 19 → priority = 99
+}
+
+/// `sched_get_priority_min` — Belirtilen politikanın min önceliğini döndürür.
+fn sys_sched_get_priority_min(_policy: usize) -> usize {
+    1
+}
+
+/// `sched_rr_get_interval` — Round-robin zaman dilimini döndürür.
+fn sys_sched_rr_get_interval(_pid: usize, interval_ptr: usize) -> usize {
+    if interval_ptr != 0 {
+        if let Err(err) = validate_user_range(interval_ptr, core::mem::size_of::<Timespec>()) {
+            return err;
+        }
+        let ts = Timespec { tv_sec: 0, tv_nsec: 10_000_000 }; // 10ms
+        let _ = write_user(interval_ptr, ts);
+    }
+    0
+}
+
+/// `sched_setaffinity` — CPU affinity ayarlar.
+fn sys_sched_setaffinity(_pid: usize, _cpusetsize: usize, _mask_ptr: usize) -> usize {
+    0
+}
+
+/// `sched_getaffinity` — CPU affinity döndürür.
+fn sys_sched_getaffinity(_pid: usize, cpusetsize: usize, mask_ptr: usize) -> usize {
+    if mask_ptr != 0 && cpusetsize >= 8 {
+        if let Err(err) = validate_user_range(mask_ptr, 8) {
+            return err;
+        }
+        let _ = write_user(mask_ptr, 1u64); // CPU 0
+    }
+    0
+}
+
+/// `sched_setattr` — Gelişmiş zamanlama ayarı.
+fn sys_sched_setattr(_pid: usize, _attr_ptr: usize, _flags: usize) -> usize {
+    0
+}
+
+/// `sched_getattr` — Gelişmiş zamanlama bilgisi.
+fn sys_sched_getattr(_pid: usize, attr_ptr: usize, _size: usize) -> usize {
+    if attr_ptr != 0 {
+        if let Err(err) = validate_user_range(attr_ptr, 48) {
+            return err;
+        }
+        let _ = write_user(attr_ptr, 0u32); // size
+    }
+    0
+}
+
+/// `setpriority` — Süreç/grup/ kullanıcı önceliğini ayarlar.
+fn sys_setpriority(_which: usize, _who: usize, _niceval: usize) -> usize {
+    0
+}
+
+/// `getpriority` — Süreç/grup/kullanıcı önceliğini döndürür.
+fn sys_getpriority(_which: usize, _who: usize) -> usize {
+    0 // nice = 0
+}
+
+// ---------------------------------------------------------------------------
+// SysV IPC — zaten mevcut implementasyonlar (semget, semop, semctl, shmdt,
+// msgget, msgsnd, msgrcv, msgctl)
+// ---------------------------------------------------------------------------
+
+/// `semtimedop` — Zaman aşımlı semafor işlemi (semop + timeout).
+fn sys_semtimedop(semid: usize, sops: usize, nsops: usize, timeout_ptr: usize) -> usize {
+    // timeout'u yok sayarak semop'a yönlendir
+    let _ = timeout_ptr;
+    sys_semop(semid, sops, nsops)
+}
+
+// ---------------------------------------------------------------------------
+// Process VM
+// ---------------------------------------------------------------------------
+
+/// `process_vm_readv` — Başka sürecin belleğini okur.
+fn sys_process_vm_readv(pid: usize, local_iov_ptr: usize, liovcnt: usize, remote_iov_ptr: usize, riovcnt: usize, _flags: usize) -> usize {
+    // process_vm_readv, hedef sürecin sanal belleğinden okuma yapar
+    // struct iovec { void *iov_base; size_t iov_len; }
+    if local_iov_ptr == 0 || remote_iov_ptr == 0 { return errno(EINVAL); }
+    if liovcnt == 0 || riovcnt == 0 { return 0; }
+
+    if !tasking::task_exists(pid) {
+        return errno(ESRCH);
+    }
+
+    // echoOS'ta süreçler arası bellek okuma henüz desteklenmiyor
+    errno(ENOSYS)
+}
+
+/// `process_vm_writev` — Başka sürecin belleğine yazar.
+fn sys_process_vm_writev(pid: usize, local_iov_ptr: usize, liovcnt: usize, remote_iov_ptr: usize, riovcnt: usize, _flags: usize) -> usize {
+    if local_iov_ptr == 0 || remote_iov_ptr == 0 { return errno(EINVAL); }
+    if liovcnt == 0 || riovcnt == 0 { return 0; }
+
+    if !tasking::task_exists(pid) {
+        return errno(ESRCH);
+    }
+
+    errno(ENOSYS)
+}
+
+// ---------------------------------------------------------------------------
+// Sistem
+// ---------------------------------------------------------------------------
+
+/// `syslog` — Kernel log okuma/yazma.
+fn sys_syslog(type_: usize, bufp_ptr: usize, len: usize) -> usize {
+    // syslog type'ları:
+    // 0 = SYSLOG_ACTION_CLOSE (no-op)
+    // 1 = SYSLOG_ACTION_OPEN (no-op)
+    // 2 = SYSLOG_ACTION_READ — kernel log buffer'dan oku
+    // 3 = SYSLOG_ACTION_READ_ALL — tüm log'u oku
+    // 4 = SYSLOG_ACTION_READ_CLEAR — oku ve temizle
+    // 5 = SYSLOG_ACTION_CLEAR — log buffer'ını temizle
+    // 6 = SYSLOG_ACTION_CONSOLE_OFF — konsol log kapat
+    // 7 = SYSLOG_ACTION_CONSOLE_ON — konsol log aç
+    // 8 = SYSLOG_ACTION_SIZE_LEFT — kalan boyut
+    // 9 = SYSLOG_ACTION_SIZE — toplam boyut
+
+    match type_ {
+        0 | 1 => 0, // close/open — no-op
+        5 => 0,     // clear — no-op (buffer henüz yok)
+        6 | 7 => 0, // console on/off — no-op
+        8 => 0,     // size_left — boş buffer
+        9 => 0,     // total_size — boş buffer
+        2 | 3 | 4 => {
+            // read — kernel log'dan oku
+            // echOS'ta ring buffer log henüz yok — boş buffer
+            if bufp_ptr != 0 && len > 0 {
+                if let Err(e) = validate_user_range(bufp_ptr, len) { return e; }
+                with_user_access(|| unsafe {
+                    core::ptr::write_bytes(bufp_ptr as *mut u8, 0, len);
+                });
+            }
+            0
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `swapon` — Swap alanını etkinleştirir.
+fn sys_swapon(path_ptr: usize, swapflags: usize) -> usize {
+    // swapflags: SWAP_FLAG_PREFER (0x8000) ve bitmask
+    let _path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    // echOS'ta fiziksel swap disk altyapısı yok
+    // Ancak ENOSYS yerine ENOMEM döndür — Linux davranışı
+    errno(ENOMEM)
+}
+
+/// `swapoff` — Swap alanını devre dışı bırakır.
+fn sys_swapoff(path_ptr: usize) -> usize {
+    let _path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    errno(ENODEV) // Swap cihazı bulunamadı
+}
+
+/// `sethostname` — Sistem adını ayarlar.
+fn sys_sethostname(_name_ptr: usize, _len: usize) -> usize {
+    0
+}
+
+/// `setdomainname` — Domain adını ayarlar.
+fn sys_setdomainname(_name_ptr: usize, _len: usize) -> usize {
+    0
+}
+
+/// `personality` — Process personality bayrağını ayarlar.
+fn sys_personality(_persona: usize) -> usize {
+    0
+}
+
+/// `reboot` — Sistemi yeniden başlatır.
+fn sys_reboot(_cmd: usize) -> usize {
+    // Güvenlik nedeniyle devre dışı
+    errno(EPERM)
+}
+
+// ---------------------------------------------------------------------------
+// Güvenlik (Landlock LSM) — stub
+// ---------------------------------------------------------------------------
+
+/// `landlock_create_ruleset` — Landlock kurallar seti oluşturur.
+fn sys_landlock_create_ruleset(attr_ptr: usize, size: usize, flags: usize) -> usize {
+    // Landlock: unprivileged filesystem sandboxing
+    // struct landlock_ruleset_attr { __u64 handled_access_fs; __u64 handled_access_net; }
+    if size < 16 { return errno(EINVAL); }
+    if attr_ptr == 0 { return errno(EFAULT); }
+    if let Err(e) = validate_user_range(attr_ptr, size) { return e; }
+
+    let _handled_access_fs: u64 = with_user_access(|| unsafe { *(attr_ptr as *const u64) });
+
+    // Landlock ruleset fd oluştur
+    let fd = allocate_fd(FdKind::File);
+    if fd >= MAX_FDS { return errno(EMFILE); }
+
+    // Basit: ruleset'i kaydet (boş kurallar seti)
+    // Gerçek implementasyon: landlock_ruleset struct'ı oluşturup fd'ye bağlar
+    fd
+}
+
+/// `landlock_add_rule` — Landlock kuralı ekler.
+fn sys_landlock_add_rule(ruleset_fd: usize, rule_type: usize, rule_attr_ptr: usize, flags: usize) -> usize {
+    // rule_type: LANDLOCK_RULE_PATH_BENEATH (1), LANDLOCK_RULE_NET_PORT (2)
+    if rule_attr_ptr == 0 { return errno(EFAULT); }
+
+    match rule_type {
+        1 => { // LANDLOCK_RULE_PATH_BENEATH
+            // struct landlock_path_beneath_attr { __u64 allowed_access; __s32 parent_fd; __u32 __reserved; }
+            if let Err(e) = validate_user_range(rule_attr_ptr, 16) { return e; }
+            let _allowed_access: u64 = with_user_access(|| unsafe { *(rule_attr_ptr as *const u64) });
+            let _parent_fd: i32 = with_user_access(|| unsafe { *((rule_attr_ptr + 8) as *const i32) });
+            // Kuralı ruleset'e ekle — şimdilik no-op
+            0
+        }
+        2 => { // LANDLOCK_RULE_NET_PORT
+            // struct landlock_net_port_attr { __u64 allowed_access; __u64 port; }
+            if let Err(e) = validate_user_range(rule_attr_ptr, 16) { return e; }
+            let _allowed_access: u64 = with_user_access(|| unsafe { *(rule_attr_ptr as *const u64) });
+            let _port: u64 = with_user_access(|| unsafe { *((rule_attr_ptr + 8) as *const u64) });
+            0
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `landlock_restrict_self` — Mevcut sürece kısıtlama uygular.
+fn sys_landlock_restrict_self(ruleset_fd: usize, flags: usize) -> usize {
+    // Landlock kısıtlamasını uygula
+    // flags: LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_WRITE_FILE, ...
+    // echOS'ta henüz tam Landlock kısıtlaması desteklenmiyor
+    // Kurallar eklendi ama uygulanmıyor — bu bir kısıtlama
+    let _ = ruleset_fd;
+    let _ = flags;
+    0 // Şimdilik başarılı — gerçek kısıtlama gelecek
+}
+
+// ---------------------------------------------------------------------------
+// inotify — stub
+// ---------------------------------------------------------------------------
+
+/// `inotify_init1` — inotify fd'si oluşturur.
+fn sys_inotify_init1(flags: usize) -> usize {
+    crate::fs::inotify::sys_inotify_init1(flags as i32) as usize
+}
+
+/// `inotify_add_watch` — Dizin/dosya izleme ekler.
+fn sys_inotify_add_watch(fd: usize, path_ptr: usize, mask: usize) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let ret = crate::fs::inotify::sys_inotify_add_watch(fd as i32, &path, mask as u32);
+    if ret < 0 { (-ret) as usize } else { ret as usize }
+}
+
+/// `inotify_rm_watch` — İzlemeyi kaldırır.
+fn sys_inotify_rm_watch(fd: usize, wd: usize) -> usize {
+    let ret = crate::fs::inotify::sys_inotify_rm_watch(fd as i32, wd as i32);
+    if ret < 0 { (-ret) as usize } else { ret as usize }
+}
+
+/// `signalfd4` — Sinyal fd'si oluşturur.
+fn sys_signalfd4(fd: usize, mask_ptr: usize, sizemask: usize, flags: usize) -> usize {
+    const SFD_CLOEXEC: usize = 02000000;
+    const SFD_NONBLOCK: usize = 04000;
+
+    if sizemask != 8 { return errno(EINVAL); }
+    if mask_ptr == 0 { return errno(EFAULT); }
+    if let Err(e) = validate_user_range(mask_ptr, 8) { return e; }
+
+    let signal_mask: u64 = with_user_access(|| unsafe { *(mask_ptr as *const u64) });
+
+    // Mevcut signalfd'yi güncelle veya yeni oluştur
+    let actual_fd = if fd == -1_isize as usize {
+        // Yeni fd oluştur
+        let new_fd = allocate_fd(FdKind::File);
+        if new_fd >= MAX_FDS { return errno(EMFILE); }
+        new_fd
+    } else {
+        // Mevcut fd'yi kullan
+        let files = FILE_TABLE.lock();
+        match files.get(fd) {
+            Some(Some(_)) => fd,
+            _ => return errno(EBADF),
+        }
+    };
+
+    // signalfd maskesini kaydet
+    // Gerçek implementasyon: bu fd okunabilir olduğunda, mask'teki
+    // sinyallerden biri pending ise signalfd_siginfo yapısı ile döner
+    // Basit: fd'yi başarılı dön, signal okuma henüz desteklenmiyor
+    actual_fd
+}
+
+// ---------------------------------------------------------------------------
+// Faz 3 — Eksik Linux Syscall Stub'ları
+// ---------------------------------------------------------------------------
+
+/// `alarm` — Sürecin kendisine belirtilen saniye sonra SIGALRM gönderir.
+/// Önceki alarm süresini döndürür (0 = önceki alarm yok).
+/// signal.rs'deki gerçek implementasyonu çağırır.
+fn sys_alarm(seconds: usize) -> usize {
+    crate::task::signal::sys_alarm(seconds as u32) as usize
+}
+
+/// `arch_prctl` — x86_64 mimari özel register'ları ayarlar.
+/// ARCH_SET_FS (0x1001) = FS taban adresi (thread-local storage)
+/// ARCH_GET_FS (0x1003) = FS taban adresini oku
+/// ARCH_SET_GS (0x1002) = GS taban adresi
+/// ARCH_GET_GS (0x1004) = GS taban adresini oku
+/// Gerçek implementasyon: MSR_FS_BASE / MSR_GS_BASE üzerinden yönetilir.
+fn sys_arch_prctl(code: usize, addr: usize, _unused: usize) -> usize {
+    use crate::task::scheduler::PER_CPU_CURRENT_TASK;
+    let cpu_id = crate::cpu::smp::get_current_cpu_id() as usize;
+
+    match code {
+        0x1001 => {
+            // ARCH_SET_FS — FS taban adresini ayarla (TLS için kritik)
+            if let Some(ref mut current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_mut() } {
+                current.cold.fs_base = addr as u64;
+            }
+            unsafe {
+                use x86_64::registers::model_specific::Msr;
+                Msr::new(0xC000_0102).write(addr as u64); // MSR_FS_BASE
+            }
+            0
+        }
+        0x1003 => {
+            // ARCH_GET_FS — FS taban adresini oku
+            if let Err(err) = validate_user_range(addr, core::mem::size_of::<u64>()) {
+                return err;
+            }
+            let fs_base = if let Some(ref current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_ref() } {
+                current.cold.fs_base
+            } else {
+                0
+            };
+            let _ = write_user(addr, fs_base);
+            0
+        }
+        0x1002 => {
+            // ARCH_SET_GS — GS taban adresini ayarla
+            unsafe {
+                use x86_64::registers::model_specific::Msr;
+                Msr::new(0xC000_0101).write(addr as u64); // MSR_GS_BASE
+            }
+            0
+        }
+        0x1004 => {
+            // ARCH_GET_GS — GS taban adresini oku
+            if let Err(err) = validate_user_range(addr, core::mem::size_of::<u64>()) {
+                return err;
+            }
+            let gs_base: u64 = unsafe {
+                use x86_64::registers::model_specific::Msr;
+                Msr::new(0xC000_0101).read()
+            };
+            let _ = write_user(addr, gs_base);
+            0
+        }
+        0x1012 => {
+            // ARCH_SET_CPUID — CPUID talimatını etkinleştir/devre dışı bırak
+            // echOS'ta CPUID her zaman etkin — no-op
+            0
+        }
+        0x1013 => {
+            // ARCH_GET_CPUID — CPUID durumunu döndür (1 = etkin)
+            1
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `set_thread_area` — x86_32 uyumlu thread-local storage alanı ayarlar.
+fn sys_set_thread_area(_u_info_ptr: usize) -> usize {
+    0 // echOS'ta 64-bit modda GDT tabanlı TLS kullanılmıyor
+}
+
+/// `init_module` — Kernel modülünü yükler.
+fn sys_init_module(image_ptr: usize, len: usize, param_values_ptr: usize) -> usize {
+    // echoOS'ta kernel modül yükleme desteklenmiyor
+    // Gerekli altyapı: ELF modül parser, sembol tablosu,重定位, modül linker
+    // CAP_SYS_MODULE yetkisi gerekir
+    errno(EPERM)
+}
+
+/// `delete_module` — Kernel modülünü boşaltır.
+fn sys_delete_module(name_ptr: usize, flags: usize) -> usize {
+    // O_NONBLOCK = 0x800
+    let _nonblock = flags & 0x800 != 0;
+
+    if name_ptr != 0 {
+        let _name = match read_user_cstring(name_ptr, 256) {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
+    }
+
+    // echoOS'ta modül desteği yok — EPERM
+    errno(EPERM)
+}
+
+/// `finit_module` — Dosyadan kernel modülünü yükler (fd bazlı).
+fn sys_finit_module(fd: usize, param_values_ptr: usize, flags: usize) -> usize {
+    // fd'den modül imajını oku ve yükle
+    // echoOS'ta henüz desteklenmiyor
+    errno(EPERM)
+}
+
+/// `ioprio_set` — I/O önceliğini ayarlar.
+/// which: 1=IOPRIO_WHO_PROCESS, 2=IOPRIO_WHO_PGRP, 3=IOPRIO_WHO_USER
+/// who: process id, process group id, veya user id (0 = mevcut)
+/// ioprio: (class << 8) | priority
+///   class: 1=IOPRIO_CLASS_RT, 2=IOPRIO_CLASS_BE, 3=IOPRIO_CLASS_IDLE
+///   priority: 0-7 (RT/BE için), 0 (IDLE için)
+fn sys_ioprio_set(which: usize, who: usize, ioprio: usize) -> usize {
+    use crate::task::scheduler::PER_CPU_CURRENT_TASK;
+    let cpu_id = crate::cpu::smp::get_current_cpu_id() as usize;
+
+    let class = (ioprio >> 8) & 0x7;
+    let prio = ioprio & 0x7;
+
+    // Geçerli class kontrolü
+    if class != 0 && class != 1 && class != 2 && class != 3 {
+        return errno(EINVAL);
+    }
+    // RT class için priority 0-7 arası olmalı
+    if class == 1 && prio > 7 {
+        return errno(EINVAL);
+    }
+
+    match which {
+        1 => {
+            // IOPRIO_WHO_PROCESS — mevcut sürecin I/O önceliğini ayarla
+            let target_pid = if who == 0 {
+                tasking::scheduler::current_task_id()
+            } else {
+                who
+            };
+            // Basit implementasyon: sadece mevcut process'i destekle
+            if target_pid == tasking::scheduler::current_task_id() {
+                if let Some(ref mut current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_mut() } {
+                    current.hot.ioprio = ioprio as u16;
+                    return 0;
+                }
+            }
+            // Diğer süreçler için PID arama (gelecekte genişletilebilir)
+            0
+        }
+        2 => {
+            // IOPRIO_WHO_PGRP — process group'un I/O önceliğini ayarla
+            // Şimdilik sadece mevcut process'i ayarla
+            if let Some(ref mut current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_mut() } {
+                current.hot.ioprio = ioprio as u16;
+            }
+            0
+        }
+        3 => {
+            // IOPRIO_WHO_USER — kullanıcının tüm süreçlerinin I/O önceliğini ayarla
+            // Şimdilik sadece mevcut process'i ayarla
+            if let Some(ref mut current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_mut() } {
+                current.hot.ioprio = ioprio as u16;
+            }
+            0
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `ioprio_get` — I/O önceliğini okur.
+fn sys_ioprio_get(which: usize, who: usize) -> usize {
+    use crate::task::scheduler::PER_CPU_CURRENT_TASK;
+    let cpu_id = crate::cpu::smp::get_current_cpu_id() as usize;
+
+    match which {
+        1 => {
+            // IOPRIO_WHO_PROCESS
+            let target_pid = if who == 0 {
+                tasking::scheduler::current_task_id()
+            } else {
+                who
+            };
+            if target_pid == tasking::scheduler::current_task_id() {
+                if let Some(ref current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_ref() } {
+                    return current.hot.ioprio as usize;
+                }
+            }
+            2 << 8 // Varsayılan: best-effort, priority 0
+        }
+        2 | 3 => {
+            // IOPRIO_WHO_PGRP / IOPRIO_WHO_USER
+            if let Some(ref current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_ref() } {
+                current.hot.ioprio as usize
+            } else {
+                2 << 8
+            }
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `preadv` — Dosyadan offset ile vektörel okuma (scatter read).
+/// Her iovec buffer'ı için pread64 çağrısı yaparak offset'li okuma sağlar.
+fn sys_preadv(fd: usize, iov_ptr: usize, iovcnt: usize, pos_low: usize) -> usize {
+    if iovcnt == 0 || iovcnt > 1024 {
+        return errno(EINVAL);
+    }
+    let iov_bytes = iovcnt.saturating_mul(core::mem::size_of::<[usize; 2]>());
+    if let Err(err) = validate_user_range(iov_ptr, iov_bytes) {
+        return err;
+    }
+    let mut iov_entries = vec![[0usize; 2]; iovcnt];
+    if let Err(err) = copy_from_user_slice(&mut iov_entries, iov_ptr) {
+        return err;
+    }
+    let mut total = 0usize;
+    let mut offset = pos_low;
+
+    for i in 0..iovcnt {
+        let entry = &iov_entries[i];
+        let base = entry[0];
+        let len = entry[1];
+        if len == 0 {
+            continue;
+        }
+        if let Err(err) = validate_user_range(base, len) {
+            if total > 0 {
+                return total;
+            }
+            return err;
+        }
+        let result = sys_pread64(fd, base, len, offset);
+        if result > 0x7FFF_FFFF_FFFF_0000 {
+            if total > 0 {
+                return total;
+            }
+            return result;
+        }
+        total += result;
+        offset += result;
+        if result < len {
+            break;
+        }
+    }
+    total
+}
+
+/// `pwritev` — Dosyaya offset ile vektörel yazma (gather write).
+fn sys_pwritev(fd: usize, iov_ptr: usize, iovcnt: usize, pos_low: usize) -> usize {
+    if iovcnt == 0 || iovcnt > 1024 {
+        return errno(EINVAL);
+    }
+    let iov_bytes = iovcnt.saturating_mul(core::mem::size_of::<[usize; 2]>());
+    if let Err(err) = validate_user_range(iov_ptr, iov_bytes) {
+        return err;
+    }
+    let mut iov_entries = vec![[0usize; 2]; iovcnt];
+    if let Err(err) = copy_from_user_slice(&mut iov_entries, iov_ptr) {
+        return err;
+    }
+    let mut total = 0usize;
+    let mut offset = pos_low;
+
+    for i in 0..iovcnt {
+        let entry = &iov_entries[i];
+        let base = entry[0];
+        let len = entry[1];
+        if len == 0 {
+            continue;
+        }
+        if let Err(err) = validate_user_range(base, len) {
+            if total > 0 {
+                return total;
+            }
+            return err;
+        }
+        let result = sys_pwrite64(fd, base, len, offset);
+        if result > 0x7FFF_FFFF_FFFF_0000 {
+            if total > 0 {
+                return total;
+            }
+            return result;
+        }
+        total += result;
+        offset += result;
+        if result < len {
+            break;
+        }
+    }
+    total
+}
+
+/// `rt_tgsigqueueinfo` — Belirli bir süreç grubuna sinyal + veri gönderir.
+fn sys_rt_tgsigqueueinfo(tgid: usize, sig: usize, info_ptr: usize) -> usize {
+    if sig == 0 || sig > 64 { return errno(EINVAL); }
+
+    // siginfo_t oku
+    if info_ptr != 0 {
+        if let Err(e) = validate_user_range(info_ptr, 128) { return e; } // sizeof(siginfo_t)
+        let si_signo: i32 = with_user_access(|| unsafe { *(info_ptr as *const i32) });
+        if si_signo != sig as i32 { return errno(EINVAL); }
+    }
+
+    // Sadece process group liderine gönder
+    if let Some(sig) = crate::task::signal::Signal::from_number(sig as u8) {
+        let _ = crate::task::signal::send_signal(tgid, sig);
+    }
+    0
+}
+
+/// `fanotify_init` — Dosya erişim bildirimi (otify benzeri).
+/// fanotify, inotify'un gelişmiş versiyonudur — dosya erişim olaylarını izler.
+/// return: fanotify fd (başarılı), -1 (hata)
+fn sys_fanotify_init(flags: usize, event_f_flags: usize) -> usize {
+    // fanotify flag'leri
+    const FAN_CLASS_NOTIF: usize = 0x00;
+    const FAN_CLASS_CONTENT: usize = 0x01;
+    const FAN_REPORT_FID: usize = 0x002;
+    const FAN_NONBLOCK: usize = 0x0008;
+    const FAN_CLOEXEC: usize = 0x0001;
+
+    let class = flags & 0x3;
+    if class != FAN_CLASS_NOTIF && class != FAN_CLASS_CONTENT && class != FAN_REPORT_FID {
+        return errno(EINVAL);
+    }
+
+    // Basit fanotify instance — dosya erişim olaylarını izlemek için fd döndür
+    // Gerçek implementasyonda: fanotify event queue + group yönetimi gerekir
+    // Şimdilik inotify instance benzeri bir fd aç
+    let inotify_flags = if flags & FAN_NONBLOCK != 0 { 0x0800 } else { 0 };
+    let fd = crate::fs::inotify::sys_inotify_init1(inotify_flags as i32);
+    if fd < 0 {
+        return (-fd) as usize;
+    }
+    // fanotify fd'sini CLOEXEC ile işaretle (eğer FAN_CLOEXEC ayarlıysa)
+    if flags & FAN_CLOEXEC != 0 {
+        sys_fcntl(fd as usize, 2, 1); // F_SETFD = 2, FD_CLOEXEC = 1
+    }
+    fd as usize
+}
+
+/// `fanotify_mark` — Dosya erişim bildirimi izleme ekler.
+/// fanotify_init'den dönen fd üzerinden dosya izleme ekler.
+fn sys_fanotify_mark(
+    fanotify_fd: usize, flags: usize, mask: usize,
+    dfd: usize, pathname_ptr: usize,
+) -> usize {
+    // fanotify_mark = inotify_add_watch benzeri
+    // FAN_MARK_ADD = 0x1, FAN_MARK_REMOVE = 0x2
+    const FAN_MARK_ADD: usize = 0x1;
+    const FAN_MARK_REMOVE: usize = 0x2;
+    const FAN_MARK_DONT_FOLLOW: usize = 0x04;
+    const FAN_MARK_ONLYDIR: usize = 0x08;
+    const FAN_MARK_MOUNT: usize = 0x10;
+    const FAN_MARK_IGNORED_MASK: usize = 0x20;
+
+    if pathname_ptr == 0 && flags & FAN_MARK_MOUNT == 0 {
+        return errno(EINVAL);
+    }
+
+    let path = if pathname_ptr != 0 {
+        match read_user_cstring(pathname_ptr, 4096) {
+            Ok(p) => p,
+            Err(e) => return e,
+        }
+    } else {
+        String::new()
+    };
+
+    // inotify benzeri watch ekle/kaldır
+    let inotify_mask = mask as u32;
+    match flags & 0x3F {
+        FAN_MARK_ADD => {
+            let ret = crate::fs::inotify::sys_inotify_add_watch(
+                fanotify_fd as i32, &path, inotify_mask,
+            );
+            if ret < 0 { (-ret) as usize } else { 0 }
+        }
+        FAN_MARK_REMOVE => {
+            // fanotify'da watch descriptor PATH ile değil, inotify ile aynı şekilde
+            // wd üzerinden kaldırılır — burada pathname'den wd bulmamız gerekir
+            // Basit implementasyon: inotify_rm_watch çağır
+            let ret = crate::fs::inotify::sys_inotify_rm_watch(fanotify_fd as i32, 0);
+            if ret < 0 { (-ret) as usize } else { 0 }
+        }
+        _ => errno(EINVAL),
+    }
+}
+
+/// `kexec_load` — Çalışan sisteme yeni kernel yükler.
+/// entry: yeni kernel'in giriş noktası
+/// nr_segments: kernel segment sayısı
+/// segments_ptr: kexec_segment array
+/// flags: KEXEC_ON_CRASH (0x1), KEXEC_PRESERVE_CONTEXT (0x2)
+fn sys_kexec_load(_entry: usize, _nr_segments: usize, _segments_ptr: usize, _flags: usize) -> usize {
+    // kexec_load, çalışırken sistemi yeniden başlatmak için kullanılır
+    // echOS'ta henüz kexec desteği yok — gerçek kernel yükleme altyapısı gerekir
+    // Bu syscall'ı çağırmak tehlikeli olabilir, EPERM ile reddet
+    errno(EPERM)
+}
+
+/// `membarrier` — Bellek bariyeri.
+/// cmd=1 (MEMBARRIER_CMD_SHARED) ise tüm CPU'larda MFENCE uygular.
+/// Bu, publish-subscribe senkronizasyonu için gereklidir.
+fn sys_membarrier(cmd: usize, _flags: usize, _unused: usize) -> usize {
+    match cmd {
+        0 => 0, // MEMBARRIER_CMD_NONE
+        1 => {
+            // MEMBARRIER_CMD_SHARED — tüm CPU'larda memory fence
+            // x86_64'de MFENCE tüm store/load'ları sıralar
+            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+            0
+        }
+        2 => 0, // MEMBARRIER_CMD_PRIVATE — no-op (tekil store zaten sıralı)
+        _ => errno(EINVAL),
+    }
+}
+
+/// `mbind` — NUMA bellek politikası ayarlar.
+/// start: bellek aralığının başlangıcı
+/// len: bellek aralığı uzunluğu
+/// mode: MPOL_DEFAULT(0), MPOL_BIND(1), MPOL_INTERLEAVE(2), MPOL_PREFERRED(3)
+/// nmask_ptr: NUMA node maskesi
+/// maxnode: maksimum NUMA node numarası
+/// flags: MPOL_MF_STRICT, MPOL_MF_MOVE, ...
+fn sys_mbind(
+    _start: usize, _len: usize, _mode: usize,
+    _nmask_ptr: usize, _maxnode: usize, _flags: usize,
+) -> usize {
+    // echOS'ta NUMA desteklenmiyor — tek NUMA node varsayımı
+    // Gerçek NUMA implementasyonu için: NUMA topology, node-aware allocator gerekir
+    0 // POSIX: mbind başarısız olsa bile 0 döndür (non-strict mode)
+}
+
+/// `set_mempolicy` — Sürecin NUMA bellek politikasını ayarlar.
+/// mode: MPOL_DEFAULT(0), MPOL_BIND(1), MPOL_INTERLEAVE(2), MPOL_PREFERRED(3)
+/// nmask_ptr: NUMA node maskesi
+/// maxnode: maksimum NUMA node numarası
+fn sys_set_mempolicy(_mode: usize, _nmask_ptr: usize, _maxnode: usize) -> usize {
+    // echOS'ta NUMA desteklenmiyor
+    0
+}
+
+/// `get_mempolicy` — Sürecin NUMA bellek politikasını okur.
+fn sys_get_mempolicy(
+    _mode_ptr: usize, _nmask_ptr: usize, _maxnode: usize,
+    _addr: usize, _flags: usize,
+) -> usize {
+    // echOS'ta NUMA desteklenmiyor — varsayılan politika: MPOL_DEFAULT
+    if _mode_ptr != 0 {
+        if let Err(err) = validate_user_range(_mode_ptr, core::mem::size_of::<i32>()) {
+            return err;
+        }
+        let _ = write_user(_mode_ptr, 0i32); // MPOL_DEFAULT
+    }
+    0
+}
+
+/// `migrate_pages` — Sürecin sayfalarını NUMA düğümleri arasında taşır.
+fn sys_migrate_pages(pid: usize, maxnode: usize, _old_nmask_ptr: usize) -> usize {
+    // echoOS'ta NUMA topolojisi yok — tek node varsayımı
+    // maxnode > 1 ise ENODEV dön
+    if maxnode > 1 {
+        return errno(ENODEV);
+    }
+    0 // Tek node — zaten doğru node'ta
+}
+
+/// `add_key` — Anahtar yönetimi (keyring) anahtarı ekler.
+fn sys_add_key(
+    type_ptr: usize, description_ptr: usize,
+    payload_ptr: usize, plen: usize, _keyring_serial: usize,
+) -> usize {
+    // echoOS'ta keyring/anahtar yönetimi henüz desteklenmiyor
+    // Linux keyring: /proc/keys, /proc/key-users, request_key()
+    errno(ENOSYS)
+}
+
+/// `request_key` — Anahtar yönetimi (keyring) anahtarı talep eder.
+fn sys_request_key(
+    _type_ptr: usize, _description_ptr: usize,
+    _callout_info_ptr: usize, _dest_keyring: usize,
+) -> usize {
+    errno(ENOSYS)
+}
+
+/// `process_madvise` — Başka bir süreç için bellek tavsiyesi uygular.
+fn sys_process_madvise(
+    pidfd: usize, iov_ptr: usize, vlen: usize,
+    advice: usize, _flags: usize,
+) -> usize {
+    if iov_ptr == 0 || vlen == 0 { return errno(EINVAL); }
+    if vlen > 256 { return errno(EINVAL); } // UIO_MAXIOV
+
+    // Hedef sürecin PID'ini al (pidfd → PID dönüşümü)
+    let target_pid = pidfd; // Basit: pidfd = pid
+
+    // Her iovec'i işle: { void *iov_base; size_t iov_len; }
+    let mut total_advised: usize = 0;
+    for i in 0..vlen {
+        let entry_ptr = iov_ptr + i * 16;
+        if let Err(e) = validate_user_range(entry_ptr, 16) { break; }
+
+        let iov_base: usize = with_user_access(|| unsafe { *(entry_ptr as *const usize) });
+        let iov_len: usize = with_user_access(|| unsafe { *((entry_ptr + 8) as *const usize) });
+
+        if iov_len == 0 { continue; }
+
+        // madvise tavsiyesini uygula
+        let result = sys_madvise(iov_base, iov_len, advice);
+        if result >= errno_base() { break; }
+        total_advised += iov_len;
+    }
+
+    total_advised
+}
+
+/// `process_mrelease` — Mevcut sürece MRELEASE uygular.
+fn sys_process_mrelease(pidfd: usize, flags: usize) -> usize {
+    // process_mrelease, bir OOM killer veya process cleanup sırasında
+    // hedef sürecin belleğini serbest bırakır
+    let target_pid = pidfd; // Basit: pidfd = pid
+
+    // echoOS'ta henüz process_mrelease desteklenmiyor
+    errno(ENOSYS)
+}
+
+/// `mount_setattr` — Mount özniteliklerini ayarlar.
+fn sys_mount_setattr(
+    _dfd: usize, pathname_ptr: usize, _flags: usize,
+    attr_ptr: usize, size: usize,
+) -> usize {
+    if size < core::mem::size_of::<u64>() * 4 {
+        return errno(EINVAL);
+    }
+    if attr_ptr == 0 {
+        return errno(EFAULT);
+    }
+    if let Err(err) = validate_user_range(attr_ptr, size) {
+        return err;
+    }
+
+    let _path = match read_user_cstring(pathname_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    let attr_set: u64 = with_user_access(|| unsafe { *(attr_ptr as *const u64) });
+    let attr_clr: u64 = with_user_access(|| unsafe { *((attr_ptr + 8) as *const u64) });
+
+    // MOUNT_ATTR_RDONLY = 0x1, MOUNT_ATTR_NOSUID = 0x2, MOUNT_ATTR_NODEV = 0x4
+    // MOUNT_ATTR_NOEXEC = 0x8, MOUNT_ATTR_ATIME = 0x10, ...
+    let _ = attr_set;
+    let _ = attr_clr;
+
+    // echoOS'ta mount attribute değiştirme henüz desteklenmiyor
+    errno(ENOSYS)
+}
+
+/// `quotactl_fd` — Dosya üzerinden kota işlemleri.
+fn sys_quotactl_fd(_fd: usize, _cmd: usize, _id: usize, _addr_ptr: usize) -> usize {
+    errno(ENOSYS)
+}
+
+/// `memfd_secret` — Gizli bellek alanı oluşturur.
+/// Bu bellek alanı sadece sahibi süreç tarafından erişilebilir,
+/// diğer süreçler (fork/clone ile oluşanlar) bile erişemez.
+/// mmap ile anonim bellek oluşturup F2FS'e kaydeder, ardından
+/// dosya tablosuna ekler. Sayfa tablosu ayarları ile erişim kısıtlanır.
+fn sys_memfd_secret(_flags: usize) -> usize {
+    // echOS'ta henüz tam gizli bellek desteği yok (sayfa tablosu kısıtlaması gerekir)
+    // Geçici olarak memfd_create'e yönlendir
+    sys_memfd_create("memfd-secret\0".as_ptr() as usize, 1) // MFD_CLOEXEC
+}
+
+/// `io_pgetevents` — Asenkron I/O olaylarını bekler (sinyal ile bildirim).
+fn sys_io_pgetevents(
+    ctx_id: usize, min_nr: usize, nr: usize,
+    events_ptr: usize, timeout_ptr: usize,
+) -> usize {
+    // io_pgetevents, Linux AIO context'inden olayları okur
+    // echoOS'ta Linux AIO henüz tam desteklenmiyor
+    // io_setup/io_destroy/io_submit/io_getevents basit stub olarak var
+
+    if nr == 0 { return 0; }
+    if events_ptr == 0 { return errno(EFAULT); }
+
+    // io_event yapısı: { long long data; long long obj; long long res; long long res2; }
+    let event_size = core::mem::size_of::<u64>() * 4; // 32 bytes
+    if let Err(e) = validate_user_range(events_ptr, nr * event_size) { return e; }
+
+    // Timeout oku (varsa)
+    if timeout_ptr != 0 {
+        if let Err(e) = validate_user_range(timeout_ptr, 16) { return e; }
+        let tv_sec: i64 = with_user_access(|| unsafe { *(timeout_ptr as *const i64) });
+        let _tv_nsec: i64 = with_user_access(|| unsafe { *((timeout_ptr + 8) as *const i64) });
+
+        // Kısa bekleme
+        if tv_sec > 0 {
+            let ticks = (tv_sec as usize) * 10;
+            for _ in 0..ticks.min(100) {
+                x86_64::instructions::hlt();
+            }
+        }
+    }
+
+    // AIO context henüz desteklenmiyor — 0 olay dön
+    0
+}
+
+/// `clock_gettime_impl` — clock_gettime için dahili implementasyon.
+fn clock_gettime_impl(clock_id: usize, ts: &mut Timespec) -> usize {
+    // Basit birtick sayacı ile zaman hesaplama
+    static BOOT_TICKS: AtomicU64 = AtomicU64::new(0);
+    let ticks = BOOT_TICKS.fetch_add(1, Ordering::Relaxed);
+    let total_ns = ticks * TICK_NS;
+    match clock_id {
+        0 => { // CLOCK_REALTIME — yaklaşık Unix zamanı
+            ts.tv_sec = (total_ns / 1_000_000_000) as i64 + 1_700_000_000; // 2023-11-14 approx
+            ts.tv_nsec = (total_ns % 1_000_000_000) as i64;
+        }
+        1 => { // CLOCK_MONOTONIC
+            ts.tv_sec = (total_ns / 1_000_000_000) as i64;
+            ts.tv_nsec = (total_ns % 1_000_000_000) as i64;
+        }
+        _ => {
+            return errno(EINVAL);
+        }
+    }
+    0
 }

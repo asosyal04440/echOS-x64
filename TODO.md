@@ -1143,17 +1143,28 @@ Not:
 ## Faz 7 - Shell / POSIX / userland
 
 ### 7.1 Shell execution exactness
-- Durum: `In Progress`
-- Eksikler:
-  - redirect/append/pipe completeness
-  - job control ve signal UX polish
+- Durum: `Verified`
+- Kapanan kapsam:
+  - redirect/append/pipe completeness: `>` `>>` `<` `2>` `&>` tam destek
+  - job control: `&` background, `jobs`/`fg`/`bg`, `kill` builtin
+  - signal UX polish: Ctrl+C (SIGINT), Ctrl+\ (SIGQUIT), Ctrl+Z (SIGTSTP) foreground process'e yönlendiriliyor
+  - PATH lookup ve external command exec (spawn_user_image_task)
+  - real pipeline (sıralı, kernel mod uyumlu)
+  - process groups (pgid/sid), setsid/setpgid/getpgid/getsid
+  - tcgetpgrp/tcsetpgrp (TIOCGPGRP/TIOCSPGRP)
+  - $? exit code propagation
 
 ### 7.2 POSIX/userland surface
-- Durum: `In Progress`
-- Eksikler:
-  - scripting completeness
-  - PATH/completion/discovery fidelity
-  - userland utility long-tail
+- Durum: `Verified`
+- Kapanan kapsam:
+  - scripting completeness: if/elif/else/fi, while/for/until/case, function params ($1/$2/$3), local, break/continue, $(...) command sub, $((...)) arithmetic, set -e/-x/-u enforcement
+  - PATH/completion/discovery fidelity: which/command PATH search, tab completion PATH executable arama
+  - userland utility long-tail: 190+ builtin, export -p, umask, wait, source/. builtin
+  - shebang (#!) interpreter dispatch
+  - subshell ( ...) ve command group { ...; }
+  - startup files (/etc/profile, ~/.profile)
+  - persistent history (~/.history)
+  - f2fs→VFS migration (27/32 çağrı, kalan 5 mount/umount/sync)
 
 ---
 
@@ -1455,7 +1466,7 @@ Not:
   - text source manifest build/sign asamasinda `CompiledAppManifest` binary'sine donusturulur
   - runtime hot path binary manifest decode eder; text TOML parse'i launch hot path'inde kalmaz
   - deterministic payload hash ve manifest digest contract'i package verify/install zincirinde sabittir
-- `CS-1` artik [src/runtime_layer/service_control.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/runtime_layer/service_control.rs), [src/update.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/update.rs), [src/shell/cmd_pkg.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/shell/cmd_pkg.rs) ve [src/ipc/service_ipc.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/ipc/service_ipc.rs) uzerinden repo-visible olarak kapanir:
+- `CS-1` artik [src/runtime_layer/service_control.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/runtime_layer/service_control.rs), [src/update.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/update.rs), [src/shell/cmd_eon.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/shell/cmd_eon.rs) ve [src/ipc/service_ipc.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/ipc/service_ipc.rs) uzerinden repo-visible olarak kapanir:
   - `NetworkBroker` privileged remote fetch authority olarak service directory'de first-class endpoint'tir
   - package install/remove/verify/list/info/search shell yolu `PackageRegistry` service boundary disina cikmaz
   - update inspect/apply/status shell yolu typed `UpdateInstaller` service contract'ina baglidir
@@ -1496,7 +1507,7 @@ Not:
     Durum: `Yapildi, gercek ortamda test edilmedi`
   - `DIST-03`: curated binary compatibility matrisi icin supported/unsupported app family boundary'sini ayri truth table olarak yayinla
     Durum: `Verified`
-  - `DIST-04`: engineering PC -> signed update-index -> echOS installer zinciri tamamlandi; `echsdk update publish|inspect`, `UpdateInstaller` service ve `pkg update inspect|apply|status` shell yolu ayni fail-closed planner'a baglandi
+  - `DIST-04`: engineering PC -> signed update-index -> echOS installer zinciri tamamlandi; `echsdk update publish|inspect`, `UpdateInstaller` service ve `eon update inspect|apply|status` shell yolu ayni fail-closed planner'a baglandi
     Durum: `Yapildi, gercek ortamda test edilmedi`
   - `DIST-05`: reboot-gerektiren service bundle artifact'lari artik shared live store yerine hedef slotun `/config/update/slot-stage/...` alanina journal ile stage ediliyor; ilk saglikli boot bu journal'i commit edip sonra `mark_boot_success()` yapiyor
     Durum: `Yapildi, gercek ortamda test edilmedi`

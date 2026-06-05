@@ -21,6 +21,8 @@ param(
     [switch]$ForceVarsReset,
     [switch]$SuspendResumeSmoke,
     [switch]$FsSmokeTest,
+    [switch]$ShellSmokeTest,
+    [switch]$ShellCommandTest,
     [switch]$PackagedPeSmoke,
     [switch]$MixedUpdateSmoke,
     [string]$CuratedBundleDir = "",
@@ -28,6 +30,8 @@ param(
     [string]$OvmfCodePath = "",
     [string]$OvmfVarsTemplatePath = "",
     [string]$OvmfVarsPath = "",
+    [int]$HostHttpPort = 8080,
+    [int]$HostHttpsPort = 4443,
     [string[]]$EspExtraFile = @()
 )
 
@@ -375,6 +379,9 @@ function Test-ApplianceImageFresh {
     if ($seed.pending_slot -ne $PendingSlot) { return $false }
     if ([bool]$seed.auto_login -ne $AutoLogin) { return $false }
     if ([bool]$seed.suspend_resume_smoke) { return $false }
+    if ([bool]$seed.fs_smoke_test) { return $false }
+    if ([bool]$seed.shell_smoke_test) { return $false }
+    if ([bool]$seed.shell_command_test) { return $false }
     if ($null -ne $seed.update_smoke_request_url) { return $false }
     if ($null -ne $seed.pe_smoke_bundle) { return $false }
     if ($manifest.esp_fat -ne "fat32") { return $false }
@@ -384,8 +391,15 @@ function Test-ApplianceImageFresh {
     return $true
 }
 
-if (($SuspendResumeSmoke -and $PackagedPeSmoke) -or ($SuspendResumeSmoke -and $MixedUpdateSmoke) -or ($PackagedPeSmoke -and $MixedUpdateSmoke)) {
-    throw "SuspendResumeSmoke, PackagedPeSmoke ve MixedUpdateSmoke ayni anda kosulmaz"
+$exclusiveSmokeCount = 0
+$effectiveShellSmokeTest = $ShellSmokeTest -or $ShellCommandTest
+foreach ($smokeSwitch in @($SuspendResumeSmoke, $FsSmokeTest, $effectiveShellSmokeTest, $PackagedPeSmoke, $MixedUpdateSmoke)) {
+    if ($smokeSwitch) {
+        $exclusiveSmokeCount++
+    }
+}
+if ($exclusiveSmokeCount -gt 1) {
+    throw "SuspendResumeSmoke, FsSmokeTest, ShellSmokeTest/ShellCommandTest, PackagedPeSmoke ve MixedUpdateSmoke ayni anda kosulmaz"
 }
 
 try { taskkill /IM qemu-system-x86_64.exe /F 2>$null | Out-Null } catch {}
@@ -596,7 +610,7 @@ if ($useIso) {
     } else {
         Write-Host "Building Rust appliance tool..." -ForegroundColor Yellow
         $stageTimer = New-StageTimer
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echos_appliance", "--target", "x86_64-pc-windows-msvc")
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echos_appliance", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
         if ($hostBuildExit -ne 0) { throw "echos_appliance host build failed" }
         Write-StageElapsed "echos_appliance build" $stageTimer
     }
@@ -616,7 +630,7 @@ if ($useIso) {
         if ($hostBuildExit -ne 0) { throw "PE smoke sample build failed" }
 
         Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc")
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
         if ($hostBuildExit -ne 0) { throw "echsdk host build failed" }
         if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
 
@@ -656,7 +670,7 @@ if ($useIso) {
 
         Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
         $stageTimer = New-StageTimer
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc")
+        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
         if ($hostBuildExit -ne 0) { throw "echsdk host build failed" }
         Write-StageElapsed "echsdk build" $stageTimer
         if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
@@ -710,7 +724,7 @@ if ($useIso) {
         "--system-image-mib", "8",
         "--esp-fat", "fat32"
     )
-    if (-not $NoAutoLogin) {
+    if ((-not $NoAutoLogin) -and (-not $effectiveShellSmokeTest)) {
         $builderArgs += "--auto-login"
     }
     if ($SuspendResumeSmoke) {
@@ -718,6 +732,12 @@ if ($useIso) {
     }
     if ($FsSmokeTest) {
         $builderArgs += "--fs-smoke-test"
+    }
+    if ($ShellSmokeTest) {
+        $builderArgs += "--shell-smoke-test"
+    }
+    if ($ShellCommandTest) {
+        $builderArgs += "--shell-command-test"
     }
     if ($PackagedPeSmoke) {
         $builderArgs += @("--pe-smoke-bundle", $peSmokeBundlePath)
@@ -734,6 +754,7 @@ if ($useIso) {
     $canReuseAppliance = (-not $RebuildAppliance) -and `
         (-not $SuspendResumeSmoke) -and `
         (-not $FsSmokeTest) -and `
+        (-not $effectiveShellSmokeTest) -and `
         (-not $PackagedPeSmoke) -and `
         (-not $MixedUpdateSmoke) -and `
         ($EspExtraFile.Count -eq 0)
@@ -808,7 +829,7 @@ if ($useIso) {
         "-no-reboot",
         "-no-shutdown",
         # Ag: guest init path VirtIO-Net'e bind eder; TCG smoke'ta e1000e log gürültüsü üretmez.
-        "-netdev", "user,id=net0,hostfwd=tcp::8080-:80,hostfwd=tcp::4443-:443",
+        "-netdev", "user,id=net0,hostfwd=tcp::$HostHttpPort-:80,hostfwd=tcp::$HostHttpsPort-:443",
         "-device", "$nicModel,netdev=net0,mac=52:54:00:12:34:56"
     ) + $displayArgs + $videoArgs + $accelArgs
     if ($SuspendResumeSmoke) {
@@ -1080,7 +1101,7 @@ if (-not $useIso) {
         "[BOOTCTRL] stage=storage-mounted",
         "[BOOTCTRL] stage=display-ready"
     )
-    if (-not $NoAutoLogin) {
+    if ((-not $NoAutoLogin) -and (-not $effectiveShellSmokeTest)) {
         if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[DESKTOP] session bootstrap step=login-visible" -TimeoutSec 90)) {
             try { $proc.Kill() } catch {}
             throw "Login screen marker görülmedi"
@@ -1097,6 +1118,68 @@ if (-not $useIso) {
         if (-not $proc.HasExited) {
             Write-Host "Injecting hard reset after $ResetAfterSeconds seconds" -ForegroundColor DarkYellow
             try { $proc.Kill() } catch {}
+        }
+    } elseif ($ShellCommandTest) {
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SHELL_SMOKE] Ring 3 shell requested via boot control" -TimeoutSec 120)) {
+            throw "Shell command test request marker not observed"
+        }
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SHELL_TEST] command corpus queued bytes=" -TimeoutSec 120)) {
+            throw "Shell command corpus queue marker not observed"
+        }
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SHELL] Ring 3 shell spawned as task" -TimeoutSec 120)) {
+            throw "Ring 3 shell spawn marker not observed"
+        }
+        $expectedShellMarkers = @(
+            "ECHTEST:ECHO:PASS",
+            "ECHTEST:VAR:42",
+            "ECHTEST:ARITH:7",
+            "ECHTEST:PRINTF:ok",
+            "ECHTEST:IF:PASS",
+            "ECHTEST:FOR:1",
+            "ECHTEST:FOR:2",
+            "ECHTEST:FOR:3",
+            "ECHTEST:COLON:PASS",
+            "ECHTEST:LENGTH:5",
+            "ECHTEST:SUFFIX:bana",
+            "ECHTEST:PREFIX:nana",
+            "ECHTEST:GREEDY_SUFFIX:bn",
+            "ECHTEST:GREEDY_PREFIX:",
+            "ECHTEST:EVAL:PASS",
+            "ECHTEST:END:PASS"
+        )
+        foreach ($marker in $expectedShellMarkers) {
+            if (-not (Wait-FileMarker -Path $serialLogPath -Marker $marker -TimeoutSec 120)) {
+                throw "Shell command marker not observed: $marker"
+            }
+        }
+        $serialContent = if (Test-Path $serialLogPath) { Get-Content $serialLogPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $fatalMarkers = @("USER FAULT:", "STACK_OVERFLOW", "PAGE_FAULT", "Idle task attempted to exit", "[PANIC]")
+        foreach ($fatal in $fatalMarkers) {
+            if ($serialContent.Contains($fatal)) {
+                throw "Shell command test fatal marker observed: $fatal"
+            }
+        }
+        Write-Host "[PASS] shell command test: Ring 3 echshell executed corpus without fatal fault markers" -ForegroundColor Green
+        if ($Headless -and -not $proc.HasExited) {
+            $proc.Kill()
+        }
+    } elseif ($ShellSmokeTest) {
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SHELL_SMOKE] Ring 3 shell requested via boot control" -TimeoutSec 120)) {
+            throw "Shell smoke request marker not observed"
+        }
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[SHELL] Ring 3 shell spawned as task" -TimeoutSec 120)) {
+            throw "Ring 3 shell spawn marker not observed"
+        }
+        $serialContent = if (Test-Path $serialLogPath) { Get-Content $serialLogPath -Raw -ErrorAction SilentlyContinue } else { "" }
+        $fatalMarkers = @("USER FAULT:", "STACK_OVERFLOW", "PAGE_FAULT", "Idle task attempted to exit", "[PANIC]")
+        foreach ($fatal in $fatalMarkers) {
+            if ($serialContent.Contains($fatal)) {
+                throw "Shell smoke fatal marker observed: $fatal"
+            }
+        }
+        Write-Host "[PASS] shell smoke: Ring 3 echshell spawned without fatal fault markers" -ForegroundColor Green
+        if ($Headless -and -not $proc.HasExited) {
+            $proc.Kill()
         }
     } elseif ($SuspendResumeSmoke) {
         if ($NoAutoLogin) {
@@ -1185,7 +1268,7 @@ if (-not $useIso) {
         "[BOOTCTRL] stage=storage-mounted",
         "[BOOTCTRL] stage=display-ready"
     )
-    if (-not $NoAutoLogin) {
+    if ((-not $NoAutoLogin) -and (-not $effectiveShellSmokeTest)) {
         $requiredMarkers += @(
             "[BOOTCTRL] stage=desktop-ready",
             "[BOOTCTRL] stage=app-basket-ready",

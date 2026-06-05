@@ -291,7 +291,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
- "pem-rfc7468",
  "zeroize",
 ]
 
@@ -397,16 +396,21 @@ name = "echos-sdk-sys"
 version = "0.1.0"
 
 [[package]]
+name = "echshell"
+version = "0.1.0"
+dependencies = [
+ "spin",
+]
+
+[[package]]
 name = "ed448-goldilocks-plus"
 version = "0.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3689f7a47d1a75cd7483b8df8c4a0d5bea3bfc2ec41ef6e02e75123ef980bdf6"
 dependencies = [
  "crypto-bigint",
  "elliptic-curve",
  "pkcs8",
  "rand_core",
- "serdect 0.3.0",
+ "serdect",
  "sha3",
  "signature",
  "subtle",
@@ -420,18 +424,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6043086bf7973472e0c7dff2142ea0b680d30e18d9cc40f267efbf222bd47"
 dependencies = [
  "base16ct",
- "base64ct",
  "crypto-bigint",
  "digest",
  "ff",
  "generic-array",
  "group",
- "pem-rfc7468",
- "pkcs8",
  "rand_core",
  "sec1",
- "serde_json",
- "serdect 0.2.0",
  "subtle",
  "tap",
  "zeroize",
@@ -901,15 +900,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed089a1fbffe3337a1a345501c981f1eb1e47e69de5a40e852433e12953c3174"
 
 [[package]]
-name = "pem-rfc7468"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
-dependencies = [
- "base64ct",
-]
-
-[[package]]
 name = "pic8259"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1248,8 +1238,6 @@ dependencies = [
  "base16ct",
  "der",
  "generic-array",
- "pkcs8",
- "serdect 0.2.0",
  "subtle",
  "zeroize",
 ]
@@ -1314,16 +1302,6 @@ dependencies = [
 
 [[package]]
 name = "serdect"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a84f14a19e9a014bb9f4512488d9829a68e04ecabffb0f9904cd1ace94598177"
-dependencies = [
- "base16ct",
- "serde",
-]
-
-[[package]]
-name = "serdect"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f42f67da2385b51a5f9652db9c93d78aeaf7610bf5ec366080b6de810604af53"
@@ -1356,9 +1334,9 @@ dependencies = [
 
 [[package]]
 name = "sha3"
-version = "0.10.8"
+version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75872d278a8f37ef87fa0ddbda7802605cb18344497949862c0d4dcb291eba60"
+checksum = "77fd7028345d415a4034cf8777cd4f8ab1851274233b45f84e3d955502d93874"
 dependencies = [
  "digest",
  "keccak",

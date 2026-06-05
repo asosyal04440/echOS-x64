@@ -67,13 +67,13 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use ed448_goldilocks_plus::{Signature as Ed448Signature, VerifyingKey as Ed448VerifyingKey};
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use p256::ecdsa::signature::Verifier;
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use p384::ecdsa::{Signature as P384Signature, VerifyingKey as P384VerifyingKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384};
@@ -678,7 +678,7 @@ fn sec1_uncompressed_key(public_key: &[u8]) -> Vec<u8> {
     encoded
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn verify_p256_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
     let sec1 = sec1_uncompressed_key(public_key);
     let Ok(verifying_key) = P256VerifyingKey::from_sec1_bytes(&sec1) else {
@@ -690,12 +690,12 @@ fn verify_p256_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]
     verifying_key.verify(signed_data, &signature).is_ok()
 }
 
-#[cfg(target_os = "uefi")]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn verify_p256_signature(_public_key: &[u8], _signature: &[u8], _signed_data: &[u8]) -> bool {
     false
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn verify_p384_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
     let sec1 = sec1_uncompressed_key(public_key);
     let Ok(verifying_key) = P384VerifyingKey::from_sec1_bytes(&sec1) else {
@@ -707,12 +707,12 @@ fn verify_p384_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]
     verifying_key.verify(signed_data, &signature).is_ok()
 }
 
-#[cfg(target_os = "uefi")]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn verify_p384_signature(_public_key: &[u8], _signature: &[u8], _signed_data: &[u8]) -> bool {
     false
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn verify_ed448_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8]) -> bool {
     let Ok(public_key) = <&[u8; 57]>::try_from(public_key) else {
         return false;
@@ -726,7 +726,7 @@ fn verify_ed448_signature(public_key: &[u8], signature: &[u8], signed_data: &[u8
     verifying_key.verify_raw(&signature, signed_data).is_ok()
 }
 
-#[cfg(target_os = "uefi")]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn verify_ed448_signature(_public_key: &[u8], _signature: &[u8], _signed_data: &[u8]) -> bool {
     false
 }

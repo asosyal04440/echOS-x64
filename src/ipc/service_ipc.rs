@@ -487,13 +487,13 @@ mod tests {
 
     #[test]
     fn package_registry_service_runs_install_verify_remove_through_control_plane() {
-        let app_id = "org.echos.service.pkg";
+        let app_id = "org.echos.service.eon";
         let _ = request_package_registry_sync(
             0,
             PackageRegistryCommand::RemovePackage(app_id.to_string()),
         );
 
-        let source = demo_source_manifest(app_id, "service-pkg.elf");
+        let source = demo_source_manifest(app_id, "service-eon.elf");
         let entry = b"service-package-binary".to_vec();
         let entry_digest: [u8; 32] = Sha256::digest(&entry).into();
         let compiled =

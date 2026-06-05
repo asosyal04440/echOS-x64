@@ -1130,6 +1130,13 @@ pub fn verify_checksum_v6(
 
 /// TIME_WAIT süresi: 2×MSL = 2×60 saniye (tick cinsinden)
 const TIME_WAIT_DURATION: u64 = 120;
+/// Nagle gecikme süresi (tick cinsinden, ~200ms — RFC 896).
+/// Tick = 10ms kabul edilerek 200/10 = 20 hesaplandı.
+const NAGLE_DELAY_TICKS: u64 = 20;
+/// SYN yeniden iletim zaman aşımı (tick cinsinden, ~1 saniye = 100 tick).
+const SYN_TIMEOUT_TICKS: u64 = 100;
+/// SYN max yeniden iletim sayısı (RFC 6298 varsayılan: 3).
+const SYN_MAX_RETRANSMIT: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TcpState {
@@ -1191,6 +1198,22 @@ pub struct TcpConnection {
     pub time_wait_start: u64,
     // Yeniden iletim zamanlayıcısı (tick cinsinden)
     pub last_send_time: u64,
+    // TCP Keepalive (RFC 1122 Section 4.2.3.6)
+    pub keepalive_enabled: bool,
+    pub keepalive_idle: u32,   // tcp_keepalive_time (varsayılan 7200s)
+    pub keepalive_intvl: u32,  // tcp_keepalive_intvl (varsayılan 75s)
+    pub keepalive_probes: u32, // tcp_keepalive_probes (varsayılan 9)
+    pub keepalive_last_ping: u64,
+    pub keepalive_probe_count: u32,
+    // Nagle algoritması (RFC 896)
+    pub nagle_enabled: bool,   // TCP_NODELAY=false ise Nagle aktif
+    pub nagle_buffer: Vec<u8>, // Nagle bekleyen veri
+    pub nagle_last_send: u64,  // Son gönderim zamanı
+    // MSS (TCP Maximum Segment Size)
+    pub mss: u16,              // Negotiated MSS (varsayılan 536 RFC 2069)
+    // SYN yeniden iletim
+    pub syn_retransmit_count: u8,
+    pub syn_first_send_time: u64,
 }
 
 impl TcpConnection {
@@ -1236,6 +1259,22 @@ impl TcpConnection {
             time_wait_start: 0,
             // Yeniden iletim zamanlayıcısı
             last_send_time: 0,
+            // TCP Keepalive
+            keepalive_enabled: false,
+            keepalive_idle: 7200,   // 2 saat (saniye)
+            keepalive_intvl: 75,    // 75 saniye
+            keepalive_probes: 9,    // 9 başarısız ping
+            keepalive_last_ping: 0,
+            keepalive_probe_count: 0,
+            // Nagle algoritması
+            nagle_enabled: true,    // Varsayılan: Nagle aktif (TCP_NODELAY=false)
+            nagle_buffer: Vec::new(),
+            nagle_last_send: 0,
+            // MSS (varsayılan RFC 2069 minimum MSS)
+            mss: 536,
+            // SYN yeniden iletim
+            syn_retransmit_count: 0,
+            syn_first_send_time: 0,
         }
     }
 
@@ -1247,6 +1286,10 @@ impl TcpConnection {
         self.remote = remote;
         self.seq_num = crate::random::rand_u64() as u32;
         self.state = TcpState::SynSent;
+
+        // SYN yeniden iletim zamanlayıcısını başlat
+        self.syn_first_send_time = crate::task::scheduler::get_ticks() as u64;
+        self.syn_retransmit_count = 0;
 
         // SYN gönder - üç yönlü el sıkışmanın ilk adımı
         self.send_packet(TcpFlags::syn(), &[])?;
@@ -1287,12 +1330,72 @@ impl TcpConnection {
             return Err(NetError::ConnectionClosed);
         }
 
+        // Nagle algoritması (RFC 896):
+        // 1. TCP_NODELAY=true ise Nagle devre dışı → doğrudan gönder
+        if !self.nagle_enabled {
+            self.send_packet(TcpFlags::ack(), data)?;
+            self.seq_num = self.seq_num.wrapping_add(data.len() as u32);
+            self.snd_nxt = self.seq_num;
+            self.last_send_time = crate::task::scheduler::get_ticks() as u64;
+            return Ok(data.len());
+        }
+
+        // 2. Henüz onaylanmamış veri varsa (snd_una != snd_nxt) → tampona ekle
+        let has_unacked = self.snd_una != self.snd_nxt;
+        if has_unacked {
+            self.nagle_buffer.extend_from_slice(data);
+            return Ok(data.len());
+        }
+
+        // 3. Gönderilecek veri MSS'den küçükse ve buffer boşsa → tampona ekle, timer başlat
+        let mss_usize = self.mss as usize;
+        if data.len() < mss_usize && self.nagle_buffer.is_empty() {
+            self.nagle_buffer.extend_from_slice(data);
+            self.nagle_last_send = crate::task::scheduler::get_ticks() as u64;
+            return Ok(data.len());
+        }
+
+        // 4. Veri MSS'ye eşit veya daha büyükse → hemen gönder
+        // 5. Tampon doluysa (MSS+) → tamponu + yeni veriyi gönder
+        if !self.nagle_buffer.is_empty() {
+            let mut combined = core::mem::take(&mut self.nagle_buffer);
+            combined.extend_from_slice(data);
+            self.send_packet(TcpFlags::ack(), &combined)?;
+            self.seq_num = self.seq_num.wrapping_add(combined.len() as u32);
+            self.snd_nxt = self.seq_num;
+            self.last_send_time = crate::task::scheduler::get_ticks() as u64;
+            return Ok(data.len());
+        }
+
         self.send_packet(TcpFlags::ack(), data)?;
         self.seq_num = self.seq_num.wrapping_add(data.len() as u32);
         self.snd_nxt = self.seq_num;
         self.last_send_time = crate::task::scheduler::get_ticks() as u64;
 
         Ok(data.len())
+    }
+
+    /// Nagle zamanlayıcısını kontrol et — süresi dolmuşsa tampondaki veriyi gönder.
+    /// Periyodik olarak çağrılmalıdır (TCP timer thread tarafından).
+    pub fn flush_nagle(&mut self) -> Result<(), NetError> {
+        if !self.nagle_enabled || self.nagle_buffer.is_empty() {
+            return Ok(());
+        }
+
+        // Tüm onaylanmış veriler gönderildiyse veya timer dolduysa flush et
+        let has_unacked = self.snd_una != self.snd_nxt;
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let timer_expired = now.wrapping_sub(self.nagle_last_send) >= NAGLE_DELAY_TICKS;
+
+        if !has_unacked || timer_expired {
+            let data = core::mem::take(&mut self.nagle_buffer);
+            self.send_packet(TcpFlags::ack(), &data)?;
+            self.seq_num = self.seq_num.wrapping_add(data.len() as u32);
+            self.snd_nxt = self.seq_num;
+            self.last_send_time = now;
+        }
+
+        Ok(())
     }
 
     pub fn recv(&mut self, buf: &mut [u8]) -> Result<usize, NetError> {
@@ -1329,22 +1432,49 @@ impl TcpConnection {
     }
 
     fn send_packet(&mut self, flags: TcpFlags, data: &[u8]) -> Result<(), NetError> {
+        // SYN/SYN-ACK paketleri için TCP seçeneklerini oluştur
+        let mut options_buf: Vec<u8> = Vec::new();
+        if flags.syn {
+            // MSS seçeneği (4 bayt: kind=2, len=4, value=u16)
+            options_buf.push(TCPOPT_MSS);
+            options_buf.push(4);
+            let mss_bytes = self.mss.to_be_bytes();
+            options_buf.push(mss_bytes[0]);
+            options_buf.push(mss_bytes[1]);
+            // Window Scale seçeneği (3 bayt: kind=3, len=3, shift=8)
+            options_buf.push(TCPOPT_WINDOW_SCALE);
+            options_buf.push(3);
+            options_buf.push(8);
+            // SACK Permitted seçeneği (2 bayt: kind=4, len=2)
+            options_buf.push(TCPOPT_SACK_PERMITTED);
+            options_buf.push(2);
+        }
+
+        // data_offset: 5 (20 bayt) + seçeneklerin 32-bit kelime sayısı
+        let opts_len_words = (options_buf.len() + 3) / 4; // yukarı yuvarla
+        let data_offset = 5 + opts_len_words as u8;
+
         let mut header = TcpHeader {
             src_port: self.local.port,
             dst_port: self.remote.port,
             seq_num: self.seq_num,
             ack_num: self.ack_num,
-            data_offset: 5,
+            data_offset,
             flags,
             window_size: self.window_size,
             checksum: 0,
             urgent_ptr: 0,
         };
 
-        // TCP segmentini oluştur
-        let mut segment = vec![0u8; TcpHeader::MIN_SIZE + data.len()];
+        // TCP segmentini oluştur: başlık + seçenekler + veri
+        let mut segment = vec![0u8; TcpHeader::MIN_SIZE + options_buf.len() + data.len()];
         header.serialize(&mut segment)?;
-        segment[TcpHeader::MIN_SIZE..].copy_from_slice(data);
+        // Seçenekleri başlıktan hemen sonraya yerleştir
+        segment[TcpHeader::MIN_SIZE..TcpHeader::MIN_SIZE + options_buf.len()]
+            .copy_from_slice(&options_buf);
+        // Veriyi seçeneklerden sonra yerleştir
+        segment[TcpHeader::MIN_SIZE + options_buf.len()..]
+            .copy_from_slice(data);
 
         // Sağlama toplamını sahte başlık ile hesapla
         match (self.local.ip, self.remote.ip) {
@@ -1385,10 +1515,33 @@ impl TcpConnection {
     }
 
     fn on_packet(&mut self, header: &TcpHeader, data: &[u8]) -> Result<(), NetError> {
+        // RST işlenirse bağlantıyı hemen kapat
+        if header.flags.rst {
+            if self.state == TcpState::SynSent || self.state == TcpState::SynReceived {
+                self.state = TcpState::Closed;
+                return Ok(());
+            }
+            if self.state == TcpState::Established || self.state == TcpState::CloseWait {
+                self.state = TcpState::Closed;
+                return Ok(());
+            }
+            // Diğer durumlarda RST atla (zaten kapandı)
+            return Ok(());
+        }
+
         // ACK numarasını güncelle
         if header.flags.ack {
             self.ack_num = header.ack_num;
         }
+
+        // TCP seçeneklerini ayrıştır (header'daki options alanından)
+        let header_len = header.header_len();
+        let raw_header: Vec<u8> = {
+            let mut buf = vec![0u8; header_len];
+            header.serialize(&mut buf)?;
+            buf
+        };
+        let options = TcpOptions::parse(&raw_header, header_len);
 
         // TCP durum makinesi - gelen pakete göre durum geçişleri
         match self.state {
@@ -1396,7 +1549,6 @@ impl TcpConnection {
                 if header.flags.syn {
                     // Yeni bağlantı girişimi - el sıkışmanın ilk adımı
                     self.remote = SocketAddr::new(
-                        // IP, IP katmanından gelir
                         match self.family {
                             AddressFamily::IPV6 => IpAddr::V6(super::ipv6::Ipv6Addr::UNSPECIFIED),
                             _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
@@ -1405,6 +1557,14 @@ impl TcpConnection {
                     );
                     self.seq_num = crate::random::rand_u64() as u32;
                     self.ack_num = header.seq_num.wrapping_add(1);
+
+                    // MSS müzakeresi — karşı tarafın MSS değerini al
+                    if let Some(peer_mss) = options.mss {
+                        if peer_mss > 0 && peer_mss < self.mss {
+                            self.mss = peer_mss;
+                        }
+                    }
+
                     self.state = TcpState::SynReceived;
 
                     // SYN-ACK gönder - ikinci adım
@@ -1415,10 +1575,35 @@ impl TcpConnection {
                 if header.flags.syn && header.flags.ack {
                     // SYN-ACK alındı - el sıkışmanın ikinci adımı
                     self.ack_num = header.seq_num.wrapping_add(1);
+
+                    // MSS müzakeresi — karşı tarafın MSS değerini al
+                    if let Some(peer_mss) = options.mss {
+                        if peer_mss > 0 && peer_mss < self.mss {
+                            self.mss = peer_mss;
+                        }
+                    }
+
+                    // Pencere ölçekleme müzakeresi — karşı tarafın WS değerini al
+                    if let Some(ws) = options.window_scale {
+                        self.peer_ws_scale = ws.scale;
+                    }
+
+                    // SACK izni — karşı taraf SACK'e izin veriyor mu?
+                    if options.sack_permitted {
+                        self.sack_permitted = true;
+                    }
+
                     self.state = TcpState::Established;
+                    // SYN yeniden iletim sayacını sıfırla
+                    self.syn_retransmit_count = 0;
 
                     // ACK gönder - üçüncü ve son adım
                     self.send_packet(TcpFlags::ack(), &[])?;
+                } else if header.flags.syn {
+                    // Simultaneous open — her iki taraf da SYN göndermiş
+                    self.ack_num = header.seq_num.wrapping_add(1);
+                    self.state = TcpState::SynReceived;
+                    self.send_packet(TcpFlags::syn_ack(), &[])?;
                 }
             }
             TcpState::SynReceived => {
@@ -1441,6 +1626,9 @@ impl TcpConnection {
                             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
                         };
                         self.snd_una = header.ack_num;
+                        // Keepalive zamanlayıcısını sıfırla (ACK alındı → bağlantı canlı)
+                        self.keepalive_last_ping = now;
+                        self.keepalive_probe_count = 0;
                     }
                 }
 
@@ -1459,10 +1647,27 @@ impl TcpConnection {
                     self.ack_num = self.ack_num.wrapping_add(1);
                     self.send_packet(TcpFlags::ack(), &[])?;
                 }
+
+                // Geçersiz ACK kontrolü — ACK_num snd_nxt'den büyükse veya
+                // snd_una'dan küçükse RST gönder (RFC 793 Section 3.9)
+                if header.flags.ack && !data.is_empty() {
+                    if header.ack_num.wrapping_sub(self.snd_nxt) < 0x8000_0000
+                        && header.ack_num != self.snd_nxt
+                    {
+                        self.send_packet(TcpFlags::rst(), &[])?;
+                    }
+                }
             }
             TcpState::FinWait1 => {
                 if header.flags.ack {
                     self.state = TcpState::FinWait2;
+                }
+                // FIN+ACK alınırsa (simultaneous close)
+                if header.flags.fin {
+                    self.ack_num = self.ack_num.wrapping_add(1);
+                    self.send_packet(TcpFlags::ack(), &[])?;
+                    self.state = TcpState::TimeWait;
+                    self.time_wait_start = crate::task::scheduler::get_ticks() as u64;
                 }
             }
             TcpState::FinWait2 => {
@@ -1476,6 +1681,12 @@ impl TcpConnection {
             TcpState::LastAck => {
                 if header.flags.ack {
                     self.state = TcpState::Closed;
+                }
+            }
+            TcpState::Closing => {
+                if header.flags.ack {
+                    self.state = TcpState::TimeWait;
+                    self.time_wait_start = crate::task::scheduler::get_ticks() as u64;
                 }
             }
             _ => {}
@@ -1545,6 +1756,94 @@ impl TcpConnection {
                 self.send_packet(TcpFlags::ack(), &data)?;
                 self.last_send_time = crate::task::scheduler::get_ticks() as u64;
             }
+        }
+
+        Ok(())
+    }
+
+    /// TCP Keepalive kontrolü (RFC 1122 Section 4.2.3.6).
+    /// Boşta geçen süre keepalive_time'e ulaşırsa ping gönder, her keepalive_intvl'de tekrar dene.
+    /// keepalive_probes başarısız ping sonrası bağlantıyı kapat.
+    pub fn check_keepalive(&mut self) -> Result<(), NetError> {
+        if !self.keepalive_enabled || self.state != TcpState::Established {
+            return Ok(());
+        }
+
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let idle_ticks = now.wrapping_sub(self.keepalive_last_ping);
+
+        // İlk keepalive zamanı henüz dolmadıysa atla
+        if self.keepalive_probe_count == 0 && idle_ticks < self.keepalive_idle as u64 {
+            return Ok(());
+        }
+
+        // Ping zamanı geldi mi?
+        let since_last = if self.keepalive_probe_count == 0 {
+            idle_ticks
+        } else {
+            now.wrapping_sub(self.keepalive_last_ping)
+        };
+
+        if since_last >= self.keepalive_intvl as u64 {
+            self.keepalive_probe_count += 1;
+            self.keepalive_last_ping = now;
+
+            crate::serial_println!(
+                "[TCP] Keepalive probe #{}/{} sent to {}:{}",
+                self.keepalive_probe_count,
+                self.keepalive_probes,
+                self.remote.ip,
+                self.remote.port.0
+            );
+
+            // Boş bir veri segmenti gönder (seq = snd_nxt - 1) — RFC 1122
+            self.send_packet(TcpFlags::ack(), &[])?;
+
+            // Maksimum probe sayısına ulaşıldıysa bağlantıyı kapat
+            if self.keepalive_probe_count >= self.keepalive_probes {
+                crate::serial_println!("[TCP] Keepalive: connection dead, closing");
+                self.state = TcpState::Closed;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// SYN yeniden iletim kontrolü — SynSent durumunda SYN zaman aşımı kontrolü.
+    /// SYN_MAX_RETRANSMIT kez yeniden denediyse bağlantıyı kapat.
+    pub fn check_syn_retransmit(&mut self) -> Result<(), NetError> {
+        if self.state != TcpState::SynSent || self.syn_first_send_time == 0 {
+            return Ok(());
+        }
+
+        let now = crate::task::scheduler::get_ticks() as u64;
+        let elapsed = now.wrapping_sub(self.syn_first_send_time);
+
+        if elapsed >= SYN_TIMEOUT_TICKS {
+            if self.syn_retransmit_count >= SYN_MAX_RETRANSMIT {
+                crate::serial_println!(
+                    "[TCP] SYN retransmit limit reached, connection failed to {}:{}",
+                    self.remote.ip,
+                    self.remote.port.0
+                );
+                self.state = TcpState::Closed;
+                return Ok(());
+            }
+
+            crate::serial_println!(
+                "[TCP] SYN retransmit #{}/{} to {}:{}",
+                self.syn_retransmit_count + 1,
+                SYN_MAX_RETRANSMIT,
+                self.remote.ip,
+                self.remote.port.0
+            );
+
+            self.syn_retransmit_count += 1;
+            self.send_packet(TcpFlags::syn(), &[])?;
+            self.syn_first_send_time = now;
+
+            // Üstel geri çekilme: RTO'yu iki katına çıkar
+            self.rto = (self.rto * 2).min(60000);
         }
 
         Ok(())
@@ -2224,7 +2523,7 @@ impl CcState {
 // Tüm TCP bağlantıları ve dinleyiciler global tablolarda saklanır.
 // spin::Mutex ile iş parçacığı güvenliği sağlanır.
 
-static TCP_CONNECTIONS: Mutex<BTreeMap<u32, Box<TcpConnection>>> = Mutex::new(BTreeMap::new());
+pub static TCP_CONNECTIONS: Mutex<BTreeMap<u32, Box<TcpConnection>>> = Mutex::new(BTreeMap::new());
 static TCP_LISTENERS: Mutex<BTreeMap<(AddressFamily, Port), u32>> = Mutex::new(BTreeMap::new());
 /// Kabul kuyruğu: dinleyici soket ID'si -> bekleyen çocuk bağlantı ID'leri
 static ACCEPT_QUEUE: Mutex<BTreeMap<u32, Vec<u32>>> = Mutex::new(BTreeMap::new());
@@ -2681,6 +2980,46 @@ pub fn time_wait_gc() {
     for id in &expired_ids {
         crate::serial_println!("[TCP] TIME_WAIT expired, removing connection {}", id);
         conns.remove(id);
+    }
+}
+
+/// TCP zamanlayıcı tetikleme — tüm aktif bağlantılarda periyodik kontrolleri çalıştır.
+/// Zamanlayıcı kesmesi veya idle döngü tarafından periyodik olarak çağrılmalıdır.
+pub fn tcp_timer_tick() {
+    let mut conns = TCP_CONNECTIONS.lock();
+    let ids: Vec<u32> = conns.keys().copied().collect();
+    let mut closed_ids: Vec<u32> = Vec::new();
+
+    for &id in &ids {
+        if let Some(conn) = conns.get_mut(&id) {
+            // Nagle flush kontrolü
+            let _ = conn.flush_nagle();
+            // Yeniden iletim kontrolü
+            let _ = conn.check_retransmit();
+            // Keepalive kontrolü
+            let _ = conn.check_keepalive();
+            // SYN yeniden iletim kontrolü
+            let _ = conn.check_syn_retransmit();
+            // Kapanmış bağlantıları işaretle
+            if conn.state == TcpState::Closed {
+                closed_ids.push(id);
+            }
+        }
+    }
+
+    // TIME_WAIT GC
+    let now = crate::task::scheduler::get_ticks() as u64;
+    for (&id, conn) in conns.iter() {
+        if conn.state == TcpState::TimeWait
+            && conn.time_wait_start > 0
+            && now.wrapping_sub(conn.time_wait_start) >= TIME_WAIT_DURATION
+        {
+            closed_ids.push(id);
+        }
+    }
+
+    for id in closed_ids {
+        conns.remove(&id);
     }
 }
 

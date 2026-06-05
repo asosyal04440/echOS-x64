@@ -135,6 +135,27 @@ pub fn set_kernel_stack(stack_top: VirtAddr) {
     }
 }
 
+/// Mevcut CPU'nun TSS.RSP0 değerini okur (diagnostic amaçlı).
+///
+/// TSS.RSP0: Ring 3'ten Ring 0'a geçişte (interrupt/SYSCALL) CPU'nun
+/// kullanacağı kernel stack tepesidir. Bu değer 0 veya geçersizse,
+/// herhangi bir fault/interrupt triple fault'a yol açar.
+pub fn current_tss_rsp0() -> u64 {
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    let list = PER_CPU_GDTS.lock();
+    if let Some(ptr) = list.get(cpu_id).copied() {
+        if ptr != 0 {
+            unsafe {
+                let tss = (*(ptr as *mut PerCpuGdt)).tss;
+                if !tss.is_null() {
+                    return (*tss).privilege_stack_table[0].as_u64();
+                }
+            }
+        }
+    }
+    0
+}
+
 /// Mevcut CPU'nun aktif selector değerlerini döndürür.
 pub fn current_selectors() -> Selectors {
     let cpu_id = crate::cpu::smp::current_cpu_id();

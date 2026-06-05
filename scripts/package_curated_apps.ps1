@@ -101,7 +101,7 @@ function Get-EchSdkBinary {
     $sdkExe = Join-Path $PSScriptRoot "..\\target\\x86_64-pc-windows-msvc\\debug\\echsdk.exe"
     $sdkExe = [System.IO.Path]::GetFullPath($sdkExe)
     if (-not (Test-Path $sdkExe)) {
-        & cargo build --quiet --target x86_64-pc-windows-msvc --bin echsdk
+        & cargo build --quiet --target x86_64-pc-windows-msvc --bin echsdk --features host_smoke
         if ($LASTEXITCODE -ne 0) {
             throw "cargo build failed for echsdk"
         }

@@ -21,6 +21,8 @@ const BOOT_CONTROL_SIZE: usize = 136;
 const BOOT_FLAG_AUTO_LOGIN: u8 = 1 << 0;
 const BOOT_FLAG_SUSPEND_RESUME_SMOKE: u8 = 1 << 1;
 const BOOT_FLAG_FS_SMOKE_TEST: u8 = 1 << 2;
+const BOOT_FLAG_SHELL_SMOKE_TEST: u8 = 1 << 3;
+const BOOT_FLAG_SHELL_COMMAND_TEST: u8 = 1 << 4;
 
 const F2FS_MAGIC: u32 = 0xF2F52010;
 const F2FS_SUPERBLOCK_SECTOR_OFFSET: usize = 2;
@@ -174,6 +176,8 @@ struct ApplianceConfig {
     auto_login: bool,
     suspend_resume_smoke: bool,
     fs_smoke_test: bool,
+    shell_smoke_test: bool,
+    shell_command_test: bool,
     update_smoke_request_url: Option<String>,
     pe_smoke_bundle: Option<PathBuf>,
     bundles: Vec<PathBuf>,
@@ -182,7 +186,11 @@ struct ApplianceConfig {
 }
 
 fn run_appliance(mut args: Args) -> Result<(), String> {
-    std::fs::write("C:\\Users\\Bahadir\\Desktop\\dersler_ve_projeler\\echOS\\logs\\appliance_debug.txt", "run_appliance called\n").unwrap();
+    std::fs::write(
+        "C:\\Users\\Bahadir\\Desktop\\dersler_ve_projeler\\echOS\\logs\\appliance_debug.txt",
+        "run_appliance called\n",
+    )
+    .unwrap();
     let mut cfg = ApplianceConfig {
         efi: PathBuf::new(),
         bootctrl: None,
@@ -194,6 +202,8 @@ fn run_appliance(mut args: Args) -> Result<(), String> {
         auto_login: false,
         suspend_resume_smoke: false,
         fs_smoke_test: false,
+        shell_smoke_test: false,
+        shell_command_test: false,
         update_smoke_request_url: None,
         pe_smoke_bundle: None,
         bundles: Vec::new(),
@@ -216,6 +226,11 @@ fn run_appliance(mut args: Args) -> Result<(), String> {
             "--auto-login" => cfg.auto_login = true,
             "--suspend-resume-smoke" => cfg.suspend_resume_smoke = true,
             "--fs-smoke-test" => cfg.fs_smoke_test = true,
+            "--shell-smoke-test" => cfg.shell_smoke_test = true,
+            "--shell-command-test" => {
+                cfg.shell_smoke_test = true;
+                cfg.shell_command_test = true;
+            }
             "--update-smoke-request-url" => {
                 cfg.update_smoke_request_url = Some(args.value("--update-smoke-request-url")?)
             }
@@ -279,6 +294,8 @@ fn build_appliance(cfg: &ApplianceConfig) -> Result<(), String> {
             cfg.auto_login,
             cfg.suspend_resume_smoke,
             cfg.fs_smoke_test,
+            cfg.shell_smoke_test,
+            cfg.shell_command_test,
         )?,
     };
     let pe_smoke_bundle = match &cfg.pe_smoke_bundle {
@@ -1560,6 +1577,8 @@ fn build_boot_control(
     auto_login: bool,
     suspend_resume_smoke: bool,
     fs_smoke_test: bool,
+    shell_smoke_test: bool,
+    shell_command_test: bool,
 ) -> Result<Vec<u8>, String> {
     let active = slot_id(active_slot)?;
     let pending = slot_id(pending_slot)?;
@@ -1582,6 +1601,12 @@ fn build_boot_control(
     }
     if fs_smoke_test {
         flags |= BOOT_FLAG_FS_SMOKE_TEST;
+    }
+    if shell_smoke_test {
+        flags |= BOOT_FLAG_SHELL_SMOKE_TEST;
+    }
+    if shell_command_test {
+        flags |= BOOT_FLAG_SHELL_COMMAND_TEST;
     }
     blob[48] = flags;
     write_u32(&mut blob, 128, 0);
@@ -1652,6 +1677,15 @@ fn build_manifest(
     out.push_str(&format!(
         "    \"suspend_resume_smoke\": {},\n",
         cfg.suspend_resume_smoke
+    ));
+    out.push_str(&format!("    \"fs_smoke_test\": {},\n", cfg.fs_smoke_test));
+    out.push_str(&format!(
+        "    \"shell_smoke_test\": {},\n",
+        cfg.shell_smoke_test
+    ));
+    out.push_str(&format!(
+        "    \"shell_command_test\": {},\n",
+        cfg.shell_command_test
     ));
     match &cfg.update_smoke_request_url {
         Some(url) => out.push_str(&format!(

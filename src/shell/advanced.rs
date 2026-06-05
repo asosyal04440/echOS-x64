@@ -43,6 +43,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use super::shell_api;
+
 // ============================================================================
 // ENVIRONMENT VARIABLES (ORTAM DEĞİŞKENLERİ)
 // ============================================================================
@@ -311,6 +313,55 @@ impl History {
             .enumerate()
             .map(|(i, cmd)| (i + 1, cmd.clone()))
             .collect()
+    }
+
+    /// Geçmişi dosyaya kaydet — ~/.history
+    /// Her komut ayrı bir satır, POSIX shell history formatı
+    pub fn save_to_file(&self, path: &str) {
+        let entries = self.entries.lock();
+        let mut content = alloc::string::String::new();
+        for entry in entries.iter() {
+            content.push_str(entry);
+            content.push('\n');
+        }
+        // Dosyayı oluştur/temizle ve yaz
+        let fd = shell_api::fs_open(
+            path,
+            shell_api::O_WRONLY | shell_api::O_CREAT | shell_api::O_TRUNC,
+        );
+        if fd >= 0 {
+            let bytes = content.as_bytes();
+            let _ = shell_api::fs_write(fd, bytes);
+            shell_api::fs_close(fd);
+        }
+    }
+
+    /// Dosyadan geçmişi yükle — ~/.history
+    pub fn load_from_file(&self, path: &str) {
+        let fd = shell_api::fs_open(path, shell_api::O_RDONLY);
+        if fd < 0 {
+            return; // Dosya yoksa sessizce çık
+        }
+        let mut buf = alloc::vec![0u8; 65536];
+        if let Ok(n) = shell_api::fs_read(fd, &mut buf) {
+            shell_api::fs_close(fd);
+            if n == 0 {
+                return;
+            }
+            buf.truncate(n);
+            if let Ok(content) = core::str::from_utf8(&buf) {
+                let mut entries = self.entries.lock();
+                for line in content.lines() {
+                    let line = line.trim();
+                    if !line.is_empty() && entries.len() < self.max_size {
+                        entries.push(line.to_string());
+                    }
+                }
+                *self.current_index.lock() = entries.len();
+            }
+        } else {
+            shell_api::fs_close(fd);
+        }
     }
 
     /// Reverse search başlatır (Ctrl+R)
@@ -724,10 +775,10 @@ impl Completer {
             .unwrap_or_else(|| String::from("/bin:/usr/bin:/sbin"));
 
         for dir in path_value.split(':').filter(|segment| !segment.is_empty()) {
-            if let Ok(entries) = crate::fs::f2fs::list_dir(dir) {
+            if let Ok(entries) = shell_api::fs_list_dir(dir) {
                 for entry in entries {
-                    if entry.name.starts_with(prefix) {
-                        completions.insert(entry.name);
+                    if entry.starts_with(prefix) {
+                        completions.insert(entry);
                     }
                 }
             }
@@ -765,13 +816,13 @@ impl Completer {
         };
 
         // Dizini oku
-        if let Ok(entries) = crate::fs::f2fs::list_dir(&dir) {
+        if let Ok(entries) = shell_api::fs_list_dir(&dir) {
             for entry in entries {
-                if entry.name.starts_with(&file_prefix) {
+                if entry.starts_with(&file_prefix) {
                     let full_path = if dir == "/" {
-                        format!("/{}", entry.name)
+                        format!("/{}", entry)
                     } else {
-                        format!("{}{}", dir, entry.name)
+                        format!("{}{}", dir, entry)
                     };
                     completions.push(full_path);
                 }
@@ -855,6 +906,10 @@ pub enum Token {
     Or,             // ||
     Semicolon,      // ;
     Newline,        // \n
+    SubshellOpen,   // (
+    SubshellClose,  // )
+    BraceOpen,      // {
+    BraceClose,     // }
 }
 
 /// Komut satırı lexer'ı (tokenizer).
@@ -919,6 +974,24 @@ impl Tokenizer {
                     }
                     tokens.push(Token::RedirectIn);
                 }
+                '2' => {
+                    // 2> veya 2>> — stderr yönlendirmesi
+                    if chars.peek() == Some(&'>') {
+                        chars.next();
+                        if !current_word.is_empty() {
+                            tokens.push(Token::Word(current_word.clone()));
+                            current_word.clear();
+                        }
+                        if chars.peek() == Some(&'>') {
+                            chars.next();
+                            // 2>> — stderr append (şimdilik 2> gibi davranır)
+                        }
+                        tokens.push(Token::RedirectErr);
+                    } else {
+                        // Normal '2' karakteri — word olarak ekle
+                        current_word.push('2');
+                    }
+                }
                 '&' => {
                     if !current_word.is_empty() {
                         tokens.push(Token::Word(current_word.clone()));
@@ -944,6 +1017,34 @@ impl Tokenizer {
                         current_word.clear();
                     }
                     tokens.push(Token::Semicolon);
+                }
+                '(' => {
+                    if !current_word.is_empty() {
+                        tokens.push(Token::Word(current_word.clone()));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::SubshellOpen);
+                }
+                ')' => {
+                    if !current_word.is_empty() {
+                        tokens.push(Token::Word(current_word.clone()));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::SubshellClose);
+                }
+                '{' => {
+                    if !current_word.is_empty() {
+                        tokens.push(Token::Word(current_word.clone()));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::BraceOpen);
+                }
+                '}' => {
+                    if !current_word.is_empty() {
+                        tokens.push(Token::Word(current_word.clone()));
+                        current_word.clear();
+                    }
+                    tokens.push(Token::BraceClose);
                 }
                 '\n' => {
                     if !current_word.is_empty() {
@@ -1177,6 +1278,15 @@ impl Parser {
                             background: false,
                         };
                     }
+                }
+                // Subshell ve command group token'ları — parse seviyesinde
+                // basitçe word olarak ele al (execute_line'da özel işlenir)
+                Token::SubshellOpen
+                | Token::SubshellClose
+                | Token::BraceOpen
+                | Token::BraceClose => {
+                    // Bu token'lar execute_line tarafından işlenir,
+                    // parser seviyesinde word olarak geç
                 }
             }
             i += 1;

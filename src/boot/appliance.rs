@@ -14,6 +14,8 @@ const DEFAULT_BOOT_ATTEMPTS: u8 = 3;
 const BOOT_FLAG_AUTO_LOGIN: u8 = 1 << 0;
 const BOOT_FLAG_SUSPEND_RESUME_SMOKE: u8 = 1 << 1;
 const BOOT_FLAG_FS_SMOKE_TEST: u8 = 1 << 2;
+const BOOT_FLAG_SHELL_SMOKE_TEST: u8 = 1 << 3;
+const BOOT_FLAG_SHELL_COMMAND_TEST: u8 = 1 << 4;
 #[cfg(target_os = "uefi")]
 const APPLIANCE_VENDOR_GUID: VariableVendor = VariableVendor(uefi::Guid::new(
     [0x83, 0x61, 0x26, 0x6d],
@@ -212,6 +214,14 @@ impl BootControlBlock {
         (self.boot_flags() & BOOT_FLAG_FS_SMOKE_TEST) != 0
     }
 
+    pub fn shell_smoke_test_enabled(&self) -> bool {
+        (self.boot_flags() & BOOT_FLAG_SHELL_SMOKE_TEST) != 0
+    }
+
+    pub fn shell_command_test_enabled(&self) -> bool {
+        (self.boot_flags() & BOOT_FLAG_SHELL_COMMAND_TEST) != 0
+    }
+
     pub fn begin_boot(&mut self) {
         let pending = self.pending_slot();
         let active = self.active_slot();
@@ -383,6 +393,14 @@ pub fn suspend_resume_smoke_requested() -> bool {
 
 pub fn fs_smoke_test_requested() -> bool {
     (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_FS_SMOKE_TEST) != 0
+}
+
+pub fn shell_smoke_test_requested() -> bool {
+    (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_SHELL_SMOKE_TEST) != 0
+}
+
+pub fn shell_command_test_requested() -> bool {
+    (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_SHELL_COMMAND_TEST) != 0
 }
 
 pub fn clear_suspend_resume_smoke_request() {

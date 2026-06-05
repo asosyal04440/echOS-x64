@@ -47,3 +47,9 @@ pub use super::super::task::{
     sys_futex, sys_futex_waitv, sys_rseq, wait_on_address, wake_by_address_all,
     wake_by_address_single, Priority, TaskState,
 };
+
+pub use super::super::task::scheduler::current_task_id;
+pub use super::super::task::signal::send_signal as send_signal_to;
+pub use super::super::task::scheduler::task_exists;
+pub use super::super::task::scheduler::kill_task as kill_task_by_id;
+pub use super::super::task::scheduler::list_tasks;

@@ -99,6 +99,10 @@ pub enum SocketOption {
     SndBuf(usize),
     RcvTimeout(u64),
     SndTimeout(u64),
+    KeepIdle(u32),
+    KeepIntvl(u32),
+    KeepCnt(u32),
+    MaxSeg(u16),
 }
 
 /// Bir soket nesnesini temsil eden yapı.
@@ -541,6 +545,12 @@ struct SocketOptionsState {
     snd_buf: usize,
     rcv_timeout: u64,
     snd_timeout: u64,
+    // TCP Keepalive parametreleri (Linux varsayılanları)
+    keep_idle: u32,   // Boşta bekleme süresi (saniye, default 7200 = 2 saat)
+    keep_intvl: u32,  // Paketler arası interval (saniye, default 75)
+    keep_cnt: u32,    // Başarısız ping sayısı (default 9)
+    // TCP_MAXSEG
+    max_seg: u16,     // MSS değeri (0 = otomatik)
 }
 
 impl Default for SocketOptionsState {
@@ -554,6 +564,10 @@ impl Default for SocketOptionsState {
             snd_buf: 65536,
             rcv_timeout: 0,
             snd_timeout: 0,
+            keep_idle: 7200,
+            keep_intvl: 75,
+            keep_cnt: 9,
+            max_seg: 0,
         }
     }
 }
@@ -601,6 +615,22 @@ pub fn setsockopt(socket_id: u32, option: SocketOption) -> Result<(), NetError> 
             opts.snd_timeout = t;
             crate::serial_println!("[SOCKET] setsockopt({}, SO_SNDTIMEO={}ms)", socket_id, t);
         }
+        SocketOption::KeepIdle(v) => {
+            opts.keep_idle = v;
+            crate::serial_println!("[SOCKET] setsockopt({}, TCP_KEEPIDLE={})", socket_id, v);
+        }
+        SocketOption::KeepIntvl(v) => {
+            opts.keep_intvl = v;
+            crate::serial_println!("[SOCKET] setsockopt({}, TCP_KEEPINTVL={})", socket_id, v);
+        }
+        SocketOption::KeepCnt(v) => {
+            opts.keep_cnt = v;
+            crate::serial_println!("[SOCKET] setsockopt({}, TCP_KEEPCNT={})", socket_id, v);
+        }
+        SocketOption::MaxSeg(v) => {
+            opts.max_seg = v;
+            crate::serial_println!("[SOCKET] setsockopt({}, TCP_MAXSEG={})", socket_id, v);
+        }
     }
     Ok(())
 }
@@ -621,6 +651,10 @@ pub fn getsockopt(socket_id: u32, option: SocketOption) -> Result<usize, NetErro
         SocketOption::SndBuf(_) => Ok(opts.snd_buf),
         SocketOption::RcvTimeout(_) => Ok(opts.rcv_timeout as usize),
         SocketOption::SndTimeout(_) => Ok(opts.snd_timeout as usize),
+        SocketOption::KeepIdle(_) => Ok(opts.keep_idle as usize),
+        SocketOption::KeepIntvl(_) => Ok(opts.keep_intvl as usize),
+        SocketOption::KeepCnt(_) => Ok(opts.keep_cnt as usize),
+        SocketOption::MaxSeg(_) => Ok(opts.max_seg as usize),
     }
 }
 

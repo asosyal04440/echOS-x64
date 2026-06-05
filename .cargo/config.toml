@@ -41,45 +41,6 @@ target = "x86_64-unknown-uefi"
 [profile.dev]
 debug = 1
 
-# ============================================================
-# BARE-METAL HEDEFI İÇİN BAĞLAYICI AYARLARI
-# ============================================================
-# `[target.x86_64-unknown-none]`: Yalnızca bu hedef için geçerli ayarlar.
-[target.x86_64-unknown-none]
-
-# `linker = "rust-lld.exe"`: LLVM'in bağlayıcısı kullanılır.
-# Rust ile birlikte gelen LLD (LLVM Linker), `rust-lld` adıyla erişilebilir.
-# Sistem bağlayıcısı (ld/link.exe) yerine LLD tercih edilir çünkü:
-#   - Cross-compilation'da hedef mimariye göre doğru bağlama yapar
-#   - GNU binutils gerektirmez; özellikle Windows'ta avantajlıdır
-linker = "rust-lld.exe"
-
-# `rustflags`: Derleyici ve bağlayıcıya iletilen özel bayraklar.
-# "-C" prefix'i "codegen option" (kod üretim seçeneği) anlamına gelir.
-rustflags = [
-    # `link-arg=-Tlinker.ld`: Özel bağlayıcı betiği kullan.
-    # -T: GNU ld / LLD'e linker betiği dosyasını belirt.
-    # linker.ld: Proje kökündeki bağlayıcı betiği (bellek düzenini tanımlar).
-    # Bu olmadan bağlayıcı varsayılan düzeni kullanır ve çekirdek yanlış
-    # adreste konumlanabilir veya boot başlığı bulunamayabilir.
-    "-C", "link-arg=-Tlinker.ld",
-
-    # `relocation-model=static`: Konum bağımsız kod (PIC) ÜRETME.
-    # Çekirdek sabit bir adrese (0x100000) yüklenir;
-    # dinamik yeniden konumlandırma (relocation) gereksiz ve zararlıdır.
-    # Static model: Tüm adresler derleme zamanında kesinleşir.
-    "-C", "relocation-model=static",
-
-    # `link-arg=-no-pie`: PIE (Position Independent Executable) üretme.
-    # PIE, dinamik bağlayıcı (ld.so) gerektiren çalıştırılabilir dosyalar içindir.
-    # Bare-metal çekirdekte dinamik bağlayıcı yoktur; bu yüzden PIE devre dışı bırakılır.
-    # `-no-pie` olmadan bazı bağlayıcılar PIE uyumlu kod üretmeye çalışır,
-    # bu da çekirdeğin yanlış adreste çalışmasına neden olur.
-    "-C", "link-arg=-no-pie",
-    "-C", "llvm-args=--x86-slh-indirect",
-    "-C", "llvm-args=--x86-slh-lfence",
-    "-C", "llvm-args=--x86-slh-fence-call-and-ret",
-]
 
 [target.x86_64-unknown-uefi]
 rustflags = [

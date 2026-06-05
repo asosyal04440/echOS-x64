@@ -80,11 +80,11 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use p256::ecdsa::signature::Verifier;
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 use p384::ecdsa::{Signature as P384Signature, VerifyingKey as P384VerifyingKey};
 use sha2::{Digest, Sha256, Sha384};
 use spin::Mutex;
@@ -1425,7 +1425,7 @@ fn normalize_ecdsa_integer(integer: &[u8], coordinate_len: usize) -> Option<Vec<
     Some(normalized)
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn verify_p256_certificate_signature(
     public_key: &[u8],
     signature: &[u8],
@@ -1444,7 +1444,7 @@ fn verify_p256_certificate_signature(
     verifying_key.verify(verify_message, &signature).is_ok()
 }
 
-#[cfg(target_os = "uefi")]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn verify_p256_certificate_signature(
     _public_key: &[u8],
     _signature: &[u8],
@@ -1453,7 +1453,7 @@ fn verify_p256_certificate_signature(
     false
 }
 
-#[cfg(not(target_os = "uefi"))]
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 fn verify_p384_certificate_signature(
     public_key: &[u8],
     signature: &[u8],
@@ -1472,7 +1472,7 @@ fn verify_p384_certificate_signature(
     verifying_key.verify(verify_message, &signature).is_ok()
 }
 
-#[cfg(target_os = "uefi")]
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 fn verify_p384_certificate_signature(
     _public_key: &[u8],
     _signature: &[u8],

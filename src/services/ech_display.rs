@@ -681,7 +681,7 @@ impl EchDisplay {
         surface_id: SurfaceId,
     ) {
         self.diagnostics.lock().record(code, window_id, surface_id);
-        crate::serial_println!(
+        crate::debug_diag!(
             "[ECHDISPLAY][DIAG] code={} window={} surface={}",
             code.label(),
             window_id,

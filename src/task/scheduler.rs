@@ -65,6 +65,7 @@ use x86_64::VirtAddr;
 
 const MAX_CPUS: usize = 8192;
 const MSR_GS_BASE: u32 = 0xC000_0101;
+const MSR_FS_BASE: u32 = 0xC000_0102;
 
 static mut WORKERS: Vec<Option<Worker<Task>>> = Vec::new();
 static mut STEALERS: Vec<Option<Stealer<Task>>> = Vec::new();
@@ -194,6 +195,8 @@ lazy_static! {
 pub static mut PER_CPU_CURRENT_TASK: Vec<Option<Box<Task>>> = Vec::new();
 
 static TERMINATED_TASKS: Mutex<Vec<(TaskId, i32)>> = Mutex::new(Vec::new());
+/// WUNTRACED: Durdurulmuş task'lar (SIGSTOP/SIGTSTP) — wait4() tarafından tüketilir
+static STOPPED_TASKS: Mutex<Vec<(TaskId, i32)>> = Mutex::new(Vec::new());
 static ZOMBIE_TASKS: Mutex<Vec<Box<Task>>> = Mutex::new(Vec::new());
 
 /// Per-CPU idle task'ları
@@ -424,6 +427,16 @@ unsafe fn write_user_gs_base(base: u64) {
     Msr::new(MSR_GS_BASE).write(base);
 }
 
+#[inline(always)]
+unsafe fn read_user_fs_base() -> u64 {
+    Msr::new(MSR_FS_BASE).read()
+}
+
+#[inline(always)]
+unsafe fn write_user_fs_base(base: u64) {
+    Msr::new(MSR_FS_BASE).write(base);
+}
+
 pub fn current_task_id() -> TaskId {
     let cpu_id = get_current_cpu_id();
     unsafe {
@@ -496,23 +509,67 @@ pub fn task_exists(pid: TaskId) -> bool {
 }
 
 pub fn fork_current_user_task(user_rip: u64, user_rsp: u64) -> Option<TaskId> {
+    fork_current_user_task_with_flags(user_rip, user_rsp, 0, 0, 0, 0, 0)
+}
+
+pub fn fork_current_user_task_with_flags(
+    user_rip: u64,
+    user_rsp: u64,
+    flags: usize,
+    child_stack: usize,
+    ptid: usize,
+    ctid: usize,
+    newtls: usize,
+) -> Option<TaskId> {
+    use crate::task::task::*;
+
     if !crate::memory::is_user_address(user_rip) || !crate::memory::is_user_address(user_rsp) {
         return None;
     }
+
+    let is_vfork = (flags & CLONE_VFORK) != 0;
+    let is_thread = (flags & CLONE_VM) != 0;
+    let share_files = (flags & CLONE_FILES) != 0;
+    let share_fs = (flags & CLONE_FS) != 0;
+    let share_sighand = (flags & CLONE_SIGHAND) != 0;
+    let set_child_tid = (flags & CLONE_CHILD_SETTID) != 0;
+    let clear_child_tid = (flags & CLONE_CHILD_CLEARTID) != 0;
+    let parent_set_tid = (flags & CLONE_PARENT_SETTID) != 0;
+    let set_tls = (flags & CLONE_SETTLS) != 0;
+    let exit_signal = flags & 0xFF;
+
+    let effective_rsp = if is_thread && child_stack != 0 {
+        child_stack
+    } else {
+        user_rsp as usize
+    };
+
     let cpu_id = get_current_cpu_id();
     x86_64::instructions::interrupts::without_interrupts(|| unsafe {
         let current = PER_CPU_CURRENT_TASK
-            .get(cpu_id as usize)
-            .and_then(|t| t.as_ref())?;
+            .get_mut(cpu_id as usize)
+            .and_then(|t| t.as_mut())?;
         if current.cold.mode != ExecutionMode::LegacyRing3 {
             return None;
         }
         let priority = current.priority;
         let name = current.cold.name;
         let affinity = current.affinity;
-        let address_space = current.cold.address_space.clone()?;
-        let cloned_space = crate::memory::clone_address_space_for_cow(&address_space)?;
-        let child_pml4 = crate::memory::clone_user_pml4_for_cow()?;
+
+        let cloned_space = if is_thread {
+            current.cold.address_space.clone()
+        } else {
+            let address_space = current.cold.address_space.clone()?;
+            crate::memory::clone_address_space_for_cow(&address_space)
+        };
+
+        let child_pml4 = if is_thread {
+            // CLONE_VM: aynı PML4'ü paylaş
+            current.cold.page_table?
+        } else {
+            crate::memory::clone_user_pml4_for_cow()?
+        };
+
         let child_id = SMP_SCHEDULER.allocate_task_id();
         let mut child = Task::with_priority_and_id(
             crate::task::user::fork_child_start,
@@ -522,14 +579,87 @@ pub fn fork_current_user_task(user_rip: u64, user_rsp: u64) -> Option<TaskId> {
         );
         child.cold.mode = ExecutionMode::LegacyRing3;
         child.cold.page_table = Some(child_pml4);
-        child.cold.address_space = Some(cloned_space);
+        child.cold.address_space = cloned_space;
         child.cold.user_entry = Some(user_rip);
-        child.cold.user_stack_top = Some(user_rsp);
+        child.cold.user_stack_top = Some(effective_rsp as u64);
         child.affinity = affinity;
 
-        // Per-process FD tablosunu kopyala — Linux: dup_fd() / copy_files()
-        // Child her zaman kendi tablosuna sahip olur (CLONE_FILES olmadıkça)
-        child.cold.fd_table = Some(crate::fs::clone_fd_table_for_fork());
+        if exit_signal != 0 {
+            child.cold.exit_signal = exit_signal;
+        }
+
+        // CLONE_THREAD: İş parçacığı grubu (thread group) yönetimi
+        // Linux: CLONE_THREAD olduğunda child aynı thread group'a katılır (tgid = parent'ın tgid'si)
+        // CLONE_THREAD olmadığında child yeni grup oluşturur (tgid = kendi PID'i, grup lideri)
+        let clone_thread = (flags & CLONE_THREAD) != 0;
+        if clone_thread {
+            child.cold.tgid = current.cold.tgid; // Aynı thread group'a katıl
+            // CLONE_THREAD implies CLONE_PARENT: same parent for all threads in group
+            child.cold.parent_pid = current.cold.parent_pid;
+        } else {
+            child.cold.tgid = child_id; // Yeni grup: tgid = kendi PID'i
+            child.cold.parent_pid = Some(current.id);
+        }
+
+        // POSIX process group ve session kopyala
+        child.cold.pgid = current.cold.pgid;
+        child.cold.sid = current.cold.sid;
+
+        // CLONE_FILES: FD tablosunu paylaş veya kopyala
+        if share_files {
+            child.cold.fd_table = current.cold.fd_table.clone();
+        } else {
+            child.cold.fd_table = Some(crate::fs::clone_fd_table_for_fork());
+        }
+
+        // CLONE_FS: dosya sistemi bilgisini paylaş veya kopyala
+        if share_fs {
+            if current.cold.shared_fs.is_some() {
+                child.cold.shared_fs = current.cold.shared_fs.clone();
+            } else {
+                let shared = Arc::new(Mutex::new(SharedFsInfo {
+                    cwd: crate::posix::get_cwd(),
+                    root: alloc::string::String::from("/"),
+                    umask: crate::posix::get_umask(),
+                }));
+                child.cold.shared_fs = Some(shared.clone());
+                // Parent'ı da aynı shared referansa geçir
+            }
+        } else {
+            child.cold.shared_fs = None;
+        }
+
+        // CLONE_SIGHAND: sinyal handler tablosunu paylaş
+        if share_sighand {
+            child.cold.signals = current.cold.signals.clone();
+        }
+
+        // CLONE_SETTLS: child'ın fs_base'ini ayarla (TLS)
+        if set_tls {
+            child.cold.fs_base = newtls as u64;
+        }
+
+        // CLONE_PARENT_SETTID: child TID'sini parent belleğine yaz
+        if parent_set_tid && ptid != 0 {
+            let _ = crate::posix::write_user::<usize>(ptid, child_id);
+        }
+
+        // CLONE_CHILD_SETTID: child TID'sini child belleğine yaz
+        if set_child_tid && ctid != 0 {
+            let _ = crate::posix::write_user::<usize>(ctid, child_id);
+        }
+
+        // CLONE_CHILD_CLEARTID: child çıkışında bu adresteki TID'yi temizle + futex wake
+        if clear_child_tid && ctid != 0 {
+            child.cold.clear_child_tid_addr = Some(ctid);
+        }
+
+        // CLONE_VFORK: parent'ı suspend et
+        if is_vfork {
+            let vfork_gate = Arc::new(spin::Mutex::new(false));
+            child.cold.vfork_wait = Some(vfork_gate.clone());
+            current.cold.vfork_wait_child = Some(vfork_gate);
+        }
 
         SMP_SCHEDULER.spawn(child);
         Some(child_id)
@@ -783,9 +913,51 @@ pub fn exit(code: i32) -> ! {
             current.state = TaskState::Terminated;
             current.cold.exit_code = Some(code);
             crate::serial_println!("Task {} '{}' terminated", current.id, current.cold.name);
-            // SIGCHLD — üst sürece bildir
-            if let Some(parent) = current.cold.parent_pid {
-                crate::task::signal::send_signal(parent, crate::task::signal::Signal::SIGCHLD);
+
+            // CLONE_CHILD_CLEARTID: child çıkışında bu adresteki TID'yi 0 yaz + futex wake
+            // Linux: do_exit() → exit_mm() → coredump_wait() → mm_update_next_owner()
+            // Gerçek Linux: exit_mm() → __mmput() → exit_mmap() → vm_munmap() → futex
+            // Burada basitleştirilmiş: sadece 0 yazıp futex WAKE çağırıyoruz
+            if let Some(ctid_addr) = current.cold.clear_child_tid_addr {
+                let _ = crate::posix::write_user::<u32>(ctid_addr, 0);
+                crate::task::futex::wake_by_address_single(ctid_addr as u64);
+            }
+
+            // CLONE_VFORK: parent'ı uyanr (child exec/exit yaptı)
+            // Linux: do_exit() → __exit_signals() / vfork_done completion
+            // Parent PER_CPU_CURRENT_TASK'ta Blocked durumda, child onu bulup Ready yapar
+            if let Some(vfork_gate) = current.cold.vfork_wait.take() {
+                {
+                    let mut done = vfork_gate.lock();
+                    *done = true;
+                }
+                // Parent'ı PER_CPU_CURRENT_TASK'tan bul ve Ready yap
+                for cpu in 0..PER_CPU_CURRENT_TASK.len() {
+                    if let Some(parent_task) = PER_CPU_CURRENT_TASK[cpu].as_mut() {
+                        if parent_task.state == TaskState::Blocked {
+                            parent_task.state = TaskState::Ready;
+                            parent_task.last_start = get_ticks() as u64;
+                            crate::serial_println!(
+                                "[VFORK] Parent PID {} woken by child {}",
+                                parent_task.id, current.id
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // SIGCHLD — üst sürece bildir (exit_signal'a göre)
+            // CLONE_THREAD: Thread group üyeleri detached'tır — bireysel SIGCHLD gönderilmez
+            // Sadece thread group lideri veya normal process SIGCHLD gönderir
+            let is_thread_member = current.cold.tgid != current.id;
+            if !is_thread_member {
+                // Thread group lideri veya bağımsız process — SIGCHLD gönder
+                if let Some(parent) = current.cold.parent_pid {
+                    if current.cold.exit_signal == crate::task::task::EXIT_SIGNAL_SIGCHLD {
+                        crate::task::signal::send_signal(parent, crate::task::signal::Signal::SIGCHLD);
+                    }
+                }
             }
         } else {
             crate::serial_println!("ERROR: Idle task attempted to exit!");
@@ -814,6 +986,26 @@ pub fn wait_for_terminated(pid: isize) -> Option<(TaskId, i32)> {
     let target = pid as TaskId;
     if let Some(pos) = terminated.iter().position(|(id, _)| *id == target) {
         return Some(terminated.remove(pos));
+    }
+    None
+}
+
+/// WUNTRACED: Durdurulmuş (SIGSTOP/SIGTSTP) child'ları bekle
+/// POSIX: "be for stopped children rather than terminated children"
+pub fn wait_for_stopped(pid: isize) -> Option<(TaskId, i32)> {
+    let mut stopped = STOPPED_TASKS.lock();
+    if pid == -1 {
+        if stopped.is_empty() {
+            return None;
+        }
+        return Some(stopped.remove(0));
+    }
+    if pid <= 0 {
+        return None;
+    }
+    let target = pid as TaskId;
+    if let Some(pos) = stopped.iter().position(|(id, _)| *id == target) {
+        return Some(stopped.remove(pos));
     }
     None
 }
@@ -900,14 +1092,248 @@ pub fn exec_current_user_image(image: &[u8]) -> Result<(), ()> {
             current.cold.address_space = Some(address_space.clone());
             current.cold.user_entry = Some(user.entry.as_u64());
             current.cold.user_stack_top = Some(user.stack_top.as_u64());
-            // Kernel task user moduna geçiyor — per-process FD tablosu başlat
             current.init_fd_table();
         }
     });
+
+    // execve(2): caught signals reset to default, ignored unchanged
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(current) = PER_CPU_CURRENT_TASK
+            .get(get_current_cpu_id() as usize)
+            .and_then(|t| t.as_ref())
+        {
+            for i in 1u8..=31 {
+                if let Some(sig) = crate::task::signal::Signal::from_number(i) {
+                    let action = current.cold.signals.get_action(sig);
+                    if let crate::task::signal::SignalAction::Catch { .. } = action {
+                        current.cold.signals.set_action(sig, crate::task::signal::SignalAction::Default);
+                    }
+                }
+            }
+        }
+    });
+
     unsafe {
         Cr3::write(user_pml4, Cr3Flags::empty());
     }
     unsafe { crate::task::user::enter_user_mode(user.entry, user.stack_top) }
+}
+
+/// exec_current_user_image_with_args: argv, envp ve AT_* auxiliary vector'ü user stack'e yazar.
+/// Linux x86-64 ABI:
+///   stack_top → [random 16B] → [envp strings] → [argv strings] → [auxv entries]
+///              → [envp pointers, NULL] → [argv pointers, NULL] → [argc]
+pub fn exec_current_user_image_with_args(
+    image: &[u8],
+    argv: &[alloc::string::String],
+    envp: &[alloc::string::String],
+) -> Result<(), ()> {
+    use alloc::vec::Vec;
+
+    let address_space = crate::memory::create_address_space(image);
+    crate::memory::set_active_address_space(Some(address_space.clone()));
+    let user_pml4 = crate::memory::create_user_pml4().ok_or(())?;
+    let pml4_phys = user_pml4.start_address().as_u64();
+    let phys_offset = crate::memory::active_physical_offset();
+    let pml4_virt = x86_64::VirtAddr::new(phys_offset + pml4_phys);
+    let table = unsafe { &mut *(pml4_virt.as_mut_ptr()) };
+    let mut mapper = unsafe {
+        x86_64::structures::paging::OffsetPageTable::new(table, x86_64::VirtAddr::new(phys_offset))
+    };
+    let frame_allocator = unsafe { crate::memory::global_memory_manager_mut().ok_or(())? };
+
+    if crate::vdso::map_to_user(&mut mapper).is_err() {
+        crate::serial_println!("[vDSO] Failed to map vDSO to user space!");
+    }
+
+    let elf = crate::elf::load_segments(image, &mut mapper, frame_allocator).map_err(|_| ())?;
+    if !crate::memory::is_user_address(elf.entry) {
+        return Err(());
+    }
+    let (stack_base, stack_top) = crate::memory::user_stack_bounds();
+    if !crate::memory::is_user_range(stack_base, crate::memory::USER_STACK_BYTES) {
+        return Err(());
+    }
+    crate::elf::map_user_stack(
+        x86_64::VirtAddr::new(stack_top),
+        crate::memory::USER_STACK_PAGES,
+        &mut mapper,
+        frame_allocator,
+    ).map_err(|_| ())?;
+
+    let mut rsp = stack_top;
+
+    // 1. Random 16 bytes (16-byte aligned)
+    rsp = rsp.saturating_sub(16);
+    rsp &= !0xFu64;
+    let random_bytes: [u8; 16] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+                                   0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
+    let _ = crate::posix::write_user_slice(rsp as usize, &random_bytes);
+
+    // 2. Environment strings (top→bottom)
+    let mut envp_string_data = Vec::new();
+    for s in envp.iter().rev() {
+        let bytes = s.as_bytes();
+        let slen = bytes.len().saturating_add(1);
+        rsp = rsp.saturating_sub(slen as u64);
+        let _ = crate::posix::write_user_slice(rsp as usize, bytes);
+        let _ = crate::posix::write_user::<u8>(rsp as usize + bytes.len(), 0);
+        envp_string_data.push(rsp);
+    }
+    envp_string_data.reverse();
+
+    // 3. Argument strings (top→bottom)
+    let mut argv_string_data = Vec::new();
+    for s in argv.iter().rev() {
+        let bytes = s.as_bytes();
+        let slen = bytes.len().saturating_add(1);
+        rsp = rsp.saturating_sub(slen as u64);
+        let _ = crate::posix::write_user_slice(rsp as usize, bytes);
+        let _ = crate::posix::write_user::<u8>(rsp as usize + bytes.len(), 0);
+        argv_string_data.push(rsp);
+    }
+    argv_string_data.reverse();
+
+    // 4. AT_* auxiliary vector entries (tag: u64, value: u64 = 16 bytes each)
+    const AT_NULL: u64 = 0;
+    const AT_PHDR: u64 = 3;
+    const AT_PHENT: u64 = 4;
+    const AT_PHNUM: u64 = 5;
+    const AT_PAGESZ: u64 = 6;
+    const AT_ENTRY: u64 = 9;
+    const AT_UID: u64 = 11;
+    const AT_GID: u64 = 12;
+    const AT_EUID: u64 = 7;
+    const AT_EGID: u64 = 8;
+    const AT_SECURE: u64 = 23;
+    const AT_RANDOM: u64 = 25;
+    const AT_HWCAP: u64 = 16;
+    const AT_CLKTCK: u64 = 17;
+    const AT_SYSINFO_EHDR: u64 = 33;
+
+    let auxv_entries: [(u64, u64); 14] = [
+        (AT_PHDR, 0),
+        (AT_PHENT, 56),
+        (AT_PHNUM, 0),
+        (AT_PAGESZ, crate::memory::PAGE_SIZE as u64),
+        (AT_ENTRY, elf.entry),
+        (AT_UID, 0),
+        (AT_GID, 0),
+        (AT_EUID, 0),
+        (AT_EGID, 0),
+        (AT_SECURE, 0),
+        (AT_RANDOM, rsp),
+        (AT_HWCAP, 0),
+        (AT_CLKTCK, 100),
+        (AT_SYSINFO_EHDR, crate::vdso::VDSO_USER_BASE),
+    ];
+    for &(tag, value) in auxv_entries.iter().rev() {
+        rsp = rsp.saturating_sub(16);
+        let _ = crate::posix::write_user::<u64>(rsp as usize, tag);
+        let _ = crate::posix::write_user::<u64>(rsp as usize + 8, value);
+    }
+    // AT_NULL
+    rsp = rsp.saturating_sub(16);
+    let _ = crate::posix::write_user::<u64>(rsp as usize, 0);
+    let _ = crate::posix::write_user::<u64>(rsp as usize + 8, 0);
+
+    // 5. envp pointer array (NULL-terminated)
+    let envp_null = rsp;
+    for &str_addr in envp_string_data.iter().rev() {
+        rsp = rsp.saturating_sub(8);
+        let _ = crate::posix::write_user::<u64>(rsp as usize, str_addr);
+    }
+    rsp = rsp.saturating_sub(8);
+    let _ = crate::posix::write_user::<u64>(rsp as usize, 0);
+    let envp_start = rsp;
+
+    // 6. argv pointer array (NULL-terminated)
+    for &str_addr in argv_string_data.iter().rev() {
+        rsp = rsp.saturating_sub(8);
+        let _ = crate::posix::write_user::<u64>(rsp as usize, str_addr);
+    }
+    rsp = rsp.saturating_sub(8);
+    let _ = crate::posix::write_user::<u64>(rsp as usize, 0);
+    let argv_start = rsp;
+
+    // 7. argc (u64)
+    rsp = rsp.saturating_sub(8);
+    let _ = crate::posix::write_user::<u64>(rsp as usize, argv.len() as u64);
+
+    let user_rsp = rsp;
+    let _ = envp_null;
+    let _ = envp_start;
+
+    // execve(2): "The dispositions of any signals that are being caught are reset
+    // to the default; the dispositions of ignored signals are left unchanged."
+    // Caught (Catch) → Default, Ignore → Ignore, Default → Default
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(current) = PER_CPU_CURRENT_TASK
+            .get(get_current_cpu_id() as usize)
+            .and_then(|t| t.as_ref())
+        {
+            for i in 1u8..=31 {
+                if let Some(sig) = crate::task::signal::Signal::from_number(i) {
+                    let action = current.cold.signals.get_action(sig);
+                    if let crate::task::signal::SignalAction::Catch { .. } = action {
+                        current.cold.signals.set_action(sig, crate::task::signal::SignalAction::Default);
+                    }
+                }
+            }
+        }
+    });
+
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        let cpu_id = get_current_cpu_id();
+        if let Some(current) = PER_CPU_CURRENT_TASK
+            .get_mut(cpu_id as usize)
+            .and_then(|t| t.as_mut())
+        {
+            current.cold.mode = ExecutionMode::LegacyRing3;
+            current.cold.page_table = Some(user_pml4);
+            current.cold.address_space = Some(address_space.clone());
+            current.cold.user_entry = Some(elf.entry);
+            current.cold.user_stack_top = Some(user_rsp);
+            current.init_fd_table();
+        }
+    });
+    unsafe {
+        use x86_64::registers::control::{Cr3, Cr3Flags};
+        Cr3::write(user_pml4, Cr3Flags::empty());
+    }
+
+    // CLONE_VFORK: child exec yaptı, parent'ı uyanr
+    // Linux: exec_mmap() → mm_update_next_owner() / vfork_complete()
+    // Parent PER_CPU_CURRENT_TASK'ta Blocked durumda, child onu bulup Ready yapar
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(current) = PER_CPU_CURRENT_TASK
+            .get_mut(get_current_cpu_id() as usize)
+            .and_then(|t| t.as_mut())
+        {
+            if let Some(vfork_gate) = current.cold.vfork_wait.take() {
+                {
+                    let mut done = vfork_gate.lock();
+                    *done = true;
+                }
+                // Parent'ı PER_CPU_CURRENT_TASK'tan bul ve Ready yap
+                for cpu in 0..PER_CPU_CURRENT_TASK.len() {
+                    if let Some(parent_task) = PER_CPU_CURRENT_TASK[cpu].as_mut() {
+                        if parent_task.state == TaskState::Blocked {
+                            parent_task.state = TaskState::Ready;
+                            parent_task.last_start = get_ticks() as u64;
+                            crate::serial_println!(
+                                "[VFORK] Parent PID {} woken by child exec {}",
+                                parent_task.id, current.id
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    unsafe { crate::task::user::enter_user_mode_with_ret(x86_64::VirtAddr::new(elf.entry), x86_64::VirtAddr::new(user_rsp), 0) }
 }
 
 pub fn spawn_user_image_task(
@@ -924,6 +1350,9 @@ pub fn spawn_user_image_task_with_address_space(
     name: &'static str,
 ) -> Result<(TaskId, Arc<Mutex<crate::memory::AddressSpace>>), ()> {
     let address_space = crate::memory::create_address_space(image);
+    let task_id = SMP_SCHEDULER.allocate_task_id();
+    let mut task =
+        Task::with_priority_and_id(crate::task::user::fork_child_start, priority, name, task_id);
     crate::memory::set_active_address_space(Some(address_space.clone()));
     let user_pml4 = match crate::memory::create_user_pml4() {
         Some(frame) => frame,
@@ -958,9 +1387,6 @@ pub fn spawn_user_image_task_with_address_space(
     };
     crate::memory::set_active_address_space(None);
 
-    let task_id = SMP_SCHEDULER.allocate_task_id();
-    let mut task =
-        Task::with_priority_and_id(crate::task::user::fork_child_start, priority, name, task_id);
     task.cold.mode = ExecutionMode::LegacyRing3;
     task.cold.page_table = Some(user_pml4);
     task.cold.address_space = Some(address_space.clone());
@@ -1184,6 +1610,7 @@ pub fn schedule() {
             let mut old_flags = crate::task::task::TaskFlags::NONE;
             let mut new_flags = crate::task::task::TaskFlags::NONE;
             let mut incoming_user_gs_base = 0u64;
+            let mut incoming_user_fs_base = 0u64;
 
             if let Some(mut current) = PER_CPU_CURRENT_TASK[cpu_id as usize].take() {
                 let task_ptr: *mut Task = &mut *current as *mut Task;
@@ -1194,6 +1621,8 @@ pub fn schedule() {
                         state.gs_base_shadow = unsafe { read_user_gs_base() };
                     }
                 }
+                // FS base kaydet (arch_prctl ile ayarlanmış olabilir)
+                current.cold.fs_base = unsafe { read_user_fs_base() };
 
                 if current.state == TaskState::Running {
                     let delta = now.saturating_sub(current.last_start);
@@ -1250,7 +1679,28 @@ pub fn schedule() {
             // Yerel worker kuyruğundan almayı dene
             if next_task_opt.is_none() {
                 if let Some(worker) = WORKERS.get(cpu_id as usize).and_then(|w| w.as_ref()) {
+                    let len_before = worker.len();
                     next_task_opt = worker.pop();
+                    static mut DIAG_COUNTER: u32 = 0;
+                    unsafe {
+                        DIAG_COUNTER += 1;
+                        if DIAG_COUNTER < 6 || next_task_opt.is_some() {
+                            crate::debug_diag!(
+                                "[DIAG] schedule: pop from worker[{}] len_before={} got_some={}",
+                                cpu_id,
+                                len_before,
+                                next_task_opt.is_some()
+                            );
+                        }
+                    }
+                } else {
+                    static mut DIAG_NO_WORKER: u32 = 0;
+                    unsafe {
+                        DIAG_NO_WORKER += 1;
+                        if DIAG_NO_WORKER < 3 {
+                            crate::debug_diag!("[DIAG] schedule: no worker for cpu {}", cpu_id);
+                        }
+                    }
                 }
             }
 
@@ -1315,6 +1765,37 @@ pub fn schedule() {
             let mut target_kernel_stack_top: u64;
 
             if let Some(mut next_task) = next_task_opt {
+                if next_task.cold.name == "echshell" {
+                    static mut SHELL_DIAG_COUNT: u32 = 0;
+                    unsafe {
+                        SHELL_DIAG_COUNT += 1;
+                        if SHELL_DIAG_COUNT <= 3 {
+                            crate::debug_diag!(
+                                "[DIAG] scheduler about to switch to shell task={} rip={:#x} rsp={:#x} user_entry={:#x} user_stack={:#x} mode={:?}",
+                                next_task.hot.id,
+                                next_task.context.rip,
+                                next_task.context.rsp,
+                                next_task.cold.user_entry.unwrap_or(0),
+                                next_task.cold.user_stack_top.unwrap_or(0),
+                                next_task.cold.mode
+                            );
+                        }
+                    }
+                }
+                static mut TASK_SWITCH_DIAG: u32 = 0;
+                unsafe {
+                    TASK_SWITCH_DIAG += 1;
+                    if TASK_SWITCH_DIAG <= 5 {
+                        crate::debug_diag!(
+                            "[SHELL_TEST] scheduler selected task={} rip={:#x} rsp={:#x} entry={:#x} stack={:#x}",
+                            next_task.hot.id,
+                            next_task.context.rip,
+                            next_task.context.rsp,
+                            next_task.cold.user_entry.unwrap_or(0),
+                            next_task.cold.user_stack_top.unwrap_or(0)
+                        );
+                    }
+                }
                 // Sinyal teslimi: Task çalışmaya başlamadan önce bekleyen sinyalleri kontrol et
                 if crate::task::signal::has_pending_signals(&next_task.cold.signals) {
                     let task_id = next_task.hot.id;
@@ -1351,6 +1832,11 @@ pub fn schedule() {
                 // Sayfa tablosu değişimi (Ring3 task'lar için) — PCID ile TLB korumalı
                 let current_frame = Cr3::read().0;
                 let target_frame = match next_task.cold.mode {
+                    ExecutionMode::LegacyRing3
+                        if next_task.context.rip == crate::task::user::fork_child_start as u64 =>
+                    {
+                        crate::memory::KERNEL_PML4_FRAME.unwrap()
+                    }
                     ExecutionMode::LegacyRing3 => next_task.cold.page_table.unwrap(),
                     ExecutionMode::NativeRust => crate::memory::KERNEL_PML4_FRAME.unwrap(),
                 };
@@ -1389,6 +1875,7 @@ pub fn schedule() {
                         }
                     })
                     .unwrap_or(0);
+                incoming_user_fs_base = next_ref.cold.fs_base;
             } else {
                 let idle_task = &PER_CPU_IDLE_TASK[cpu_id as usize];
                 new_context_ptr = &idle_task.context;
@@ -1397,12 +1884,14 @@ pub fn schedule() {
                 target_kernel_stack_top = idle_task.kernel_stack_top;
                 new_flags = idle_task.hot.flags; // idle = NO_FPU
                 incoming_user_gs_base = 0;
+                incoming_user_fs_base = 0;
             }
 
             crate::gdt::set_kernel_stack(VirtAddr::new(target_kernel_stack_top));
             crate::syscall::set_kernel_stack_for_current_cpu(target_kernel_stack_top);
             unsafe {
                 write_user_gs_base(incoming_user_gs_base);
+                write_user_fs_base(incoming_user_fs_base);
             }
 
             // FPU mode flags hesapla — asm'e RDX olarak geçirilir
@@ -1677,6 +2166,8 @@ pub fn kill_task(pid: TaskId, signal: i32) -> Result<(), &'static str> {
                     // SIGSTOP (19) - suspend
                     if signal == 19 {
                         task.state = TaskState::Stopped;
+                        // WUNTRACED: durdurulmuş task'ı listeye ekle
+                        STOPPED_TASKS.lock().push((task.id, 128 + 19));
                         crate::serial_println!("[KILL] Task {} stopped", pid);
                         found = true;
                         break;
@@ -1986,6 +2477,28 @@ pub fn block_current_task() {
     });
 
     schedule();
+}
+
+/// vfork(2) için parent'ı block et — child exit/exec'ta parent'ı uyanr
+/// Linux: wait_for_completion(&vfork_done) → completion_done ile uyanr
+pub fn block_current_task_vfork(vfork_gate: Arc<spin::Mutex<bool>>) {
+    let cpu_id = get_current_cpu_id();
+    let now = get_ticks() as u64;
+
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        if let Some(current) = PER_CPU_CURRENT_TASK[cpu_id as usize].as_mut() {
+            let delta = now.saturating_sub(current.last_start);
+            update_task_vruntime(current, delta);
+            current.state = TaskState::Blocked;
+        }
+    });
+
+    // schedule() çağır — child çalışırken parent Blocked olarak bekler
+    // Child exec/exit'ta PER_CPU_CURRENT_TASK'taki parent'ı bulup Ready yapar
+    schedule();
+
+    // Parent uyandığında buradan devam eder
+    // vfork_gate child tarafından true yapılmış olmalı
 }
 
 /// Belirtilen PID'li task'ı Ready yaparak scheduler'a ekler.

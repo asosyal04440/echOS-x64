@@ -169,6 +169,15 @@ Phase 6 kapısı şu alanları kapsar:
 - path ve VFS sözleşmeleri
 - package/seed state modeli
 
+### Sınırlar
+
+- Desteklenmeyen dosya sistemi özellikleri fail-closed davranmalıdır; fake success dönmemelidir.
+- `fsync`/`fdatasync` yalnızca backend'in gerçek durability yolu varsa başarılı döner.
+- FAT32/exFAT v1 için kullanışlı taşınabilir-medya dosya sistemleridir; journal'lı crash-recovery dosya sistemleri değildir.
+- Linux/Windows/FreeBSD ile tam dosya sistemi eşitliği iddia edilmez. Gerçek donanım soak testleri, daha geniş power-loss replay, uzun fuzzing ve daha büyük external oracle karşılaştırmaları sonraki hardening işleridir.
+
+---
+
 ## Modül Ağacı
 
 ```

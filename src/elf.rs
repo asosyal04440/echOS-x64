@@ -131,9 +131,7 @@ pub fn load_user_elf(
         return Err(ElfError::Unsupported);
     }
     let (stack_base, stack_top) = crate::memory::user_stack_bounds();
-    let stack_size =
-        (crate::memory::USER_STACK_PAGES as u64).saturating_mul(crate::memory::PAGE_SIZE as u64);
-    if !crate::memory::is_user_range(stack_base, stack_size) {
+    if !crate::memory::is_user_range(stack_base, crate::memory::USER_STACK_BYTES) {
         return Err(ElfError::Unsupported);
     }
     map_user_stack(
@@ -245,21 +243,23 @@ fn parse_program_headers(image: &[u8], header: &ElfHeader64) -> Result<Vec<LoadS
     Ok(segments)
 }
 
-fn map_user_stack(
+pub fn map_user_stack(
     stack_top: VirtAddr,
     pages: usize,
     _mapper: &mut impl Mapper<Size4KiB>,
     _frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), ElfError> {
-    if pages <= 1 {
+    if pages <= crate::memory::USER_STACK_GUARD_PAGES {
         return Err(ElfError::Invalid);
     }
-    let size = (pages * 4096) as u64;
+    let size = (pages as u64).saturating_mul(crate::memory::PAGE_SIZE as u64);
     let start = VirtAddr::new(stack_top.as_u64().saturating_sub(size));
-    let guard_start = VirtAddr::new(start.as_u64().saturating_add(4096));
+    let guard_bytes = (crate::memory::USER_STACK_GUARD_PAGES as u64)
+        .saturating_mul(crate::memory::PAGE_SIZE as u64);
+    let guard_start = VirtAddr::new(start.as_u64().saturating_add(guard_bytes));
     let flags =
         PageTableFlags::USER_ACCESSIBLE | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
-    let lazy_size = size.saturating_sub(4096);
+    let lazy_size = size.saturating_sub(guard_bytes);
     if lazy_size == 0 {
         return Err(ElfError::Invalid);
     }

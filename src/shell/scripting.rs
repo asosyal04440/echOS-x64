@@ -80,6 +80,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use spin::Mutex;
 
+use super::shell_api;
+
 // ============================================================================
 // SCRIPT TOKENS (BETİK TOKEN'LARI)
 // ============================================================================
@@ -1444,6 +1446,8 @@ pub enum ScriptError {
     UndefinedFunction(String),
     /// Sıfıra bölme hatası
     DivisionByZero,
+    /// set -e ile çıkış (errexit)
+    Exit(i64),
     /// Genel çalışma zamanı hatası
     RuntimeError(String),
 }
@@ -1535,7 +1539,16 @@ impl ScriptState {
             return Some(val.clone());
         }
         // Sonra ortam değişkenlerini kontrol et
-        super::advanced::ENV.get(name)
+        let val = super::advanced::ENV.get(name);
+        // set -u (nounset): tanımsız değişken kullanımında hata ver
+        if val.is_none() && *SCRIPT_STATE.nounset.lock() {
+            // POSIX: "unbound variable" hatası — script'i sonlandır
+            shell_api::serial_println(&alloc::format!(
+                "[SCRIPT] set -u: unbound variable: {}",
+                name
+            ));
+        }
+        val
     }
 
     /// Break ve continue bayraklarını temizler.
@@ -1610,6 +1623,11 @@ impl Interpreter {
         for stmt in stmts {
             last_exit_code = Self::exec_stmt(stmt)?;
 
+            // set -e (errexit): hata durumunda betiği sonlandır
+            if *SCRIPT_STATE.errexit.lock() && last_exit_code != 0 {
+                return Err(ScriptError::Exit(last_exit_code));
+            }
+
             // Return/break/continue bayraklarını kontrol et
             if SCRIPT_STATE.return_value.lock().is_some() {
                 return Ok(SCRIPT_STATE.return_value.lock().unwrap_or(0));
@@ -1670,8 +1688,57 @@ impl Interpreter {
                     .map(|a| Self::eval_expr(a))
                     .collect::<Result<Vec<_>, _>>()?;
 
+                // set -x (xtrace): çalıştırmadan önce komutu stderr'e yaz
+                if *SCRIPT_STATE.xtrace.lock() {
+                    let trace_line = evaluated.join(" ");
+                    shell_api::serial_println(&alloc::format!("+ {}", trace_line));
+                }
+
+                // Fonksiyon çağrısı kontrolü — eğer komut tanımlı bir fonksiyonsa
+                if let Some(first) = evaluated.first() {
+                    if let Some(func_stmt) =
+                        SCRIPT_STATE.functions.lock().get(first.as_str()).cloned()
+                    {
+                        if let Stmt::Function { params, body, .. } = func_stmt {
+                            // Pozisyonel parametreleri ayarla: $1, $2, $3...
+                            let saved_locals: Vec<(String, String)> = {
+                                let locals = SCRIPT_STATE.local_vars.lock();
+                                params
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, p)| {
+                                        let val = evaluated.get(i + 1).cloned().unwrap_or_default();
+                                        (p.clone(), val)
+                                    })
+                                    .collect()
+                            };
+                            // Eski local'leri kaydet ve yenisini kur
+                            {
+                                let mut locals = SCRIPT_STATE.local_vars.lock();
+                                for (name, val) in &saved_locals {
+                                    locals.insert(name.clone(), val.clone());
+                                }
+                                // $0 = fonksiyon adı, $# = argüman sayısı
+                                locals.insert("$0".to_string(), first.clone());
+                                locals.insert("$#".to_string(), (evaluated.len() - 1).to_string());
+                            }
+                            let result = Self::execute(&body);
+                            // Local'leri temizle (fonksiyon kapsamından çık)
+                            {
+                                let mut locals = SCRIPT_STATE.local_vars.lock();
+                                for (name, _) in &saved_locals {
+                                    locals.remove(name);
+                                }
+                                locals.remove("$0");
+                                locals.remove("$#");
+                            }
+                            return result.map(|c| c);
+                        }
+                    }
+                }
+
                 let cmd_line = evaluated.join(" ");
-                crate::serial_println!("[SCRIPT] Command: {}", cmd_line);
+                shell_api::serial_println(&alloc::format!("[SCRIPT] Command: {}", cmd_line));
                 let (exit_code, _output) = run_shell_command(&cmd_line);
                 Ok(exit_code)
             }
@@ -1864,7 +1931,10 @@ impl Interpreter {
                     .map(|a| Self::eval_expr(a))
                     .collect::<Result<Vec<_>, _>>()?;
                 let cmd_line = cmd.join(" ");
-                crate::serial_println!("[SCRIPT] Command substitution: {}", cmd_line);
+                shell_api::serial_println(&alloc::format!(
+                    "[SCRIPT] Command substitution: {}",
+                    cmd_line
+                ));
                 let (_exit_code, output) = run_shell_command(&cmd_line);
                 let output = output.unwrap_or_default();
                 // Sondaki newline'ları kaldır (bash davranışı)

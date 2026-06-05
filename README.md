@@ -169,6 +169,15 @@ The Phase 6 gate currently covers:
 - path and VFS contracts
 - package/seed state model
 
+### Boundaries
+
+- Unsupported filesystem features must fail closed; they must not return fake success.
+- `fsync`/`fdatasync` only succeed where the backend has an implemented durability path.
+- FAT32/exFAT are useful v1 portable-media filesystems, not journaled crash-recovery filesystems.
+- Full Linux/Windows/FreeBSD filesystem parity is not claimed. Real hardware soak testing, broader power-loss replay, long fuzzing, and larger external oracle comparison remain future hardening work.
+
+---
+
 ## Module Tree
 
 ```
