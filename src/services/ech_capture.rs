@@ -169,9 +169,7 @@ impl EchCapture {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_CAPTURE: Arc<EchCapture> = Arc::new(EchCapture::new());
-}
+static ECH_CAPTURE: spin::Lazy<Arc<EchCapture>> = spin::Lazy::new(|| Arc::new(EchCapture::new()));
 
 pub fn init() {
     ECH_CAPTURE.start();

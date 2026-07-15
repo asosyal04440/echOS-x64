@@ -1,4 +1,4 @@
-//! # echOS Debug Modülü
+﻿//! # echOS Debug Modülü
 //!
 //! Hata ayıklama araçları: seri port çıkışı ve sistem durum analizörü.
 //!
@@ -41,6 +41,10 @@ pub mod analyzer;
 /// Acil durum seri port hata ayıklama çıkışı (COM1).
 /// Interrupt gerektirmeyen, doğrudan I/O portuna erişen basit sürücü.
 pub mod serial;
+
+/// Rate-limited debugcon (port 0xE9) writer.
+/// Tamponlar ve en fazla her 100ms'de bir veya tampon %80 dolunca flush eder.
+pub mod debugcon;
 
 /// KGDB — Kernel GDB Remote Serial Protocol stub.
 /// Seri port üzerinden GDB RSP ile çekirdek seviyesi hata ayıklama.

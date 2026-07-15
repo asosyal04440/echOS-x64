@@ -161,9 +161,7 @@ impl EchDialogs {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_DIALOGS: Arc<EchDialogs> = Arc::new(EchDialogs::new());
-}
+static ECH_DIALOGS: spin::Lazy<Arc<EchDialogs>> = spin::Lazy::new(|| Arc::new(EchDialogs::new()));
 
 pub fn init() {
     ECH_DIALOGS.start();

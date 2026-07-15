@@ -19,6 +19,9 @@ param(
     [switch]$Headless,
     [switch]$WaitForExit,
     [switch]$ForceVarsReset,
+    [switch]$Gdb,
+    [switch]$GdbWait,
+    [int]$GdbPort = 1234,
     [switch]$SuspendResumeSmoke,
     [switch]$FsSmokeTest,
     [switch]$ShellSmokeTest,
@@ -556,6 +559,14 @@ if ($useIso) {
     if ($traceEnabled) {
         $qemuArgs += @("-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset", "-D", $traceLogPath)
     }
+    if ($Gdb) {
+        $qemuArgs += @("-gdb", "tcp::${GdbPort},server,nowait")
+        Write-Host "GDB stub: tcp::${GdbPort}" -ForegroundColor Green
+    }
+    if ($GdbWait) {
+        $qemuArgs += "-S"
+        Write-Host "QEMU paused (waiting for GDB). Connect with: gdb -x .gdbinit" -ForegroundColor Green
+    }
 } else {
     $efiPath = if ($EfiPath -ne "") {
         $resolvedEfiPath = Resolve-Path -LiteralPath $EfiPath -ErrorAction SilentlyContinue
@@ -837,6 +848,14 @@ if ($useIso) {
     }
     if ($traceEnabled) {
         $qemuArgs += @("-d", "int,guest_errors,unimp,pcall,mmu,cpu_reset", "-D", $traceLogPath)
+    }
+    if ($Gdb) {
+        $qemuArgs += @("-gdb", "tcp::${GdbPort},server,nowait")
+        Write-Host "GDB stub: tcp::${GdbPort}" -ForegroundColor Green
+    }
+    if ($GdbWait) {
+        $qemuArgs += "-S"
+        Write-Host "QEMU paused (waiting for GDB). Connect with: gdb -x .gdbinit" -ForegroundColor Green
     }
 }
 

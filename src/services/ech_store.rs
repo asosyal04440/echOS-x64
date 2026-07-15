@@ -578,9 +578,7 @@ fn file_entry_from_f2fs(parent: &str, entry: crate::fs::f2fs::F2fsEntry) -> File
 }
 
 /// Global EchStore örneği
-lazy_static::lazy_static! {
-    static ref ECH_STORE: Arc<EchStore> = Arc::new(EchStore::new());
-}
+static ECH_STORE: spin::Lazy<Arc<EchStore>> = spin::Lazy::new(|| Arc::new(EchStore::new()));
 
 /// EchStore'u başlat
 pub fn init() {

@@ -65,6 +65,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 // Sabitler
 // ────────────────────────────────────────────────────────────
 
+/// Varsayılan KGDB seri portu: COM2 (0x2F8)
+pub const KGDB_DEFAULT_PORT: u16 = 0x2F8;
+
 /// KGDB aktif mi?
 static KGDB_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -82,6 +85,9 @@ const MAX_BREAKPOINTS: usize = 64;
 
 /// x86_64 register sayısı (GDB sırasıyla)
 const NUM_REGISTERS: usize = 24;
+
+/// Serial read timeout — yaklaşık 3 saniye (döngü sayısı)
+const SERIAL_READ_TIMEOUT: u64 = 30_000_000;
 
 // ────────────────────────────────────────────────────────────
 // Transport Katmanı
@@ -409,6 +415,12 @@ fn handle_command(packet: &RspPacket, response: &mut [u8]) -> usize {
         // 'm' — Bellekten oku: m<addr>,<length>
         b'm' => {
             if let Some((addr, len)) = parse_addr_len(args) {
+                if addr == 0 || len == 0 || addr + (len as u64) < addr {
+                    return build_response(response, b"E05");
+                }
+                if !is_address_readable(addr) {
+                    return build_response(response, b"E06");
+                }
                 let mut hex_buf = [0u8; MAX_PACKET_SIZE];
                 let mut pos = 0;
                 for i in 0..len {
@@ -428,6 +440,12 @@ fn handle_command(packet: &RspPacket, response: &mut [u8]) -> usize {
         // 'M' — Belleğe yaz: M<addr>,<length>:<hex>
         b'M' => {
             if let Some((addr, len, hex_data)) = parse_addr_len_data(args) {
+                if addr == 0 || len == 0 || addr + (len as u64) < addr {
+                    return build_response(response, b"E05");
+                }
+                if !is_address_readable(addr) {
+                    return build_response(response, b"E06");
+                }
                 for i in 0..len {
                     let hi = unhex(hex_data[i * 2]);
                     let lo = unhex(hex_data[i * 2 + 1]);
@@ -816,18 +834,88 @@ fn set_hw_watchpoint(addr: u64, kind: usize, wp_type: WatchpointType) -> bool {
 }
 
 // ────────────────────────────────────────────────────────────
+// Adres Doğrulama
+// ────────────────────────────────────────────────────────────
+
+/// x86_64 page table entry flags
+const PT_PRESENT: u64 = 1 << 0;
+const PT_RW: u64 = 1 << 1;
+const PT_USER: u64 = 1 << 2;
+const PT_PAGE_SIZE: u64 = 1 << 7;
+
+/// CR3 registerından page table base adresini oku
+fn read_cr3() -> u64 {
+    let cr3: u64;
+    unsafe { core::arch::asm!("mov {}, cr3", out(reg) cr3) }
+    cr3 & !0xFFF // Sayfa hizalı taban adresi
+}
+
+/// Virtual adresin geçerli (map'li ve en azından okunabilir) olup olmadığını
+/// kontrol et. Sayfa tablolarını yürüyerek kontrol eder, adrese erişmez.
+/// Bu sayede geçersiz adres #PF üretmez.
+fn is_address_readable(vaddr: u64) -> bool {
+    if vaddr == 0 {
+        return false;
+    }
+
+    let pml4_base = read_cr3();
+    let pml4_idx = (vaddr >> 39) & 0x1FF;
+    let pdp_idx = (vaddr >> 30) & 0x1FF;
+    let pd_idx = (vaddr >> 21) & 0x1FF;
+
+    // PML4E
+    let pml4e = unsafe { *((pml4_base + pml4_idx * 8) as *const u64) };
+    if pml4e & PT_PRESENT == 0 {
+        return false;
+    }
+
+    // PDPTE
+    let pdpt_base = pml4e & !0xFFF;
+    let pdpte = unsafe { *((pdpt_base + pdp_idx * 8) as *const u64) };
+    if pdpte & PT_PRESENT == 0 {
+        return false;
+    }
+    // 1GiB pages
+    if pdpte & PT_PAGE_SIZE != 0 {
+        return true;
+    }
+
+    // PDE
+    let pd_base = pdpte & !0xFFF;
+    let pde = unsafe { *((pd_base + pd_idx * 8) as *const u64) };
+    if pde & PT_PRESENT == 0 {
+        return false;
+    }
+    // 2MiB pages
+    if pde & PT_PAGE_SIZE != 0 {
+        return true;
+    }
+
+    // PTE (4KiB pages)
+    let pt_base = pde & !0xFFF;
+    let pt_idx = (vaddr >> 12) & 0x1FF;
+    let pte = unsafe { *((pt_base + pt_idx * 8) as *const u64) };
+    pte & PT_PRESENT != 0
+}
+
+// ────────────────────────────────────────────────────────────
 // Seri Port I/O
 // ────────────────────────────────────────────────────────────
 
-/// Seri porttan bir byte oku (blocking)
+/// Seri porttan bir byte oku (timeout'lu)
+/// Timeout olursa 0xFF döndürür, çağıran tekrar denemeli.
 fn serial_read_byte(port: u16) -> u8 {
     unsafe {
-        // Line Status Register (port + 5): bit 0 = Data Ready
+        let mut timeout = SERIAL_READ_TIMEOUT;
         loop {
             let lsr: u8;
             core::arch::asm!("in al, dx", out("al") lsr, in("dx") port + 5);
             if lsr & 1 != 0 {
                 break;
+            }
+            timeout -= 1;
+            if timeout == 0 {
+                return 0xFF; // timeout
             }
             core::hint::spin_loop();
         }
@@ -1082,6 +1170,15 @@ pub fn handle_trap(regs: &KgdbRegisters) {
             let remaining = recv_len - consumed;
             recv_buf.copy_within(consumed..recv_len, 0);
             recv_len = remaining;
+        } else {
+            // Checksum hatası veya eksik paket
+            // Eksik paket mi yoksa bozuk mu anlamak için buffer'da '$' var mı kontrol et
+            if recv_buf[..recv_len].contains(&b'#') {
+                // '#' görüldü ama parse başarısız → checksum hatası → NACK gönder
+                serial_write_byte(port, b'-');
+                // Buffer'ı temizle, yeni paket bekle
+                recv_len = 0;
+            }
         }
     }
 

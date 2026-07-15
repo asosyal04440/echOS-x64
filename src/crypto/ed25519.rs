@@ -360,24 +360,24 @@ impl X25519PrivateKey {
 /// p = 2^255 - 19 asal alanı üzerinde aritmetik. Her uzuv en fazla 52 bit taşıyabilir;
 /// carry propagation ile normalize edilir.
 #[derive(Clone, Copy, Debug)]
-struct FieldElement(pub [u64; 5]);
+pub(crate) struct FieldElement(pub [u64; 5]);
 
-const MASK51: u64 = (1u64 << 51) - 1;
+pub(crate) const MASK51: u64 = (1u64 << 51) - 1;
 
 impl FieldElement {
     /// Sıfır alan elemanı oluşturur.
-    fn zero() -> Self {
+    pub(crate) fn zero() -> Self {
         FieldElement([0, 0, 0, 0, 0])
     }
 
     /// Bir (1) alan elemanı oluşturur.
-    fn one() -> Self {
+    pub(crate) fn one() -> Self {
         FieldElement([1, 0, 0, 0, 0])
     }
 
     /// 32 baytlık little-endian kodlamadan alan elemanı oluşturur.
     /// 256 bit veriyi 5 adet 51-bit uzuva dağıtır.
-    fn from_bytes(bytes: &[u8; 32]) -> Self {
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Self {
         // 32 baytı 4 adet u64 olarak oku (little-endian)
         let load8 = |b: &[u8]| -> u64 {
             b[0] as u64
@@ -406,7 +406,7 @@ impl FieldElement {
     }
 
     /// Alan elemanını 32 baytlık little-endian kodlamaya dönüştürür.
-    fn to_bytes(&self) -> [u8; 32] {
+    pub(crate) fn to_bytes(&self) -> [u8; 32] {
         // Önce tam normalize et
         let mut t = *self;
         t.normalize();
@@ -434,7 +434,7 @@ impl FieldElement {
     }
 
     /// İki alan elemanını toplar: (a + b) mod p
-    fn add(&self, other: &FieldElement) -> FieldElement {
+    pub(crate) fn add(&self, other: &FieldElement) -> FieldElement {
         let mut r = FieldElement::zero();
         for i in 0..5 {
             r.0[i] = self.0[i] + other.0[i];
@@ -444,17 +444,17 @@ impl FieldElement {
     }
 
     /// İki alan elemanını çıkarır: (a - b) mod p
-    /// Negatifliği önlemek için 2*p ekleyerek çıkarma yapar.
-    fn sub(&self, other: &FieldElement) -> FieldElement {
+    /// Negatifliği önnek için 2*p ekleyerek çıkarma yapar.
+    pub(crate) fn sub(&self, other: &FieldElement) -> FieldElement {
         // 2*p ekle (p = 2^255 - 19)
         // limb bazında 2p: [2*(2^51-19), 2*(2^51-1), 2*(2^51-1), 2*(2^51-1), 2*(2^51-1)]
         let mut r = FieldElement::zero();
         let two_p: [u64; 5] = [
             (MASK51 + 1 - 19) * 2, // 2*(2^51 - 19)
-            MASK51 * 2 + 2,        // 2*(2^51)
-            MASK51 * 2 + 2,
-            MASK51 * 2 + 2,
-            MASK51 * 2 + 2,
+            MASK51 * 2,            // 2*(2^51 - 1)
+            MASK51 * 2,
+            MASK51 * 2,
+            MASK51 * 2,
         ];
         for i in 0..5 {
             r.0[i] = self.0[i] + two_p[i] - other.0[i];
@@ -467,7 +467,7 @@ impl FieldElement {
     /// Schoolbook multiplication with radix-2^51 uzuvlar.
     /// r[i+j] += a[i] * b[j]; taşanlar carry_propagate ile dağıtılır.
     /// p = 2^255 - 19 → 2^255 ≡ 19 (mod p) kullanarak indirgeme.
-    fn mul(&self, other: &FieldElement) -> FieldElement {
+    pub(crate) fn mul(&self, other: &FieldElement) -> FieldElement {
         let a = &self.0;
         let b = &other.0;
 
@@ -531,33 +531,65 @@ impl FieldElement {
         out[4] = (r4 & MASK51 as u128) as u64;
         // Son carry: 2^255 ≡ 19 (mod p)
         out[0] += (carry as u64) * 19;
-        // Bir tur daha carry
-        let c = out[0] >> 51;
-        out[0] &= MASK51;
-        out[1] += c;
+        // Wrap-induced carries — tam yayılana kadar devam et
+        for _ in 0..2 {
+            let c = out[0] >> 51;
+            if c == 0 { break; }
+            out[0] &= MASK51;
+            out[1] += c;
+            let c = out[1] >> 51;
+            if c == 0 { break; }
+            out[1] &= MASK51;
+            out[2] += c;
+            let c = out[2] >> 51;
+            if c == 0 { break; }
+            out[2] &= MASK51;
+            out[3] += c;
+            let c = out[3] >> 51;
+            if c == 0 { break; }
+            out[3] &= MASK51;
+            out[4] += c;
+            let c = out[4] >> 51;
+            if c == 0 { break; }
+            out[4] &= MASK51;
+            out[0] += (c as u64) * 19;
+        }
 
         FieldElement(out)
     }
 
     /// Carry propagation: her uzuvu 51 bit'e indirir, taşanı sonrakine aktarır.
+    /// Son carry 2^255 ≡ 19 (mod p) kuralıyla dolaştırılır.
     fn carry_propagate(&mut self) {
+        // Forward pass: limb 0 → 4
         for i in 0..4 {
             let carry = self.0[i] >> 51;
             self.0[i] &= MASK51;
             self.0[i + 1] += carry;
         }
-        // Son uzuvdaki taşan: 2^255 ≡ 19 (mod p)
+        // Wrap: limb 4 → 0
         let carry = self.0[4] >> 51;
         self.0[4] &= MASK51;
         self.0[0] += carry * 19;
-        // Bir tur daha (19 ekleme taşma yapabilir)
-        let carry = self.0[0] >> 51;
-        self.0[0] &= MASK51;
-        self.0[1] += carry;
+        // Second forward pass: bu wrap carry'ini yay
+        for i in 0..4 {
+            let carry = self.0[i] >> 51;
+            self.0[i] &= MASK51;
+            self.0[i + 1] += carry;
+        }
+        // Son tur: limb 4 carry kaldıysa tekrar dolaştır
+        let carry = self.0[4] >> 51;
+        if carry != 0 {
+            self.0[4] &= MASK51;
+            self.0[0] += carry * 19;
+            let c1 = self.0[0] >> 51;
+            self.0[0] &= MASK51;
+            self.0[1] += c1;
+        }
     }
 
     /// Tam normalize: sonucu [0, p) aralığına indirir.
-    fn normalize(&mut self) {
+    pub(crate) fn normalize(&mut self) {
         self.carry_propagate();
         // p'yi çıkar ve sonucun negatif olup olmadığına bak
         let mut t = [0u64; 5];
@@ -659,8 +691,8 @@ fn scalar_mult(scalar: &[u8; 32], point: &[u8; 32]) -> [u8; 32] {
         x_3 = da.add(&cb).square();
         z_3 = da.sub(&cb).square().mul(&x_1);
         x_2 = aa.mul(&bb);
-        // e * (aa + 121665/121666 * e) ≈ e * (aa + a24*e) where a24 = 121666
-        let a24 = FieldElement([121666, 0, 0, 0, 0]);
+        // e * (aa + a24*e) where a24 = (A-2)/4 = 121665
+        let a24 = FieldElement([121665, 0, 0, 0, 0]);
         z_2 = e.mul(&aa.add(&a24.mul(&e)));
     }
 

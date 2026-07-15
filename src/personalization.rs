@@ -1301,15 +1301,13 @@ impl Default for NotificationCenter {
 // Global accessors
 // ============================================================================
 
-lazy_static::lazy_static! {
-    static ref CHAMELEON_THEME: Mutex<ChameleonThemeEngine> = Mutex::new(ChameleonThemeEngine::new());
-    static ref HYBRID_WM: Mutex<HybridWindowOrchestrator> = Mutex::new(HybridWindowOrchestrator::new());
-    static ref WIDGET_ENGINE: Mutex<WidgetEngine> = Mutex::new(WidgetEngine::new());
-    static ref VIRTUAL_DESKTOPS: Mutex<VirtualDesktopManager> = Mutex::new(VirtualDesktopManager::new(8));
-    static ref OMNI_SEARCH: Mutex<OmniSearchEngine> = Mutex::new(OmniSearchEngine::new());
-    static ref CONTROL_CENTER: Mutex<ControlCenterState> = Mutex::new(ControlCenterState::new());
-    static ref NOTIFICATION_CENTER: Mutex<NotificationCenter> = Mutex::new(NotificationCenter::new());
-}
+static CHAMELEON_THEME: spin::Lazy<Mutex<ChameleonThemeEngine>> = spin::Lazy::new(|| Mutex::new(ChameleonThemeEngine::new()));
+static HYBRID_WM: spin::Lazy<Mutex<HybridWindowOrchestrator>> = spin::Lazy::new(|| Mutex::new(HybridWindowOrchestrator::new()));
+static WIDGET_ENGINE: spin::Lazy<Mutex<WidgetEngine>> = spin::Lazy::new(|| Mutex::new(WidgetEngine::new()));
+static VIRTUAL_DESKTOPS: spin::Lazy<Mutex<VirtualDesktopManager>> = spin::Lazy::new(|| Mutex::new(VirtualDesktopManager::new(8)));
+static OMNI_SEARCH: spin::Lazy<Mutex<OmniSearchEngine>> = spin::Lazy::new(|| Mutex::new(OmniSearchEngine::new()));
+static CONTROL_CENTER: spin::Lazy<Mutex<ControlCenterState>> = spin::Lazy::new(|| Mutex::new(ControlCenterState::new()));
+static NOTIFICATION_CENTER: spin::Lazy<Mutex<NotificationCenter>> = spin::Lazy::new(|| Mutex::new(NotificationCenter::new()));
 
 pub fn chameleon_theme() -> &'static Mutex<ChameleonThemeEngine> {
     &CHAMELEON_THEME

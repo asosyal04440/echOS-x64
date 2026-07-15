@@ -94,7 +94,7 @@ pub struct NetNamespace {
 
 /// Ağ arayüzü (NIC): fiziksel veya sanal bir ağ kartını temsil eder.
 /// Örnekler: eth0 (fiziksel), lo (loopback), veth0 (sanal/tünel), docker0 (köprü).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NetDevice {
     /// Arayüz adı (örn. "eth0", "lo", "veth0").
     pub name: String,

@@ -761,6 +761,11 @@ impl NetfilterManager {
     /// - INPUT/OUTPUT: ACCEPT (varsayılan olarak izin ver)
     /// - FORWARD: DROP   (yönlendirme devre dışı — güvenli varsayılan)
     pub fn init(&self) {
+        self.enabled.store(true, Ordering::SeqCst);
+        {
+            let mut stats = self.stats.lock();
+            *stats = NetfilterStats::default();
+        }
         // Filter table
         let mut filter = IptTable::new(IPTABLES_FILTER_TABLE);
         filter.add_chain(IptChain::new("INPUT", NF_INET_LOCAL_IN, NF_ACCEPT));
@@ -918,6 +923,40 @@ impl NetfilterManager {
     /// değişikliği hemen görmesini sağlar.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// IPv4 paketini bu yönetici üzerinden işle (global NETFILTER yerine).
+    pub fn process_ipv4_packet(
+        &self,
+        packet: &mut [u8],
+        hook: u32,
+        in_iface: Option<&str>,
+        out_iface: Option<&str>,
+    ) -> Result<u32, NetError> {
+        let ipv4 = Ipv4Packet::parse(packet)?;
+        let mut info = packet_info_from_ipv4(&ipv4, in_iface, out_iface)?;
+        let verdict = self.process_packet(&mut info, hook);
+        if verdict == NF_ACCEPT {
+            apply_packet_info_to_ipv4(packet, &info)?;
+        }
+        Ok(verdict)
+    }
+
+    /// IPv6 paketini bu yönetici üzerinden işle (global NETFILTER yerine).
+    pub fn process_ipv6_packet(
+        &self,
+        packet: &mut [u8],
+        hook: u32,
+        in_iface: Option<&str>,
+        out_iface: Option<&str>,
+    ) -> Result<u32, NetError> {
+        let ipv6 = Ipv6Packet::parse(packet)?;
+        let mut info = packet_info_from_ipv6(&ipv6, in_iface, out_iface)?;
+        let verdict = self.process_packet(&mut info, hook);
+        if verdict == NF_ACCEPT {
+            apply_packet_info_to_ipv6(packet, &info)?;
+        }
+        Ok(verdict)
     }
 }
 
@@ -1423,13 +1462,14 @@ mod tests {
 
     #[test]
     fn process_ipv4_packet_rewrites_udp_tuple_and_checksums() {
-        NETFILTER.init();
+        let manager = NetfilterManager::new();
+        manager.init();
 
         let mut dnat = IptEntry::new();
         dnat.src_mask = 0;
         dnat.dst_mask = 0;
         dnat.target = IptTarget::dnat(Ipv4Addr::new(10, 0, 2, 42).to_u32(), 5353);
-        NETFILTER
+        manager
             .add_rule(IPTABLES_NAT_TABLE, "PREROUTING", dnat)
             .unwrap();
 
@@ -1437,7 +1477,7 @@ mod tests {
         mangle.src_mask = 0;
         mangle.dst_mask = 0;
         mangle.target = IptTarget::ttl(48);
-        NETFILTER
+        manager
             .add_rule(IPTABLES_MANGLE_TABLE, "PREROUTING", mangle)
             .unwrap();
 
@@ -1448,9 +1488,9 @@ mod tests {
             53,
             b"dns",
         );
-        let verdict =
-            process_ipv4_packet(&mut packet, NF_INET_PRE_ROUTING, Some("eth0"), Some("eth0"))
-                .unwrap();
+        let verdict = manager
+            .process_ipv4_packet(&mut packet, NF_INET_PRE_ROUTING, Some("eth0"), Some("eth0"))
+            .unwrap();
         assert_eq!(verdict, NF_ACCEPT);
 
         let parsed = Ipv4Packet::parse(&packet).unwrap();
@@ -1471,13 +1511,14 @@ mod tests {
 
     #[test]
     fn process_ipv4_packet_postrouting_snat_rewrites_source_tuple() {
-        NETFILTER.init();
+        let manager = NetfilterManager::new();
+        manager.init();
 
         let mut snat = IptEntry::new();
         snat.src_mask = 0;
         snat.dst_mask = 0;
         snat.target = IptTarget::snat(Ipv4Addr::new(10, 0, 2, 99).to_u32(), 40000);
-        NETFILTER
+        manager
             .add_rule(IPTABLES_NAT_TABLE, "POSTROUTING", snat)
             .unwrap();
 
@@ -1488,13 +1529,9 @@ mod tests {
             53,
             b"udp",
         );
-        let verdict = process_ipv4_packet(
-            &mut packet,
-            NF_INET_POST_ROUTING,
-            Some("eth0"),
-            Some("eth0"),
-        )
-        .unwrap();
+        let verdict = manager
+            .process_ipv4_packet(&mut packet, NF_INET_POST_ROUTING, Some("eth0"), Some("eth0"))
+            .unwrap();
         assert_eq!(verdict, NF_ACCEPT);
 
         let parsed = Ipv4Packet::parse(&packet).unwrap();
@@ -1510,7 +1547,8 @@ mod tests {
 
     #[test]
     fn process_ipv6_packet_rewrites_udp_tuple_and_checksums() {
-        NETFILTER.init();
+        let manager = NetfilterManager::new();
+        manager.init();
 
         let rewritten_dst = Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x99]);
         let rewritten_src = Ipv6Addr::from_segments([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x77]);
@@ -1520,7 +1558,7 @@ mod tests {
         dnat.src_mask6 = [0; 16];
         dnat.dst_mask6 = [0; 16];
         dnat.target = IptTarget::dnat_v6(rewritten_dst, 5353);
-        NETFILTER
+        manager
             .add_rule(IPTABLES_NAT_TABLE, "PREROUTING", dnat)
             .unwrap();
 
@@ -1529,7 +1567,7 @@ mod tests {
         mangle.src_mask6 = [0; 16];
         mangle.dst_mask6 = [0; 16];
         mangle.target = IptTarget::ttl(48);
-        NETFILTER
+        manager
             .add_rule(IPTABLES_MANGLE_TABLE, "PREROUTING", mangle)
             .unwrap();
 
@@ -1538,7 +1576,7 @@ mod tests {
         snat.src_mask6 = [0; 16];
         snat.dst_mask6 = [0; 16];
         snat.target = IptTarget::snat_v6(rewritten_src, 4242);
-        NETFILTER
+        manager
             .add_rule(IPTABLES_NAT_TABLE, "POSTROUTING", snat)
             .unwrap();
 
@@ -1549,9 +1587,9 @@ mod tests {
             53,
             b"dns6",
         );
-        let verdict =
-            process_ipv6_packet(&mut packet, NF_INET_PRE_ROUTING, Some("eth0"), Some("eth0"))
-                .unwrap();
+        let verdict = manager
+            .process_ipv6_packet(&mut packet, NF_INET_PRE_ROUTING, Some("eth0"), Some("eth0"))
+            .unwrap();
         assert_eq!(verdict, NF_ACCEPT);
 
         let mut parsed = Ipv6Packet::parse(&packet).unwrap();
@@ -1565,13 +1603,14 @@ mod tests {
             &parsed.payload
         ));
 
-        let verdict = process_ipv6_packet(
-            &mut packet,
-            NF_INET_POST_ROUTING,
-            Some("eth0"),
-            Some("eth0"),
-        )
-        .unwrap();
+        let verdict = manager
+            .process_ipv6_packet(
+                &mut packet,
+                NF_INET_POST_ROUTING,
+                Some("eth0"),
+                Some("eth0"),
+            )
+            .unwrap();
         assert_eq!(verdict, NF_ACCEPT);
 
         parsed = Ipv6Packet::parse(&packet).unwrap();

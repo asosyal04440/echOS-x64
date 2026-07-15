@@ -188,13 +188,11 @@ impl Environment {
     }
 }
 
-lazy_static::lazy_static! {
-    /// Global ortam değişkeni mağazası.
-    ///
-    /// `lazy_static!` ile uygulama ömrü boyunca tek bir instance tutulur.
-    /// Kernel herhangi bir yerden `advanced::ENV.get("HOME")` şeklinde erişebilir.
-    pub static ref ENV: Environment = Environment::new();
-}
+/// Global ortam değişkeni mağazası.
+///
+/// `spin::Lazy` ile uygulama ömrü boyunca tek bir instance tutulur.
+/// Kernel herhangi bir yerden `advanced::ENV.get("HOME")` şeklinde erişebilir.
+pub static ENV: spin::Lazy<Environment> = spin::Lazy::new(|| Environment::new());
 
 // ============================================================================
 // HISTORY MANAGEMENT (KOMUT GEÇMİŞİ)
@@ -315,6 +313,13 @@ impl History {
             .collect()
     }
 
+    pub fn clear(&self) {
+        self.entries.lock().clear();
+        *self.current_index.lock() = 0;
+        self.search_query.lock().clear();
+        self.search_results.lock().clear();
+    }
+
     /// Geçmişi dosyaya kaydet — ~/.history
     /// Her komut ayrı bir satır, POSIX shell history formatı
     pub fn save_to_file(&self, path: &str) {
@@ -414,12 +419,18 @@ impl History {
     }
 }
 
-lazy_static::lazy_static! {
-    /// Global komut geçmişi (en fazla 1000 komut tutar).
-    ///
-    /// Shell her komut çalıştırıldığında `HISTORY.push()` çağrılır.
-    /// OK tuşları `HISTORY.previous()` / `HISTORY.next()` ile çalışır.
-    pub static ref HISTORY: History = History::new(1000);
+/// Global komut geçmişi (en fazla 1000 komut tutar).
+///
+/// Shell her komut çalıştırıldığında `HISTORY.push()` çağrılır.
+/// OK tuşları `HISTORY.previous()` / `HISTORY.next()` ile çalışır.
+pub static HISTORY: spin::Lazy<History> = spin::Lazy::new(|| History::new(1000));
+
+#[cfg(test)]
+pub(crate) fn reset_advanced_test_globals() {
+    ENV.clear();
+    ENV.init_defaults();
+    ALIASES.clear();
+    HISTORY.clear();
 }
 
 // ============================================================================
@@ -1395,13 +1406,11 @@ impl AliasManager {
     }
 }
 
-lazy_static::lazy_static! {
-    /// Global alias mağazası.
-    ///
-    /// `init()` tarafından varsayılan alias'larla doldurulur.
-    /// Kullanıcı `alias ll='ls -la'` komutunu çalıştırdığında buraya eklenir.
-    pub static ref ALIASES: AliasManager = AliasManager::new();
-}
+/// Global alias mağazası.
+///
+/// `init()` tarafından varsayılan alias'larla doldurulur.
+/// Kullanıcı `alias ll='ls -la'` komutunu çalıştırdığında buraya eklenir.
+pub static ALIASES: spin::Lazy<AliasManager> = spin::Lazy::new(|| AliasManager::new());
 
 // ============================================================================
 // INITIALIZATION (BAŞLATMA)
@@ -1432,8 +1441,15 @@ pub fn init() {
 mod tests {
     use super::*;
 
+    fn advanced_test_epoch() -> spin::MutexGuard<'static, ()> {
+        let guard = crate::shell::shell_global_test_epoch();
+        reset_advanced_test_globals();
+        guard
+    }
+
     #[test]
     fn test_env_expand() {
+        let _epoch = advanced_test_epoch();
         ENV.set("HOME", "/root");
         ENV.set("USER", "test");
 
@@ -1444,6 +1460,7 @@ mod tests {
 
     #[test]
     fn test_glob() {
+        let _epoch = advanced_test_epoch();
         assert!(Glob::matches("*.txt", "file.txt"));
         assert!(!Glob::matches("*.txt", "file.rs"));
         assert!(Glob::matches("test?", "test1"));
@@ -1453,6 +1470,7 @@ mod tests {
 
     #[test]
     fn test_tokenizer() {
+        let _epoch = advanced_test_epoch();
         let tokens = Tokenizer::tokenize("ls -la | grep test > out.txt");
         assert_eq!(tokens.len(), 7);
         assert_eq!(tokens[2], Token::Pipe);
@@ -1461,6 +1479,7 @@ mod tests {
 
     #[test]
     fn test_parser() {
+        let _epoch = advanced_test_epoch();
         let tokens = Tokenizer::tokenize("ls | grep test");
         let pipelines = Parser::parse(tokens).unwrap();
         assert_eq!(pipelines.len(), 1);
@@ -1469,6 +1488,7 @@ mod tests {
 
     #[test]
     fn completer_includes_path_entries_for_command_position() {
+        let _epoch = advanced_test_epoch();
         ENV.set("PATH", "/");
         let completions = Completer::new().complete("rea", 3);
         assert!(completions.iter().any(|item| item == "readme.md"));

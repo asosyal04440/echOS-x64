@@ -56,7 +56,8 @@ x86_64 = "0.14.10"
 multiboot2 = { git = "https://github.com/rust-osdev/multiboot2", tag = "multiboot2-v0.12.2" }
 # Limine önyükleyici protokolü - modern UEFI/BIOS önyükleme için alternatif protokol
 limine-protocol-for-rust = "0.2.1"
-# Tembel (lazy) başlatma için - statik değişkenleri ilk erişimde başlatır (spin ile no_std uyumlu)
+# Tembel (lazy) başlatma için - statik değişkenleri ilk erişimde başlatır
+# no_std hedefleri (UEFI + bare-metal) spin_no_std kullanır; host'ta std::sync::Once kullanılır (aşağıya override)
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 # PS/2 klavye protokolü sürücüsü - klavye tarama kodlarını ASCII'ye çevirir
 pc-keyboard = "0.7.0"
@@ -124,7 +125,9 @@ ed448-goldilocks-plus = { path = "third_party/ed448-goldilocks-plus" }
 # `test = false` ve `bench = false`: Çekirdek kodu doğrudan test edilemez
 # çünkü no_std ortamında çalışır. Testler ve benchmark'lar ayrı hedeflerde tanımlanır.
 [lib]
-test = false
+# test = false — unit tests (#[cfg(test)]) in lib sources compile only on host.
+# Set to true to run `cargo test-host --lib` or `cargo test` for host target.
+test = true
 bench = false
 
 [[bin]]
@@ -172,6 +175,8 @@ libc = "0.2"
 rand = { version = "0.8", features = ["small_rng"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))'.dependencies]
+# Host (MSVC/GNU) lazy_static: std::sync::Once kullanır (spin_no_std'dan daha verimli)
+lazy_static = { version = "1.5.0" }
 # RustCrypto prime-order NIST curves - DNSSEC ECDSA P-384 parity.
 # UEFI boot binary bu host-side/runtime doğrulayıcıları linklemez; aksi halde
 # upstream feature graph `std` zincirini çekip `panic_impl` çakışması üretir.
@@ -261,6 +266,30 @@ harness = false
 # eBPF tracing, container stack). Tamamen bağımsız simülasyon; ech_os import'u yok.
 [[test]]
 name = "integration_suite"
+
+# Dalga 1 (P0) Network — Build & Verify: NAPI, GSO, GRO, Checksum, qdisc,
+# policy routing, per-NIC stats, error counters, rate limiting, SYN cookies.
+# Host ortamında simülasyon; bare-metal çekirdeğe bağımlılık yok.
+[[test]]
+name = "wave1_network_p0"
+
+# Dalga 2 (P1) Network — Build & Verify: SO_LINGER, SO_BINDTODEVICE,
+# IGMP, multicast options, TCP_CORK, TCP_FASTOPEN, TCP_CONGESTION,
+# sendmmsg/recvmmsg, sendfile/splice/tee, VLAN, bridge, bonding, veth,
+# TUN/TAP, VXLAN, VRF, ECMP, HTB, DSCP, RSS, LRO, MLD, IPv6 multicast.
+# Host ortamında simülasyon; bare-metal çekirdeğe bağımlılık yok.
+[[test]]
+name = "wave2_network_p1"
+
+# Dalga 3 (P2) Network — AF_XDP, procfs observability, SNMP agent,
+# TCP_INFO/timestamping, WSA-style async notification and overlapped socket API.
+[[test]]
+name = "wave3_network_p2"
+
+# Dalga 4 (P3) Network — SCTP, IPv6 transition technologies,
+# HTTP.sys-style request queues, SMB/CIFS sharing, and SPA/port-knock.
+[[test]]
+name = "wave4_network_p3"
 
 # Regresyon + stress suite: SPSC ring, RCU, EEVDF, EAS, PSI, MGLRU, WiFi MLO,
 # Btrfs scrub, io_uring, NVMe SQ/CQ, jail izolasyon, syscall conformance, FS

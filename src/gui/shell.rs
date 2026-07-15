@@ -532,6 +532,13 @@ mod tests {
     use crate::personalization::{virtual_desktops, DesktopProfile};
     use alloc::string::String;
 
+    static SHELL_RENDER_TEST_EPOCH: spin::Lazy<spin::Mutex<()>> =
+        spin::Lazy::new(|| spin::Mutex::new(()));
+
+    fn shell_render_test_epoch() -> spin::MutexGuard<'static, ()> {
+        SHELL_RENDER_TEST_EPOCH.lock()
+    }
+
     fn rects_overlap(a: Rect, b: Rect) -> bool {
         a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
     }
@@ -574,6 +581,7 @@ mod tests {
 
     #[test]
     fn desktop_scene_without_dashboard_matches_wallpaper_only_backdrop() {
+        let _epoch = shell_render_test_epoch();
         let screen = Rect::new(0, 0, 640, 360);
         let clip = screen;
         let mut wallpaper =
@@ -588,6 +596,7 @@ mod tests {
 
     #[test]
     fn workspace_profiles_drive_distinct_backdrops() {
+        let _epoch = shell_render_test_epoch();
         let screen = Rect::new(0, 0, 640, 360);
         let clip = screen;
         {

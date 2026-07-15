@@ -19,6 +19,15 @@ pub const O_TRUNC: u32 = 0x240;
 pub const O_APPEND: u32 = 0x400;
 pub const O_EXCL: u32 = 0x800;
 
+const EINVAL: i32 = -22;
+const EOVERFLOW: i32 = -75;
+const LINUX_DIRENT64_HEADER_LEN: usize = 19;
+const LINUX_DIRENT64_RECLEN_OFFSET: usize = 16;
+const LINUX_DIRENT64_TYPE_OFFSET: usize = 18;
+const FS_LIST_DIR_BUF_LEN: usize = 4096;
+const FS_LIST_DIR_MAX_BATCHES: usize = 64;
+const FS_LIST_DIR_MAX_ENTRIES: usize = 4096;
+
 // ============================================================================
 // DOSYA SİSTEMİ
 // ============================================================================
@@ -127,45 +136,77 @@ pub fn fs_truncate(path: &str, size: u64) -> Result<(), i32> {
 /// Dizin içeriğini listele
 pub fn fs_list_dir(path: &str) -> Result<Vec<String>, i32> {
     {
-        // Ring 3'te GETDENTS64 syscall kullanılır
-        let mut buf = alloc::vec![0u8; 4096];
+        // Ring 3'te GETDENTS64 syscall kullanılır; parser Linux dirent64 ABI'ye bağlıdır.
+        let mut buf = alloc::vec![0u8; FS_LIST_DIR_BUF_LEN];
         let fd = super::shell_syscall::sys_open(path, 0)?; // O_RDONLY
         let mut entries = Vec::new();
-        loop {
+        let mut status = Ok(());
+        let mut reached_eof = false;
+
+        for _ in 0..FS_LIST_DIR_MAX_BATCHES {
             match super::shell_syscall::sys_getdents64(fd, &mut buf) {
-                Ok(n) if n > 0 => {
-                    // Linux dirent64 formatını parse et
-                    let mut offset = 0;
+                Ok(0) => {
+                    reached_eof = true;
+                    break;
+                }
+                Ok(n) if n <= buf.len() => {
+                    let mut offset = 0usize;
                     while offset < n {
-                        let _inode = u64::from_le_bytes([
-                            buf[offset],
-                            buf[offset + 1],
-                            buf[offset + 2],
-                            buf[offset + 3],
-                            buf[offset + 4],
-                            buf[offset + 5],
-                            buf[offset + 6],
-                            buf[offset + 7],
-                        ]);
+                        let remaining = n - offset;
+                        if remaining < LINUX_DIRENT64_HEADER_LEN {
+                            status = Err(EINVAL);
+                            break;
+                        }
+
+                        let reclen_at = offset + LINUX_DIRENT64_RECLEN_OFFSET;
                         let rec_len =
-                            u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                        let name_len =
-                            u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                        let name_bytes = &buf[offset + 18..offset + 18 + name_len];
+                            u16::from_le_bytes([buf[reclen_at], buf[reclen_at + 1]]) as usize;
+                        if rec_len < LINUX_DIRENT64_HEADER_LEN || rec_len > remaining {
+                            status = Err(EINVAL);
+                            break;
+                        }
+
+                        let _d_type = buf[offset + LINUX_DIRENT64_TYPE_OFFSET];
+                        let name_start = offset + LINUX_DIRENT64_HEADER_LEN;
+                        let name_end = offset + rec_len;
+                        let name_region = &buf[name_start..name_end];
+                        let name_len = name_region
+                            .iter()
+                            .position(|&byte| byte == 0)
+                            .unwrap_or(name_region.len());
+                        let name_bytes = &name_region[..name_len];
                         if let Ok(name) = core::str::from_utf8(name_bytes) {
-                            let name = name.trim_end_matches('\0');
                             if !name.is_empty() && name != "." && name != ".." {
                                 entries.push(name.to_string());
+                                if entries.len() >= FS_LIST_DIR_MAX_ENTRIES {
+                                    status = Err(EOVERFLOW);
+                                    break;
+                                }
                             }
                         }
                         offset += rec_len;
                     }
+                    if status.is_err() {
+                        break;
+                    }
                 }
-                _ => break,
+                Ok(_) => {
+                    status = Err(EOVERFLOW);
+                    break;
+                }
+                Err(e) => {
+                    status = Err(e);
+                    break;
+                }
             }
         }
+
+        if status.is_ok() && !reached_eof {
+            status = Err(EOVERFLOW);
+        }
+
         let _ = super::shell_syscall::sys_close(fd);
-        Ok(entries)
+        status.map(|()| entries)
     }
 }
 

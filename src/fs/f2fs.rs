@@ -6356,8 +6356,8 @@ impl Default for EncryptPolicy {
     fn default() -> Self {
         EncryptPolicy {
             version: 1,
-            contents_encryption_mode: EncryptAlgorithm::Aes256Xts,
-            filenames_encryption_mode: EncryptAlgorithm::Aes256Gcm,
+            contents_encryption_mode: EncryptAlgorithm::None,
+            filenames_encryption_mode: EncryptAlgorithm::None,
             flags: 0,
             master_key_descriptor: [0; 8],
             nonce: [0; 16],

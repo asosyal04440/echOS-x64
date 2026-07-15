@@ -1,12 +1,12 @@
+use crate::builtins;
+use crate::scripting;
+use crate::shell_syscall as sc;
+use crate::tokenizer::{self, ParsedCommand, Token};
+use crate::{eprintln_fn, ShellState};
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::format;
-use crate::shell_syscall as sc;
-use crate::tokenizer::{self, Token, ParsedCommand};
-use crate::builtins;
-use crate::scripting;
-use crate::{eprintln_fn, ShellState};
 
 pub fn execute_line(state: &mut ShellState, input: &str) {
     let expanded_cmd = expand_command_substitutions(state, input);
@@ -22,12 +22,12 @@ pub fn execute_line(state: &mut ShellState, input: &str) {
 
     let trimmed = expanded.trim();
     if trimmed.starts_with("[[ ") && trimmed.ends_with(" ]]") {
-        let expr = &trimmed[3..trimmed.len()-3];
+        let expr = &trimmed[3..trimmed.len() - 3];
         state.exit_code = scripting::eval_extended_test(state, expr);
         return;
     }
     if trimmed.starts_with("((") && trimmed.ends_with(r"))") {
-        let expr = &trimmed[2..trimmed.len()-2];
+        let expr = &trimmed[2..trimmed.len() - 2];
         let result = scripting::eval_arithmetic(expr);
         state.exit_code = if result == 0 { 1 } else { 0 };
         return;
@@ -36,21 +36,35 @@ pub fn execute_line(state: &mut ShellState, input: &str) {
         if trimmed.ends_with(')') {
             let var_name = &trimmed[..eq_pos];
             let inner = &trimmed[eq_pos + 2..trimmed.len() - 1];
-            let items: Vec<String> = inner.split_whitespace()
+            let items: Vec<String> = inner
+                .split_whitespace()
                 .map(|s| state.env.expand(s))
                 .collect();
             state.env.set_array(var_name, items);
             return;
         }
     }
-    if trimmed.starts_with("if ") || trimmed.starts_with("if\t") || trimmed.starts_with("while ") || trimmed.starts_with("until ")
-        || trimmed.starts_with("for ") || trimmed.starts_with("case ")
-        || trimmed.starts_with("function ") || trimmed.contains("() {") || trimmed.contains("()\n{")
-        || trimmed.starts_with("local ") || trimmed.starts_with("return ")
-        || trimmed.starts_with("break") || trimmed.starts_with("continue")
-        || trimmed.starts_with("eval ") || trimmed.starts_with("select ")
-        || trimmed.starts_with("declare ") || trimmed.starts_with("readonly ")
-        || trimmed.starts_with("trap ") || trimmed.starts_with("trap\n") || trimmed == "trap" {
+    if trimmed.starts_with("if ")
+        || trimmed.starts_with("if\t")
+        || trimmed.starts_with("while ")
+        || trimmed.starts_with("until ")
+        || trimmed.starts_with("for ")
+        || trimmed.starts_with("case ")
+        || trimmed.starts_with("function ")
+        || trimmed.contains("() {")
+        || trimmed.contains("()\n{")
+        || trimmed.starts_with("local ")
+        || trimmed.starts_with("return ")
+        || trimmed.starts_with("break")
+        || trimmed.starts_with("continue")
+        || trimmed.starts_with("eval ")
+        || trimmed.starts_with("select ")
+        || trimmed.starts_with("declare ")
+        || trimmed.starts_with("readonly ")
+        || trimmed.starts_with("trap ")
+        || trimmed.starts_with("trap\n")
+        || trimmed == "trap"
+    {
         scripting::run_script(state, &expanded);
         return;
     }
@@ -82,7 +96,10 @@ pub fn execute_line(state: &mut ShellState, input: &str) {
         let var_name = &trimmed[..eq_pos];
         // Valid shell variable: starts with alpha/underscore, contains only alnum/underscore
         if !var_name.is_empty()
-            && var_name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+            && var_name
+                .chars()
+                .next()
+                .map_or(false, |c| c.is_alphabetic() || c == '_')
             && var_name.chars().all(|c| c.is_alphanumeric() || c == '_')
             && !trimmed[eq_pos..].starts_with("() ")
         {
@@ -98,7 +115,10 @@ pub fn execute_line(state: &mut ShellState, input: &str) {
 }
 
 fn resolve_alias(state: &ShellState, cmd: &str) -> String {
-    state.env.get(&format!("_alias_{}", cmd)).unwrap_or_else(|| cmd.to_string())
+    state
+        .env
+        .get(&format!("_alias_{}", cmd))
+        .unwrap_or_else(|| cmd.to_string())
 }
 
 fn execute_tokens(state: &mut ShellState, tokens: &[Token]) {
@@ -114,13 +134,22 @@ fn execute_tokens(state: &mut ShellState, tokens: &[Token]) {
                     i += 1;
                     break;
                 }
-                t => { segment.push(t.clone()); i += 1; }
+                t => {
+                    segment.push(t.clone());
+                    i += 1;
+                }
             }
         }
-        if segment.is_empty() { continue; }
+        if segment.is_empty() {
+            continue;
+        }
         match &op {
-            Token::And if !last_result => { continue; }
-            Token::Or if last_result => { continue; }
+            Token::And if !last_result => {
+                continue;
+            }
+            Token::Or if last_result => {
+                continue;
+            }
             _ => {}
         }
         let cmds = tokenizer::parse_simple(&segment);
@@ -129,19 +158,27 @@ fn execute_tokens(state: &mut ShellState, tokens: &[Token]) {
 }
 
 fn execute_cmds(state: &mut ShellState, cmds: &[ParsedCommand]) -> bool {
-    if cmds.is_empty() { return true; }
-    if cmds.len() == 1 { return execute_single(state, &cmds[0]); }
+    if cmds.is_empty() {
+        return true;
+    }
+    if cmds.len() == 1 {
+        return execute_single(state, &cmds[0]);
+    }
     execute_pipeline(state, cmds)
 }
 
 fn execute_single(state: &mut ShellState, cmd: &ParsedCommand) -> bool {
-    if cmd.argv.is_empty() { return true; }
+    if cmd.argv.is_empty() {
+        return true;
+    }
 
     if cmd.argv[0] == "(subshell)" || cmd.argv[0] == "{group}" {
         if let Some(ref code) = cmd.here_doc {
             for line in code.lines() {
                 let l = line.trim();
-                if !l.is_empty() { execute_line(state, l); }
+                if !l.is_empty() {
+                    execute_line(state, l);
+                }
             }
         }
         return true;
@@ -175,8 +212,14 @@ fn execute_single(state: &mut ShellState, cmd: &ParsedCommand) -> bool {
     let argv_refs: Vec<&str> = filtered_argv.iter().map(|s| s.as_str()).collect();
 
     let expanded_args = tokenizer::expand_globs(&filtered_argv[1..]);
-    let mut final_argv: Vec<&str> = if !argv_refs.is_empty() { vec![argv_refs[0]] } else { Vec::new() };
-    for a in &expanded_args { final_argv.push(a); }
+    let mut final_argv: Vec<&str> = if !argv_refs.is_empty() {
+        vec![argv_refs[0]]
+    } else {
+        Vec::new()
+    };
+    for a in &expanded_args {
+        final_argv.push(a);
+    }
 
     let mut stdin_fd: i32 = -1;
     let mut stdout_fd: i32 = -1;
@@ -184,19 +227,31 @@ fn execute_single(state: &mut ShellState, cmd: &ParsedCommand) -> bool {
 
     if let Some(ref path) = cmd.redirect_out {
         stdout_fd = sc::sys_open(path, 1 | 0x200 | 0x240).unwrap_or(0) as i32;
-        if stdout_fd >= 0 { let _ = sc::sys_dup2(stdout_fd as usize, 1); let _ = sc::sys_close(stdout_fd as usize); }
+        if stdout_fd >= 0 {
+            let _ = sc::sys_dup2(stdout_fd as usize, 1);
+            let _ = sc::sys_close(stdout_fd as usize);
+        }
     }
     if let Some(ref path) = cmd.redirect_append {
         stdout_fd = sc::sys_open(path, 1 | 0x200 | 0x400).unwrap_or(0) as i32;
-        if stdout_fd >= 0 { let _ = sc::sys_dup2(stdout_fd as usize, 1); let _ = sc::sys_close(stdout_fd as usize); }
+        if stdout_fd >= 0 {
+            let _ = sc::sys_dup2(stdout_fd as usize, 1);
+            let _ = sc::sys_close(stdout_fd as usize);
+        }
     }
     if let Some(ref path) = cmd.redirect_in {
         stdin_fd = sc::sys_open(path, 0).unwrap_or(0) as i32;
-        if stdin_fd >= 0 { let _ = sc::sys_dup2(stdin_fd as usize, 0); let _ = sc::sys_close(stdin_fd as usize); }
+        if stdin_fd >= 0 {
+            let _ = sc::sys_dup2(stdin_fd as usize, 0);
+            let _ = sc::sys_close(stdin_fd as usize);
+        }
     }
     if let Some(ref path) = cmd.redirect_err {
         stderr_fd = sc::sys_open(path, 1 | 0x200 | 0x240).unwrap_or(0) as i32;
-        if stderr_fd >= 0 { let _ = sc::sys_dup2(stderr_fd as usize, 2); let _ = sc::sys_close(stderr_fd as usize); }
+        if stderr_fd >= 0 {
+            let _ = sc::sys_dup2(stderr_fd as usize, 2);
+            let _ = sc::sys_close(stderr_fd as usize);
+        }
     }
     // <> read-write redirect — dosyayı okuma/yazma modunda aç, stdin ve stdout'a bağla
     if let Some(ref path) = cmd.redirect_readwrite {
@@ -208,14 +263,20 @@ fn execute_single(state: &mut ShellState, cmd: &ParsedCommand) -> bool {
     }
     if let Some(ref path) = cmd.redirect_err_append {
         stderr_fd = sc::sys_open(path, 1 | 0x200 | 0x400).unwrap_or(0) as i32;
-        if stderr_fd >= 0 { let _ = sc::sys_dup2(stderr_fd as usize, 2); let _ = sc::sys_close(stderr_fd as usize); }
+        if stderr_fd >= 0 {
+            let _ = sc::sys_dup2(stderr_fd as usize, 2);
+            let _ = sc::sys_close(stderr_fd as usize);
+        }
     }
     if let Some(ref content) = cmd.here_doc {
         if cmd.argv[0] != "(subshell)" && cmd.argv[0] != "{group}" {
             let tmp = "/tmp/.heredoc";
             executor_write_file(tmp, content.as_bytes());
             stdin_fd = sc::sys_open(tmp, 0).unwrap_or(0) as i32;
-            if stdin_fd >= 0 { let _ = sc::sys_dup2(stdin_fd as usize, 0); let _ = sc::sys_close(stdin_fd as usize); }
+            if stdin_fd >= 0 {
+                let _ = sc::sys_dup2(stdin_fd as usize, 0);
+                let _ = sc::sys_close(stdin_fd as usize);
+            }
         }
     }
     if let Some(ref content) = cmd.here_string {
@@ -224,7 +285,10 @@ fn execute_single(state: &mut ShellState, cmd: &ParsedCommand) -> bool {
         data.push(b'\n');
         executor_write_file(tmp, &data);
         stdin_fd = sc::sys_open(tmp, 0).unwrap_or(0) as i32;
-        if stdin_fd >= 0 { let _ = sc::sys_dup2(stdin_fd as usize, 0); let _ = sc::sys_close(stdin_fd as usize); }
+        if stdin_fd >= 0 {
+            let _ = sc::sys_dup2(stdin_fd as usize, 0);
+            let _ = sc::sys_close(stdin_fd as usize);
+        }
     }
     for (op, target) in &fd_ops {
         if op == "2>&" {
@@ -263,21 +327,33 @@ fn execute_single(state: &mut ShellState, cmd: &ParsedCommand) -> bool {
             Ok(pid) => {
                 state.job_id_counter += 1;
                 state.jobs.push(crate::Job {
-                    id: state.job_id_counter, pid,
-                    cmd: final_argv.join(" "), running: true, background: true,
+                    id: state.job_id_counter,
+                    pid,
+                    cmd: final_argv.join(" "),
+                    running: true,
+                    background: true,
                 });
                 crate::println(&format!("[{}] {}", state.job_id_counter, pid));
                 true
             }
-            Err(_) => { eprintln_fn("fork basarisiz"); false }
+            Err(_) => {
+                eprintln_fn("fork basarisiz");
+                false
+            }
         }
     } else {
         builtins::dispatch(state, &final_argv)
     };
 
-    if stdin_fd >= 0 { let _ = sc::sys_dup2(0, 0); }
-    if stdout_fd >= 0 { let _ = sc::sys_dup2(1, 1); }
-    if stderr_fd >= 0 { let _ = sc::sys_dup2(2, 2); }
+    if stdin_fd >= 0 {
+        let _ = sc::sys_dup2(0, 0);
+    }
+    if stdout_fd >= 0 {
+        let _ = sc::sys_dup2(1, 1);
+    }
+    if stderr_fd >= 0 {
+        let _ = sc::sys_dup2(2, 2);
+    }
 
     result
 }
@@ -300,18 +376,53 @@ fn execute_pipeline(state: &mut ShellState, cmds: &[ParsedCommand]) -> bool {
 
         let pid = match sc::sys_fork() {
             Ok(0) => {
-                if prev_read >= 0 { let _ = sc::sys_dup2(prev_read as usize, 0); let _ = sc::sys_close(prev_read as usize); }
-                if i < n - 1 { let _ = sc::sys_close(pipe_fds[0]); let _ = sc::sys_dup2(pipe_fds[1], 1); let _ = sc::sys_close(pipe_fds[1]); }
+                if prev_read >= 0 {
+                    let _ = sc::sys_dup2(prev_read as usize, 0);
+                    let _ = sc::sys_close(prev_read as usize);
+                }
+                if i < n - 1 {
+                    let _ = sc::sys_close(pipe_fds[0]);
+                    let _ = sc::sys_dup2(pipe_fds[1], 1);
+                    let _ = sc::sys_close(pipe_fds[1]);
+                }
 
-                if let Some(ref path) = cmd.redirect_out { if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x240) { let _ = sc::sys_dup2(fd, 1); let _ = sc::sys_close(fd); } }
-                if let Some(ref path) = cmd.redirect_append { if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x400) { let _ = sc::sys_dup2(fd, 1); let _ = sc::sys_close(fd); } }
-                if let Some(ref path) = cmd.redirect_in { if let Ok(fd) = sc::sys_open(path, 0) { let _ = sc::sys_dup2(fd, 0); let _ = sc::sys_close(fd); } }
-                if let Some(ref path) = cmd.redirect_err { if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x240) { let _ = sc::sys_dup2(fd, 2); let _ = sc::sys_close(fd); } }
-                if let Some(ref path) = cmd.redirect_err_append { if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x400) { let _ = sc::sys_dup2(fd, 2); let _ = sc::sys_close(fd); } }
+                if let Some(ref path) = cmd.redirect_out {
+                    if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x240) {
+                        let _ = sc::sys_dup2(fd, 1);
+                        let _ = sc::sys_close(fd);
+                    }
+                }
+                if let Some(ref path) = cmd.redirect_append {
+                    if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x400) {
+                        let _ = sc::sys_dup2(fd, 1);
+                        let _ = sc::sys_close(fd);
+                    }
+                }
+                if let Some(ref path) = cmd.redirect_in {
+                    if let Ok(fd) = sc::sys_open(path, 0) {
+                        let _ = sc::sys_dup2(fd, 0);
+                        let _ = sc::sys_close(fd);
+                    }
+                }
+                if let Some(ref path) = cmd.redirect_err {
+                    if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x240) {
+                        let _ = sc::sys_dup2(fd, 2);
+                        let _ = sc::sys_close(fd);
+                    }
+                }
+                if let Some(ref path) = cmd.redirect_err_append {
+                    if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x400) {
+                        let _ = sc::sys_dup2(fd, 2);
+                        let _ = sc::sys_close(fd);
+                    }
+                }
                 if let Some(ref content) = cmd.here_doc {
                     let tmp = "/tmp/.heredoc";
                     executor_write_file(tmp, content.as_bytes());
-                    if let Ok(fd) = sc::sys_open(tmp, 0) { let _ = sc::sys_dup2(fd, 0); let _ = sc::sys_close(fd); }
+                    if let Ok(fd) = sc::sys_open(tmp, 0) {
+                        let _ = sc::sys_dup2(fd, 0);
+                        let _ = sc::sys_close(fd);
+                    }
                 }
 
                 if !final_argv.is_empty() {
@@ -328,11 +439,19 @@ fn execute_pipeline(state: &mut ShellState, cmds: &[ParsedCommand]) -> bool {
                 sc::sys_exit(0);
             }
             Ok(pid) => pid,
-            Err(_) => { eprintln_fn("fork basarisiz"); return false; }
+            Err(_) => {
+                eprintln_fn("fork basarisiz");
+                return false;
+            }
         };
 
-        if prev_read >= 0 { let _ = sc::sys_close(prev_read as usize); }
-        if i < n - 1 { let _ = sc::sys_close(pipe_fds[1]); prev_read = pipe_fds[0] as i32; }
+        if prev_read >= 0 {
+            let _ = sc::sys_close(prev_read as usize);
+        }
+        if i < n - 1 {
+            let _ = sc::sys_close(pipe_fds[1]);
+            prev_read = pipe_fds[0] as i32;
+        }
         if !cmd.background {
             let mut status: i32 = 0;
             let _ = sc::sys_wait4(pid as isize, &mut status, 0);
@@ -353,8 +472,8 @@ pub fn expand_command_substitutions(state: &mut ShellState, input: &str) -> Stri
     let len = chars.len();
     let mut i = 0;
     while i < len {
-        if chars[i] == '$' && i + 1 < len && chars[i+1] == '(' {
-            if i + 2 < len && chars[i+2] == '(' {
+        if chars[i] == '$' && i + 1 < len && chars[i + 1] == '(' {
+            if i + 2 < len && chars[i + 2] == '(' {
                 result.push(chars[i]);
                 i += 1;
             } else {
@@ -362,9 +481,17 @@ pub fn expand_command_substitutions(state: &mut ShellState, input: &str) -> Stri
                 let mut depth = 1;
                 let mut cmd = String::new();
                 while i < len && depth > 0 {
-                    if chars[i] == '(' { depth += 1; cmd.push('('); }
-                    else if chars[i] == ')' { depth -= 1; if depth > 0 { cmd.push(')'); } }
-                    else { cmd.push(chars[i]); }
+                    if chars[i] == '(' {
+                        depth += 1;
+                        cmd.push('(');
+                    } else if chars[i] == ')' {
+                        depth -= 1;
+                        if depth > 0 {
+                            cmd.push(')');
+                        }
+                    } else {
+                        cmd.push(chars[i]);
+                    }
                     i += 1;
                 }
                 let output = execute_and_capture(state, &cmd);
@@ -374,11 +501,17 @@ pub fn expand_command_substitutions(state: &mut ShellState, input: &str) -> Stri
             i += 1;
             let mut cmd = String::new();
             while i < len && chars[i] != '`' {
-                if chars[i] == '\\' && i + 1 < len { i += 1; cmd.push(chars[i]); }
-                else { cmd.push(chars[i]); }
+                if chars[i] == '\\' && i + 1 < len {
+                    i += 1;
+                    cmd.push(chars[i]);
+                } else {
+                    cmd.push(chars[i]);
+                }
                 i += 1;
             }
-            if i < len { i += 1; }
+            if i < len {
+                i += 1;
+            }
             let output = execute_and_capture(state, &cmd);
             result.push_str(&output);
         } else {
@@ -391,7 +524,9 @@ pub fn expand_command_substitutions(state: &mut ShellState, input: &str) -> Stri
 
 fn execute_and_capture(state: &mut ShellState, cmd: &str) -> String {
     let mut pipe_fds = [0usize; 2];
-    if sc::sys_pipe(&mut pipe_fds).is_err() { return String::new(); }
+    if sc::sys_pipe(&mut pipe_fds).is_err() {
+        return String::new();
+    }
     match sc::sys_fork() {
         Ok(0) => {
             let _ = sc::sys_close(pipe_fds[0]);
@@ -449,7 +584,9 @@ pub fn write_file(path: &str, data: &[u8]) -> bool {
         let _ = sc::sys_write(fd, data);
         let _ = sc::sys_close(fd);
         true
-    } else { false }
+    } else {
+        false
+    }
 }
 
 fn executor_write_file(path: &str, data: &[u8]) -> bool {
@@ -461,5 +598,7 @@ pub fn append_file(path: &str, data: &[u8]) -> bool {
         let _ = sc::sys_write(fd, data);
         let _ = sc::sys_close(fd);
         true
-    } else { false }
+    } else {
+        false
+    }
 }

@@ -61,13 +61,19 @@ enum ExecTarget {
 
 fn classify_file(file_data: &[u8]) -> ExecTarget {
     if file_data.len() >= 2 && file_data[0] == b'#' && file_data[1] == b'!' {
-        let first_line_end = file_data.iter().position(|&b| b == b'\n').unwrap_or(file_data.len());
+        let first_line_end = file_data
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(file_data.len());
         let line = &file_data[2..first_line_end];
         let line_str = alloc::string::String::from_utf8_lossy(line);
         let trimmed = line_str.trim();
         let mut parts = trimmed.splitn(2, |c: char| c == ' ' || c == '\t');
         let interpreter = parts.next().unwrap_or("").trim();
-        let opt_arg = parts.next().map(|s| alloc::string::String::from(s.trim())).filter(|s| !s.is_empty());
+        let opt_arg = parts
+            .next()
+            .map(|s| alloc::string::String::from(s.trim()))
+            .filter(|s| !s.is_empty());
         if interpreter.is_empty() {
             ExecTarget::Unknown
         } else {
@@ -132,9 +138,11 @@ fn exec_internal(
                 Err(()) => super::errno(super::EIO),
             }
         }
-        ExecTarget::Shebang { interpreter, opt_arg, script_path: _ } => {
-            exec_with_shebang(&interpreter, opt_arg.as_deref(), path, argv, envp, depth)
-        }
+        ExecTarget::Shebang {
+            interpreter,
+            opt_arg,
+            script_path: _,
+        } => exec_with_shebang(&interpreter, opt_arg.as_deref(), path, argv, envp, depth),
         ExecTarget::Unknown => super::errno(super::ENOEXEC),
     }
 }
@@ -212,7 +220,10 @@ pub(super) fn sys_vfork() -> usize {
         user_rip,
         user_rsp as usize as u64,
         flags,
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
     ) {
         Some(pid) => pid,
         None => return super::errno(super::ENOMEM),
@@ -247,7 +258,10 @@ pub(super) fn sys_fork() -> usize {
         user_rip,
         user_rsp as usize as u64,
         crate::task::task::EXIT_SIGNAL_SIGCHLD, // flags = SIGCHLD (exit signal)
-        0, 0, 0, 0,
+        0,
+        0,
+        0,
+        0,
     ) {
         Some(pid) => pid,
         None => super::errno(super::ENOMEM),
@@ -299,7 +313,11 @@ pub(super) fn sys_clone(
     newtls: usize,
 ) -> usize {
     let (user_rsp, user_rip, _user_rflags) = syscall::current_user_context();
-    let effective_rsp = if child_stack != 0 { child_stack } else { user_rsp as usize };
+    let effective_rsp = if child_stack != 0 {
+        child_stack
+    } else {
+        user_rsp as usize
+    };
 
     match task::scheduler::fork_current_user_task_with_flags(
         user_rip,

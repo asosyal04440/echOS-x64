@@ -712,9 +712,7 @@ fn sticky_modifier_mask(scan_code: u16) -> u8 {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_INPUT: Arc<EchInput> = Arc::new(EchInput::new());
-}
+static ECH_INPUT: spin::Lazy<Arc<EchInput>> = spin::Lazy::new(|| Arc::new(EchInput::new()));
 
 pub fn init() {
     ECH_INPUT.start();

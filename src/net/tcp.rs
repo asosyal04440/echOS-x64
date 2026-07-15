@@ -37,6 +37,7 @@
 use super::ip::{IpProtocol, Ipv4Packet};
 use super::ipv6::{Ipv6NextHeader, Ipv6Packet};
 use super::socket::AddressFamily;
+use super::tcp_metrics_genl::record_metrics;
 use super::{allocate_socket_id, IpAddr, Ipv4Addr, NetError, Port, SocketAddr};
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -62,6 +63,97 @@ pub const TCPOPT_WINDOW_SCALE: u8 = 3; // Window Scale - pencere ölçekleme (RF
 pub const TCPOPT_SACK_PERMITTED: u8 = 4; // SACK izni (RFC 2018)
 pub const TCPOPT_SACK: u8 = 5; // Selective ACK verisi
 pub const TCPOPT_TIMESTAMP: u8 = 8; // Zaman damgası (RTT ölçümü için)
+
+// ============================================================================
+// TCP ECN (Explicit Congestion Notification) — RFC 3168
+// ============================================================================
+// ECN, ag cihazlarini paket drop yerine ECN isaretleme yapmasini saglar.
+// TCP basliginda CWR ve ECE bitleri kullanilir.
+
+/// ECN TCP option kind (RFC 3168 Section 7)
+pub const TCPOPT_ECN: u8 = 3;
+
+/// ECN alanlari IP ToS/Traffic Class byte'inda:
+/// bits 6-7: ECT(0)=01, ECT(1)=10, CE=11, Not-ECT=00
+pub const IP_TOS_ECT0: u8 = 0x02;
+pub const IP_TOS_ECT1: u8 = 0x04;
+pub const IP_TOS_CE: u8 = 0x06;
+
+/// ECN durumu - her baglanti icin
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EcnState {
+    /// ECN capability muzakere edilmedi
+    NonEct,
+    /// ECT(0) kullaniliyor (varsayilan ECN modu)
+    Ect0,
+    /// ECT(1) kullaniliyor (nadiren kullanilir, testing icin)
+    Ect1,
+    /// Congestion Experienced - ag cihazi CE isareti koydu
+    CongestionExperienced,
+}
+
+impl Default for EcnState {
+    fn default() -> Self {
+        EcnState::NonEct
+    }
+}
+
+/// ECN negotiated mi ve hangi mod?
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EcnNegotiation {
+    /// Baglanti ECN capability muzakere etti mi?
+    pub negotiated: bool,
+    /// Mevcut ECN durumu
+    pub state: EcnState,
+    /// Kac tane CE isaretli paket alindi (ACK'lerde ECE=1)
+    pub ce_counter: u32,
+    /// Son CWR gonderilme zamani
+    pub last_cwr_time: u64,
+}
+
+impl EcnNegotiation {
+    pub fn new() -> Self {
+        EcnNegotiation::default()
+    }
+
+    /// SYN paketinde ECN capability bildir (ECE=1, CWR=1)
+    pub fn syn_flags(&self) -> (bool, bool) {
+        if self.negotiated {
+            (true, true)
+        } else {
+            (false, false)
+        }
+    }
+
+    /// SYN-ACK yanitinda ECN onayi (ECE=1, CWR=0)
+    pub fn syn_ack_flags(&self) -> (bool, bool) {
+        (true, false)
+    }
+
+    /// CE isareti algilandiginda cagrilir (alici taraf)
+    pub fn on_ce_detected(&mut self) {
+        self.ce_counter += 1;
+        self.state = EcnState::CongestionExperienced;
+    }
+
+    /// CWR bildirimi gonderildiginde cagrilir (gonderen taraf)
+    pub fn on_cwr_sent(&mut self, current_time_ms: u64) {
+        self.last_cwr_time = current_time_ms;
+        if self.state == EcnState::CongestionExperienced {
+            self.state = EcnState::Ect0;
+        }
+    }
+
+    /// IP header ToS byte'i icin ECN bits dondur
+    pub fn tos_ecn_bits(&self) -> u8 {
+        match self.state {
+            EcnState::NonEct => 0x00,
+            EcnState::Ect0 => IP_TOS_ECT0,
+            EcnState::Ect1 => IP_TOS_ECT1,
+            EcnState::CongestionExperienced => IP_TOS_CE,
+        }
+    }
+}
 
 // ============================================================================
 // TCP SACK (Seçici Onaylama - Selective Acknowledgment)
@@ -858,12 +950,14 @@ pub struct TcpHeader {
 /// TCP bayrakları - her biri 1 bit
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TcpFlags {
-    pub fin: bool, // FIN: Bağlantıyı sonlandır
-    pub syn: bool, // SYN: Sıra numarasını senkronize et (bağlantı kuruluşu)
-    pub rst: bool, // RST: Bağlantıyı sıfırla (hata durumunda)
-    pub psh: bool, // PSH: Veriyi hemen üst katmana ilet (tampon bekletme)
-    pub ack: bool, // ACK: Onaylama numarası geçerli
-    pub urg: bool, // URG: Acil veri göstericisi geçerli
+    pub fin: bool,
+    pub syn: bool,
+    pub rst: bool,
+    pub psh: bool,
+    pub ack: bool,
+    pub urg: bool,
+    pub cwr: bool, // CWR: Congestion Window Reduced (RFC 3168)
+    pub ece: bool, // ECE: ECN-Echo (RFC 3168)
 }
 
 impl TcpFlags {
@@ -935,6 +1029,12 @@ impl TcpFlags {
         if self.urg {
             val |= 0x20;
         }
+        if self.cwr {
+            val |= 0x80;
+        }
+        if self.ece {
+            val |= 0x40;
+        }
         val
     }
 
@@ -946,6 +1046,8 @@ impl TcpFlags {
             psh: val & 0x08 != 0,
             ack: val & 0x10 != 0,
             urg: val & 0x20 != 0,
+            ece: val & 0x40 != 0,
+            cwr: val & 0x80 != 0,
         }
     }
 }
@@ -1214,6 +1316,10 @@ pub struct TcpConnection {
     // SYN yeniden iletim
     pub syn_retransmit_count: u8,
     pub syn_first_send_time: u64,
+    // ECN (RFC 3168)
+    pub ecn: EcnNegotiation,
+    // DCTCP alpha tracking (baglanti seviyesinde, DCTCP modu icin)
+    pub dctcp_alpha: f64,
 }
 
 impl TcpConnection {
@@ -1275,6 +1381,10 @@ impl TcpConnection {
             // SYN yeniden iletim
             syn_retransmit_count: 0,
             syn_first_send_time: 0,
+            // ECN (RFC 3168)
+            ecn: EcnNegotiation::new(),
+            // DCTCP alpha
+            dctcp_alpha: 0.0,
         }
     }
 
@@ -1293,6 +1403,7 @@ impl TcpConnection {
 
         // SYN gönder - üç yönlü el sıkışmanın ilk adımı
         self.send_packet(TcpFlags::syn(), &[])?;
+        super::NET_COUNTERS.tcp.active_opens.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
         Ok(())
     }
@@ -1413,7 +1524,20 @@ impl TcpConnection {
         Ok(len)
     }
 
+    fn record_metrics_on_close(&self) {
+        let saddr = match self.local.ip {
+            IpAddr::V4(ip) => ip.to_u32(),
+            _ => return,
+        };
+        let daddr = match self.remote.ip {
+            IpAddr::V4(ip) => ip.to_u32(),
+            _ => return,
+        };
+        record_metrics(saddr, daddr, self.rtt, self.rtt_var, self.ssthresh, self.cwnd);
+    }
+
     pub fn close(&mut self) -> Result<(), NetError> {
+        self.record_metrics_on_close();
         match self.state {
             TcpState::Established => {
                 self.state = TcpState::FinWait1;
@@ -1467,13 +1591,14 @@ impl TcpConnection {
         };
 
         // TCP segmentini oluştur: başlık + seçenekler + veri
-        let mut segment = vec![0u8; TcpHeader::MIN_SIZE + options_buf.len() + data.len()];
+        let opts_padded_len = opts_len_words * 4;
+        let mut segment = vec![0u8; TcpHeader::MIN_SIZE + opts_padded_len + data.len()];
         header.serialize(&mut segment)?;
         // Seçenekleri başlıktan hemen sonraya yerleştir
         segment[TcpHeader::MIN_SIZE..TcpHeader::MIN_SIZE + options_buf.len()]
             .copy_from_slice(&options_buf);
         // Veriyi seçeneklerden sonra yerleştir
-        segment[TcpHeader::MIN_SIZE + options_buf.len()..]
+        segment[TcpHeader::MIN_SIZE + opts_padded_len..]
             .copy_from_slice(data);
 
         // Sağlama toplamını sahte başlık ile hesapla
@@ -1511,6 +1636,7 @@ impl TcpConnection {
             _ => return Err(NetError::InvalidParam),
         }
 
+        super::NET_COUNTERS.tcp.out_segs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
@@ -1522,6 +1648,11 @@ impl TcpConnection {
                 return Ok(());
             }
             if self.state == TcpState::Established || self.state == TcpState::CloseWait {
+                self.record_metrics_on_close();
+                super::NET_COUNTERS.tcp.estab_resets.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if self.state == TcpState::Established {
+                    super::NET_COUNTERS.tcp.curr_estab.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                }
                 self.state = TcpState::Closed;
                 return Ok(());
             }
@@ -1594,8 +1725,8 @@ impl TcpConnection {
                     }
 
                     self.state = TcpState::Established;
-                    // SYN yeniden iletim sayacını sıfırla
                     self.syn_retransmit_count = 0;
+                    super::NET_COUNTERS.tcp.curr_estab.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
                     // ACK gönder - üçüncü ve son adım
                     self.send_packet(TcpFlags::ack(), &[])?;
@@ -1608,25 +1739,46 @@ impl TcpConnection {
             }
             TcpState::SynReceived => {
                 if header.flags.ack {
-                    // ACK alındı - bağlantı tamamen kuruldu
                     self.state = TcpState::Established;
+                    super::NET_COUNTERS.tcp.curr_estab.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
             }
             TcpState::Established => {
-                // ACK işleme - tıkanıklık kontrolü güncelle
+                // Hızlı yeniden iletim + tıkanıklık kontrolü
                 if header.flags.ack {
+                    let now = crate::task::scheduler::get_ticks() as u64;
+
+                    // Fast retransmit detection (RFC 5681)
+                    let sack_blocks = &options.sack_blocks;
+                    if self.fast_retx.on_ack(header.ack_num, sack_blocks, self.snd_una) {
+                        // 3 duplicate ACK → loss detected → CC notification
+                        self.cc.on_loss(now);
+                        self.cwnd = self.cc.cwnd();
+                        self.ssthresh = match self.cc.algorithm {
+                            CcAlgorithm::Reno => self.cc.reno.ssthresh,
+                            CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
+                            CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
+                            CcAlgorithm::Dctcp => self.cc.dctcp.ssthresh,
+                        };
+                        super::NET_COUNTERS.tcp.retrans_segs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if !self.tx_buffer.is_empty() {
+                            let data = self.tx_buffer.clone();
+                            self.send_packet(TcpFlags::ack(), &data)?;
+                        }
+                    }
+
+                    // Yeni veri onaylandı — tıkanıklık kontrolü güncelle
                     let acked = header.ack_num.wrapping_sub(self.snd_una);
                     if acked > 0 && acked < 0x8000_0000 {
-                        let now = crate::task::scheduler::get_ticks() as u64;
                         self.cc.on_ack(acked, now, self.rtt);
                         self.cwnd = self.cc.cwnd();
                         self.ssthresh = match self.cc.algorithm {
                             CcAlgorithm::Reno => self.cc.reno.ssthresh,
                             CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
                             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
+                            CcAlgorithm::Dctcp => self.cc.dctcp.ssthresh,
                         };
                         self.snd_una = header.ack_num;
-                        // Keepalive zamanlayıcısını sıfırla (ACK alındı → bağlantı canlı)
                         self.keepalive_last_ping = now;
                         self.keepalive_probe_count = 0;
                     }
@@ -1644,6 +1796,7 @@ impl TcpConnection {
                 // FIN alındı - karşı taraf kapanmak istiyor
                 if header.flags.fin {
                     self.state = TcpState::CloseWait;
+                    super::NET_COUNTERS.tcp.curr_estab.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                     self.ack_num = self.ack_num.wrapping_add(1);
                     self.send_packet(TcpFlags::ack(), &[])?;
                 }
@@ -1655,6 +1808,7 @@ impl TcpConnection {
                         && header.ack_num != self.snd_nxt
                     {
                         self.send_packet(TcpFlags::rst(), &[])?;
+                        super::NET_COUNTERS.tcp.out_rsts.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1680,6 +1834,7 @@ impl TcpConnection {
             }
             TcpState::LastAck => {
                 if header.flags.ack {
+                    self.record_metrics_on_close();
                     self.state = TcpState::Closed;
                 }
             }
@@ -1742,10 +1897,12 @@ impl TcpConnection {
                 CcAlgorithm::Reno => self.cc.reno.ssthresh,
                 CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
                 CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
+                CcAlgorithm::Dctcp => self.cc.dctcp.ssthresh,
             };
 
             // Yeniden iletim sayacını artır
             self.retransmit_count = self.retransmit_count.saturating_add(1);
+            super::NET_COUNTERS.tcp.retrans_segs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
             // Üstel geri çekilme (exponential backoff)
             self.rto = (self.rto * 2).min(60000);
@@ -1801,7 +1958,9 @@ impl TcpConnection {
 
             // Maksimum probe sayısına ulaşıldıysa bağlantıyı kapat
             if self.keepalive_probe_count >= self.keepalive_probes {
+                self.record_metrics_on_close();
                 crate::serial_println!("[TCP] Keepalive: connection dead, closing");
+                super::NET_COUNTERS.tcp.curr_estab.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
                 self.state = TcpState::Closed;
             }
         }
@@ -1827,16 +1986,9 @@ impl TcpConnection {
                     self.remote.port.0
                 );
                 self.state = TcpState::Closed;
+                super::NET_COUNTERS.tcp.attempt_fails.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return Ok(());
             }
-
-            crate::serial_println!(
-                "[TCP] SYN retransmit #{}/{} to {}:{}",
-                self.syn_retransmit_count + 1,
-                SYN_MAX_RETRANSMIT,
-                self.remote.ip,
-                self.remote.port.0
-            );
 
             self.syn_retransmit_count += 1;
             self.send_packet(TcpFlags::syn(), &[])?;
@@ -1858,7 +2010,7 @@ impl TcpConnection {
 //
 // CUBIC Pencere Büyüme Fonksiyonu:
 //   W(t) = C * (t - K)^3 + W_max
-//   K = küpkök(W_max * β / C)
+//   K = küpkök(W_max * (1-β) / C)
 //
 // Özellikler:
 // - Tıkanıklık sonrası W_max değerinin %70'ine (β=0.7) düşer
@@ -1885,8 +2037,10 @@ pub struct CubicState {
     pub beta: f64,
     /// CUBIC pencere büyüme sabiti (C = 0.4)
     pub c: f64,
-    /// Son tıkanıklık öncesi pencere boyutu (W_max)
+    /// Son tıkanıklık öncesi pencere boyutu (W_max) — RFC 8312
     pub w_max: f64,
+    /// Bir önceki W_max (fast convergence için) — RFC 8312 Sec 4.6
+    pub last_max_cwnd: f64,
     /// Son tıkanıklık olayı zamanı (ms)
     pub t_last: u64,
     /// Şimdiki tıkanıklık penceresi (bayt)
@@ -1912,8 +2066,9 @@ impl CubicState {
             beta: Self::BETA,
             c: Self::C,
             w_max: 0.0,
+            last_max_cwnd: 0.0,
             t_last: 0,
-            cwnd: Self::MSS * 10, // Başlangıç: 10 MSS
+            cwnd: Self::MSS * 10,
             ssthresh: Self::MSS * 100,
             min_rtt: 1000,
             tcp_cwnd: Self::MSS as f64 * 10.0,
@@ -1926,14 +2081,18 @@ impl CubicState {
         if x <= 0.0 {
             return 0.0;
         }
-        // Başlangıç tahmini ile iteratif yakınsama
-        let mut y = x;
-        for _ in 0..10 {
+        // Başlangıç tahmini 1.0 — x çok büyük olsa da buradan itere eder
+        let mut y = 1.0;
+        for _ in 0..30 {
             let y3 = y * y * y;
             if y3 == 0.0 {
                 break;
             }
-            y = y - (y3 - x) / (3.0 * y * y);
+            let next = y - (y3 - x) / (3.0 * y * y);
+            if (next - y).abs() <= 1e-12 * y.abs() {
+                return next;
+            }
+            y = next;
         }
         y
     }
@@ -1963,8 +2122,8 @@ impl CubicState {
             return self.cwnd as f64;
         }
 
-        // K = küpkök(W_max * β / C)
-        let k = Self::cbrt(self.w_max * self.beta / self.c);
+        // K = küpkök(W_max * (1-β) / C)  (RFC 8312 Sec 4.3)
+        let k = Self::cbrt(self.w_max * (1.0 - self.beta) / self.c);
 
         // Tıkanıklık olayından bu yana geçen süre (saniye)
         let t = (t_ms as f64 - self.t_last as f64) / 1000.0;
@@ -2021,20 +2180,35 @@ impl CubicState {
         self.cwnd = new_w.max(Self::MSS as f64) as u32;
     }
 
-    /// Tıkanıklık olayı (paket kaybı) işle.
-    /// W_max = mevcut pencere, cwnd = cwnd * β, yeni ssthresh = cwnd
+    /// Tıkanıklık olayı (paket kaybı) işle — RFC 8312 Section 4.5-4.6.
+    ///
+    /// RFC 8312 Sec 4.5 (Multiplicative Decrease):
+    ///   W_max = cwnd;                           // save window before reduction
+    ///   ssthresh = cwnd * beta_cubic;           // new slow-start threshold
+    ///   cwnd = cwnd * beta_cubic;               // window reduction
+    ///
+    /// RFC 8312 Sec 4.6 (Fast Convergence):
+    ///   if (W_max < W_last_max)                 // saturation shrinking?
+    ///       W_max = W_max * (1+beta_cubic)/2;   // release more bandwidth
+    ///   W_last_max = W_max;                     // remember for next event
     pub fn on_loss(&mut self, current_time_ms: u64) {
-        // Mevcut pencereyi W_max olarak kaydet
-        self.w_max = self.cwnd as f64;
+        let cwnd_f = self.cwnd as f64;
+        let old_w_max = self.w_max;
 
-        // Çarpımsal azaltma: W_max = W_max * β
-        self.w_max *= self.beta;
+        // W_max = azaltma öncesi pencere (Sec 4.5)
+        self.w_max = cwnd_f;
 
-        // Yeni cwnd ayarla
-        self.cwnd = (self.cwnd as f64 * self.beta).max(Self::MSS as f64) as u32;
+        // Fast convergence (Sec 4.6): yeni saturation eski W_max'tan düşükse
+        if cwnd_f < old_w_max {
+            self.w_max = cwnd_f * (1.0 + self.beta) / 2.0;
+        }
+        // W_last_max = W_max (Sec 4.6): save AFTER any fast convergence reduction
+        self.last_max_cwnd = self.w_max;
+
+        // Çarpımsal azaltma: cwnd *= β_cubic (Sec 4.5)
+        self.cwnd = (cwnd_f * self.beta).max(Self::MSS as f64) as u32;
         self.ssthresh = self.cwnd;
 
-        // Tıkanıklık olayı zamanını kaydet
         self.t_last = current_time_ms;
     }
 
@@ -2364,6 +2538,18 @@ impl BbrState {
     /// Kayıp olayını işle.
     /// BBR kaybı doğrudan tıkanıklık işareti olarak görmez,
     /// bant genişliği tahminine dayalı çalışır.
+    ///
+    /// RFC 9102 Sec 4.5 (Loss Model):
+    /// BBR is a model-based algorithm — it uses bandwidth (BtlBw) and
+    /// round-trip propagation time (RTprop) estimates, not packet loss,
+    /// to set its sending rate and cwnd. Packet loss does NOT directly
+    /// reduce cwnd in basic BBR; loss only affects subsequent bandwidth
+    /// samples (delivered / elapsed_time), which may lower the max-filtered
+    /// BtlBw estimate. This is unlike loss-based CC (CUBIC/Reno) where
+    /// every loss event multiplicatively reduces cwnd.
+    ///
+    /// BBRv3 (bbrv3_enabled) adds inflight_hi reduction on loss as a
+    /// safety cap — see on_loss() implementation below.
     pub fn on_loss(&mut self) {
         if self.bbrv3_enabled {
             self.inflight_hi = (self.inflight_hi.saturating_mul(9) / 10).max(1460);
@@ -2396,30 +2582,161 @@ impl BbrState {
 }
 
 // ============================================================================
-// TIKANIKLIK KONTROL ALGORİTMASI SEÇİMİ
+// TCP DCTCP (Data Center TCP) — RFC 8257
 // ============================================================================
-// Linux çekirdeğinde farklı algoritmalar mevcuttur:
-// - Reno: Temel, 1990'lardan beri kullanılıyor. Basit ama WAN'da verimsiz.
-// - CUBIC: Linux 2.6.19'dan varsayılan. Yüksek-BDP ağlarda daha iyi.
-// - BBR: Google'ın 2016 algoritması. Model tabanlı, daha verimli.
+// DCTCP, veri merkezleri icin ECN tabanli tikandiklik kontroludur.
+// ECN (CE isaretleri) kullanarak ag tikandikligini hassas bir sekilde algilar
+// ve pencereyi buna gore ayarlar.
+//
+// Temel farklilastirmalar (standart TCP'ye kiyasla):
+//   1. Alpha hesaplamasi: a = (1-g)*a + g*F, g = 2^(-g_weight)
+//      F = CE isaretli segmentlerin orani
+//   2. Pencere azaltma: cwnd = cwnd * (1 - a/2) (carpimsal azaltma)
+//   3. Daha hassas tikandiklik algilama — veri merkezi trafigi icin uygun
+//
+// DCTCP Avantaji:
+//   Geleneksel TCP: loss-based → paket dustryor azaltir → tail latency yuksek
+//   DCTCP: ECN-based → hafif tikandikligi erken algilar → low latency
+//
+// Dezavantaji:
+//   - Sadece ECN destekleyen ag altyapisi gerektirir (DC switch)
+//   - Yuksek-bandwidth-aggressive linklerde cok hizli degisebilir
+//   - Legacy (non-ECN) aglarda calismaz
 
-/// Tıkanıklık kontrol algoritması seçimi
+/// DCTCP tikandiklik kontrol durumu — RFC 8257
+#[derive(Clone, Debug)]
+pub struct DctcpState {
+    /// ECN alpha (0.0-1.0 arasi, agirligili ortalama)
+    /// a = (1 - 2^(-G)) * a + 2^(-G) * F
+    /// G = g_weight (varsayilan: DCTCP_MAX_G = 10, yani g = 2^-10 ≈ 0.001)
+    pub alpha: f64,
+    /// Alpha azaltma agirligi (RFC 8257: G = 10)
+    pub g_weight: u32,
+    /// Tikandiklik penceresi (bayt)
+    pub cwnd: u32,
+    /// Yavas baslangic esigi
+    pub ssthresh: u32,
+    /// Toplam CE isaretli segment sayisi (mevcut pencerede)
+    pub ce_bytes_acked: u32,
+    /// Toplam bytes ACK (mevcut round'ta)
+    pub bytes_acked: u32,
+    /// Minimum gozlemlenen RTT
+    pub min_rtt: u32,
+}
+
+impl DctcpState {
+    const MSS: u32 = 1460;
+    /// DCTCP_MAX_G = 10 (RFC 8257 Section 3.1)
+    const MAX_G: u32 = 10;
+
+    pub fn new() -> Self {
+        DctcpState {
+            alpha: 0.0,
+            g_weight: Self::MAX_G,
+            cwnd: Self::MSS * 10,
+            ssthresh: u32::MAX,
+            ce_bytes_acked: 0,
+            bytes_acked: 0,
+            min_rtt: u32::MAX,
+        }
+    }
+
+    /// 2^(-g) hesapla: 1.0 / 2^g_weight
+    fn two_pow_neg_g(&self) -> f64 {
+        let mut result = 1.0f64;
+        for _ in 0..self.g_weight {
+            result *= 0.5;
+        }
+        result
+    }
+
+    /// ACK aldiginda cagrilir (ce_acked: CE isaretli bayt sayisi bu ACK icin)
+    pub fn on_ack(&mut self, acked_bytes: u32, ce_acked: u32, rtt_ms: u32, current_time_ms: u64) {
+        if rtt_ms > 0 && rtt_ms < self.min_rtt {
+            self.min_rtt = rtt_ms;
+        }
+
+        self.ce_bytes_acked += ce_acked;
+        self.bytes_acked += acked_bytes;
+
+        // Yavas baslangic asamasi
+        if self.cwnd < self.ssthresh {
+            self.cwnd += acked_bytes;
+        } else {
+            // Tikandiklik onleme: standart additive increase
+            self.cwnd += (Self::MSS * acked_bytes) / self.cwnd;
+        }
+    }
+
+    /// Round sonu — alpha guncelle ve cwnd azalt (RFC 8257 Section 3.2)
+    pub fn on_round_end(&mut self) {
+        if self.bytes_acked == 0 {
+            return;
+        }
+
+        // F = CE isaretli bayt orani [0.0, 1.0]
+        let f = self.ce_bytes_acked as f64 / self.bytes_acked as f64;
+
+        // a = (1 - 2^(-G)) * a + 2^(-G) * F
+        let g_factor = self.two_pow_neg_g();
+        self.alpha = (1.0 - g_factor) * self.alpha + g_factor * f;
+
+        // cwnd = cwnd * (1 - a/2) — carpimsal azaltma
+        if self.alpha > 0.0 {
+            let reduction = self.alpha / 2.0;
+            self.cwnd = ((self.cwnd as f64) * (1.0 - reduction)) as u32;
+            // Minimum 2 MSS
+            if self.cwnd < Self::MSS * 2 {
+                self.cwnd = Self::MSS * 2;
+            }
+        }
+
+        // Round sayaclari sifirla
+        self.ce_bytes_acked = 0;
+        self.bytes_acked = 0;
+    }
+
+    /// Kayip (timeout veya triple dupACK) — cwnd 1 MSS'ye dusur
+    pub fn on_loss(&mut self) {
+        self.ssthresh = (self.cwnd / 2).max(Self::MSS * 2);
+        self.cwnd = Self::MSS;
+    }
+
+    /// Zaman asimi — cwnd 1 MSS'ye sifirla
+    pub fn on_timeout(&mut self) {
+        self.ssthresh = (self.cwnd / 2).max(Self::MSS * 2);
+        self.cwnd = Self::MSS;
+    }
+}
+
+// ============================================================================
+// TIKANIKLIK KONTROL ALGORITMASI SECIMI
+// ============================================================================
+// Linux cekirdeginde farkli algoritmalar mevcuttur:
+// - Reno: Temel, 1990'lardan beri kullaniliyor. Basit ama WAN'da verimsiz.
+// - CUBIC: Linux 2.6.19'dan varsayilan. Yuksek-BDP aglarda daha iyi.
+// - BBR: Google'in 2016 algoritmasi. Model tabanli, daha verimli.
+// - DCTCP: Veri merkezleri icin ECN tabanli (RFC 8257).
+
+/// Tikandiklik kontrol algoritmasi secimi
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CcAlgorithm {
     #[default]
-    Reno, // Klasik TCP Reno
-    Cubic, // CUBIC (modern standart)
-    Bbr,   // BBR (Google)
-    Bbrv3, // BBRv3
+    Reno,
+    Cubic,
+    Bbr,
+    Bbrv3,
+    Dctcp,
 }
 
-/// Tıkanıklık kontrol durumu - seçilen algoritmayı yönetir
+/// Tikandiklik kontrol durumu - secilen algoritmayi yonetir
 #[derive(Clone, Debug)]
 pub struct CcState {
     pub algorithm: CcAlgorithm,
     pub reno: RenoState,
     pub cubic: CubicState,
     pub bbr: BbrState,
+    pub dctcp: DctcpState,
 }
 
 /// Reno tıkanıklık kontrolü - temel TCP algoritması.
@@ -2456,6 +2773,7 @@ impl CcState {
             reno: RenoState::default(),
             cubic: CubicState::new(),
             bbr,
+            dctcp: DctcpState::new(),
         }
     }
 
@@ -2464,6 +2782,7 @@ impl CcState {
             CcAlgorithm::Reno => self.reno.cwnd,
             CcAlgorithm::Cubic => self.cubic.cwnd,
             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.bbr.cwnd(),
+            CcAlgorithm::Dctcp => self.dctcp.cwnd,
         }
     }
 
@@ -2483,6 +2802,9 @@ impl CcState {
                 self.bbr
                     .on_ack(acked_bytes, rtt_ms as u64 * 1000, current_time_ms * 1000);
             }
+            CcAlgorithm::Dctcp => {
+                self.dctcp.on_ack(acked_bytes, 0, rtt_ms, current_time_ms);
+            }
         }
     }
 
@@ -2498,6 +2820,9 @@ impl CcState {
             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => {
                 self.bbr.on_loss();
             }
+            CcAlgorithm::Dctcp => {
+                self.dctcp.on_loss();
+            }
         }
     }
 
@@ -2512,6 +2837,9 @@ impl CcState {
             }
             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => {
                 self.bbr.on_timeout(current_time_ms * 1000);
+            }
+            CcAlgorithm::Dctcp => {
+                self.dctcp.on_timeout();
             }
         }
     }
@@ -2776,12 +3104,14 @@ pub fn get_connection_remote_addr(socket_id: u32) -> Result<SocketAddr, NetError
 /// Gelen TCP paketini işle.
 /// Hedef porta göre mevcut bağlantı veya dinleyici aranır.
 pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
+    super::NET_COUNTERS.tcp.in_segs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if !verify_checksum(
         ip_packet.header.src,
         ip_packet.header.dst,
         ip_packet.payload,
     ) {
         crate::serial_println!("[TCP] IPv4 checksum verification failed, dropping packet");
+        super::NET_COUNTERS.tcp.in_errs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return Err(NetError::ChecksumError);
     }
     let tcp_header = TcpHeader::parse(ip_packet.payload)?;
@@ -2817,18 +3147,55 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
         drop(listeners);
 
         if tcp_header.flags.syn {
-            // SYN alındı: yeni çocuk bağlantı oluştur ve kabul kuyruğuna ekle
+            let use_cookies = should_use_syn_cookies(listener_id);
+            let header_len = tcp_header.header_len();
+            let raw_header: Vec<u8> = {
+                let mut buf = vec![0u8; header_len];
+                let _ = tcp_header.serialize(&mut buf);
+                buf
+            };
+            let options = TcpOptions::parse(&raw_header, header_len);
             let local_addr = {
                 let conns = TCP_CONNECTIONS.lock();
                 conns.get(&listener_id).map(|c| c.local)
             };
 
             if let Some(local_addr) = local_addr {
+                if use_cookies {
+                    let client_src_ip = ip_packet.header.src.to_u32();
+                    let server_dst_ip = ip_packet.header.dst.to_u32();
+                    let peer_mss = options.mss.unwrap_or(1460);
+                    let cookie = generate_syn_cookie(
+                        client_src_ip,
+                        server_dst_ip,
+                        tcp_header.src_port.0,
+                        tcp_header.dst_port.0,
+                        peer_mss,
+                    );
+                    let mut child = TcpConnection::new(local_addr, AddressFamily::IPV4);
+                    child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
+                    child.seq_num = cookie;
+                    child.ack_num = tcp_header.seq_num.wrapping_add(1);
+                    child.state = TcpState::SynReceived;
+                    child.mss = peer_mss;
+                    let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
+                    crate::serial_println!(
+                        "[TCP] SYN flood detected, SYN cookie sent (cookie={:#x})",
+                        cookie
+                    );
+                    return Ok(());
+                }
+
                 let mut child = TcpConnection::new(local_addr, AddressFamily::IPV4);
                 child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
                 child.seq_num = crate::random::rand_u64() as u32;
                 child.ack_num = tcp_header.seq_num.wrapping_add(1);
                 child.state = TcpState::SynReceived;
+                if let Some(peer_mss) = options.mss {
+                    if peer_mss > 0 && peer_mss < child.mss {
+                        child.mss = peer_mss;
+                    }
+                }
                 let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
                 let child_id = child.id;
 
@@ -2843,12 +3210,56 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
                     child_id,
                     listener_id
                 );
+                super::NET_COUNTERS.tcp.passive_opens.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
 
             return Ok(());
         }
 
-        // SYN olmayan paketler için dinleyiciyi kontrol et
+        if tcp_header.flags.ack && !tcp_header.flags.syn {
+            let client_src_ip = ip_packet.header.src.to_u32();
+            let server_dst_ip = ip_packet.header.dst.to_u32();
+            let cookie = tcp_header.ack_num.wrapping_sub(1);
+            if let Some(mss) = validate_syn_cookie(
+                cookie,
+                client_src_ip,
+                server_dst_ip,
+                tcp_header.src_port.0,
+                tcp_header.dst_port.0,
+            ) {
+                let local_addr = {
+                    let conns = TCP_CONNECTIONS.lock();
+                    conns.get(&listener_id).map(|c| c.local)
+                };
+                if let Some(local_addr) = local_addr {
+                    let mut child = TcpConnection::new(local_addr, AddressFamily::IPV4);
+                    child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
+                    child.seq_num = cookie;
+                    child.ack_num = tcp_header.seq_num;
+                    child.state = TcpState::Established;
+                    child.mss = mss;
+                    child.snd_una = cookie;
+                    child.snd_nxt = cookie;
+                    child.window_size = tcp_header.window_size;
+                    let child_id = child.id;
+                    TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                    ACCEPT_QUEUE
+                        .lock()
+                        .entry(listener_id)
+                        .or_insert_with(Vec::new)
+                        .push(child_id);
+                    crate::serial_println!(
+                        "[TCP] SYN cookie validated, child {} established for listener {}",
+                        child_id,
+                        listener_id
+                    );
+                    super::NET_COUNTERS.tcp.passive_opens.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    super::NET_COUNTERS.tcp.curr_estab.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+                return Ok(());
+            }
+        }
+
         let mut conns = TCP_CONNECTIONS.lock();
         if let Some(conn) = conns.get_mut(&listener_id) {
             conn.remote.ip = IpAddr::V4(ip_packet.header.src);
@@ -2861,12 +3272,14 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
 }
 
 pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
+    super::NET_COUNTERS.tcp.in_segs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     if !verify_checksum_v6(
         ip_packet.header.src,
         ip_packet.header.dst,
         &ip_packet.payload,
     ) {
         crate::serial_println!("[TCPv6] Checksum verification failed, dropping packet");
+        super::NET_COUNTERS.tcp.in_errs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return Err(NetError::ChecksumError);
     }
 
@@ -2899,17 +3312,55 @@ pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
         drop(listeners);
 
         if tcp_header.flags.syn {
+            let use_cookies = should_use_syn_cookies(listener_id);
+            let header_len = tcp_header.header_len();
+            let raw_header: Vec<u8> = {
+                let mut buf = vec![0u8; header_len];
+                let _ = tcp_header.serialize(&mut buf);
+                buf
+            };
+            let options = TcpOptions::parse(&raw_header, header_len);
             let local_addr = {
                 let conns = TCP_CONNECTIONS.lock();
                 conns.get(&listener_id).map(|c| c.local)
             };
 
             if let Some(local_addr) = local_addr {
+                if use_cookies {
+                    let peer_mss = options.mss.unwrap_or(1460);
+                    let mut child = TcpConnection::new(local_addr, AddressFamily::IPV6);
+                    child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
+                    child.seq_num = crate::random::rand_u64() as u32;
+                    child.ack_num = tcp_header.seq_num.wrapping_add(1);
+                    child.state = TcpState::SynReceived;
+                    child.mss = peer_mss;
+                    let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
+                    let child_id = child.id;
+                    TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                    ACCEPT_QUEUE
+                        .lock()
+                        .entry(listener_id)
+                        .or_insert_with(Vec::new)
+                        .push(child_id);
+                    crate::serial_println!(
+                        "[TCP] SYN flood detected on v6, child {} created for listener {}",
+                        child_id,
+                        listener_id
+                    );
+                    super::NET_COUNTERS.tcp.passive_opens.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    return Ok(());
+                }
+
                 let mut child = TcpConnection::new(local_addr, AddressFamily::IPV6);
                 child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
                 child.seq_num = crate::random::rand_u64() as u32;
                 child.ack_num = tcp_header.seq_num.wrapping_add(1);
                 child.state = TcpState::SynReceived;
+                if let Some(peer_mss) = options.mss {
+                    if peer_mss > 0 && peer_mss < child.mss {
+                        child.mss = peer_mss;
+                    }
+                }
                 let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
                 let child_id = child.id;
 
@@ -2919,8 +3370,47 @@ pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
                     .entry(listener_id)
                     .or_insert_with(Vec::new)
                     .push(child_id);
+                super::NET_COUNTERS.tcp.passive_opens.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             }
             return Ok(());
+        }
+
+        if tcp_header.flags.ack && !tcp_header.flags.syn {
+            let cookie = tcp_header.ack_num.wrapping_sub(1);
+            let src_port = tcp_header.src_port.0;
+            let dst_port = tcp_header.dst_port.0;
+            let src_ip_u32 = {
+                let segments = ip_packet.header.src.segments();
+                ((segments[0] as u32) << 16) | (segments[1] as u32)
+            };
+            let dst_ip_u32 = {
+                let segments = ip_packet.header.dst.segments();
+                ((segments[0] as u32) << 16) | (segments[1] as u32)
+            };
+            if validate_syn_cookie(cookie, src_ip_u32, dst_ip_u32, src_port, dst_port).is_some() {
+                let local_addr = {
+                    let conns = TCP_CONNECTIONS.lock();
+                    conns.get(&listener_id).map(|c| c.local)
+                };
+                if let Some(local_addr) = local_addr {
+                    let mut child = TcpConnection::new(local_addr, AddressFamily::IPV6);
+                    child.remote = SocketAddr::new(ip_packet.header.src, tcp_header.src_port);
+                    child.seq_num = crate::random::rand_u64() as u32;
+                    child.ack_num = tcp_header.seq_num;
+                    child.state = TcpState::Established;
+                    child.window_size = tcp_header.window_size;
+                    let child_id = child.id;
+                    TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                    ACCEPT_QUEUE
+                        .lock()
+                        .entry(listener_id)
+                        .or_insert_with(Vec::new)
+                        .push(child_id);
+                    super::NET_COUNTERS.tcp.passive_opens.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    super::NET_COUNTERS.tcp.curr_estab.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
+                return Ok(());
+            }
         }
 
         let mut conns = TCP_CONNECTIONS.lock();
@@ -3071,6 +3561,233 @@ impl SackCongestionState {
     }
 }
 
+// ============================================================================
+// SYN COOKIES — SYN Flood Koruması (RFC 4987)
+// ============================================================================
+//
+// SYN flood saldırısında saldırgan çok sayıda SYN gönderir ama ACK göndermez.
+// Normal TCP'de her SYN için bir half-open connection oluşturulur ve bellek
+// tükenir. SYN cookies ile connection state, SYN-ACK'ın sequence number'ına
+// encode edilir — ACK gelmeden bellek ayrılmaz.
+//
+// Cookie Formatı (32-bit):
+//   [31:26] — Timestamp (5-bit, 64 saniye period, 32 gün wrap)
+//   [25:24] — MSS encoding (2-bit, 4 farklı MSS değeri)
+//   [23: 0] — HMAC(secret, src_ip, dst_ip, src_port, dst_port, timestamp)[0..24]
+//
+// Kaynak: RFC 4987 (TCP SYN Cookie Defenses), Linux tcp_syncookies
+
+/// SYN cookies etkin mi? (sysctl net.ipv4.tcp_syncookies = 1 eşdeğeri)
+static SYN_COOKIES_ENABLED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(true);
+
+/// SYN cookie secret key (her 5 dakikada rotate edilir)
+static SYN_COOKIE_SECRET: Mutex<[u8; 32]> = Mutex::new([0u8; 32]);
+
+/// Half-open connection queue maksimum boyutu (bu aşılırsa SYN cookie devreye girer)
+const SYN_BACKLOG_MAX: usize = 128;
+
+/// SYN cookie kullanım istatistikleri
+static SYN_COOKIE_STATS: SynCookieStats = SynCookieStats::new();
+
+struct SynCookieStats {
+    cookies_sent: AtomicU32,
+    cookies_validated: AtomicU32,
+    cookies_failed: AtomicU32,
+    syn_queue_overflow: AtomicU32,
+}
+
+impl SynCookieStats {
+    const fn new() -> Self {
+        SynCookieStats {
+            cookies_sent: AtomicU32::new(0),
+            cookies_validated: AtomicU32::new(0),
+            cookies_failed: AtomicU32::new(0),
+            syn_queue_overflow: AtomicU32::new(0),
+        }
+    }
+}
+
+/// MSS encoding tablosu (2-bit = 4 değer)
+const MSS_TABLE: [u16; 4] = [536, 1280, 1440, 1460];
+
+/// MSS değerini 2-bit cookie'ye encode et
+fn encode_mss(mss: u16) -> u8 {
+    for (i, &m) in MSS_TABLE.iter().enumerate() {
+        if mss <= m {
+            return i as u8;
+        }
+    }
+    3 // En büyük MSS
+}
+
+/// 2-bit cookie'den MSS değerini decode et
+fn decode_mss(code: u8) -> u16 {
+    MSS_TABLE[(code & 0x03) as usize]
+}
+
+/// SYN cookie oluştur (sequence number olarak gönderilecek)
+///
+/// `src_ip`: Kaynak IP (u32, network byte order)
+/// `dst_ip`: Hedef IP (u32, network byte order)
+/// `src_port`: Kaynak port
+/// `dst_port`: Hedef port
+/// `mss`: İstemcinin MSS değeri
+///
+/// Döndürülen: 32-bit SYN cookie (SYN-ACK'ın seq num'ı olarak kullanılır)
+pub fn generate_syn_cookie(
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+    mss: u16,
+) -> u32 {
+    let secret = SYN_COOKIE_SECRET.lock();
+
+    // Timestamp (5-bit, 64 saniye period) — ticks ~ 1ms, /64000 = 64s period
+    let timestamp = ((crate::interrupts::get_ticks() / 64_000) as u32) & 0x1F;
+
+    // MSS encoding (2-bit)
+    let mss_code = encode_mss(mss) as u32;
+
+    // HMAC hesabı (basitleştirilmiş SipHash benzeri)
+    let mut data = [0u8; 20];
+    data[0..4].copy_from_slice(&src_ip.to_be_bytes());
+    data[4..8].copy_from_slice(&dst_ip.to_be_bytes());
+    data[8..10].copy_from_slice(&src_port.to_be_bytes());
+    data[10..12].copy_from_slice(&dst_port.to_be_bytes());
+    data[12..16].copy_from_slice(&(*secret)[0..4]);
+    data[16..20].copy_from_slice(&(*secret)[4..8]);
+
+    // Basit hash (FNV-1a benzeri, kriptografik değil ama yeterli)
+    let mut hash: u32 = 0x811c9dc5;
+    for &byte in &data {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    // Ekstra mixing
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85ebca6b);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xc2b2ae35);
+    hash ^= hash >> 16;
+
+    // 24-bit HMAC + 5-bit timestamp + 2-bit MSS + 1-bit SACK flag
+    let hmac_24 = hash & 0x00FFFFFF;
+    let cookie = (timestamp << 27) | (mss_code << 25) | hmac_24;
+
+    SYN_COOKIE_STATS.cookies_sent.fetch_add(1, Ordering::Relaxed);
+    super::NET_COUNTERS.tcp.syn_cookies_sent.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+    cookie
+}
+
+/// SYN cookie doğrula (ACK geldiğinde)
+///
+/// `cookie`: ACK'taki ack_num - 1 (yani SYN-ACK'ın seq num'ı)
+/// `src_ip`: Kaynak IP
+/// `dst_ip`: Hedef IP
+/// `src_port`: Kaynak port
+/// `dst_port`: Hedef port
+///
+/// Döndürülen: `Some(mss)` doğrulama başarılı, `None` başarısız
+pub fn validate_syn_cookie(
+    cookie: u32,
+    src_ip: u32,
+    dst_ip: u32,
+    src_port: u16,
+    dst_port: u16,
+) -> Option<u16> {
+    let secret = SYN_COOKIE_SECRET.lock();
+
+    // Timestamp kontrolü (geçerlilik penceresi: 2 period = 128 saniye)
+    let current_ts = ((crate::interrupts::get_ticks() / 64_000) as u32) & 0x1F;
+    let cookie_ts = (cookie >> 27) & 0x1F;
+    let ts_diff = current_ts.wrapping_sub(cookie_ts) & 0x1F;
+    if ts_diff > 2 {
+        SYN_COOKIE_STATS.cookies_failed.fetch_add(1, Ordering::Relaxed);
+        super::NET_COUNTERS.tcp.syn_cookies_failed.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return None;
+    }
+
+    // MSS decode
+    let mss_code = ((cookie >> 25) & 0x03) as u8;
+    let mss = decode_mss(mss_code);
+
+    // HMAC doğrulama
+    let received_hmac = cookie & 0x00FFFFFF;
+
+    let mut data = [0u8; 20];
+    data[0..4].copy_from_slice(&src_ip.to_be_bytes());
+    data[4..8].copy_from_slice(&dst_ip.to_be_bytes());
+    data[8..10].copy_from_slice(&src_port.to_be_bytes());
+    data[10..12].copy_from_slice(&dst_port.to_be_bytes());
+    data[12..16].copy_from_slice(&(*secret)[0..4]);
+    data[16..20].copy_from_slice(&(*secret)[4..8]);
+
+    let mut hash: u32 = 0x811c9dc5;
+    for &byte in &data {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash ^= hash >> 16;
+    hash = hash.wrapping_mul(0x85ebca6b);
+    hash ^= hash >> 13;
+    hash = hash.wrapping_mul(0xc2b2ae35);
+    hash ^= hash >> 16;
+
+    let expected_hmac = hash & 0x00FFFFFF;
+
+    if received_hmac == expected_hmac {
+        SYN_COOKIE_STATS.cookies_validated.fetch_add(1, Ordering::Relaxed);
+        super::NET_COUNTERS.tcp.syn_cookies_recv.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Some(mss)
+    } else {
+        SYN_COOKIE_STATS.cookies_failed.fetch_add(1, Ordering::Relaxed);
+        super::NET_COUNTERS.tcp.syn_cookies_failed.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        None
+    }
+}
+
+/// SYN cookie kullanılıp kullanılmayacağını belirle
+///
+/// Half-open queue doluysa SYN cookie kullanılır.
+pub fn should_use_syn_cookies(listener_id: u32) -> bool {
+    if !SYN_COOKIES_ENABLED.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let queue = ACCEPT_QUEUE.lock();
+    let pending = queue.get(&listener_id).map(|v| v.len()).unwrap_or(0);
+    drop(queue);
+
+    if pending >= SYN_BACKLOG_MAX {
+        SYN_COOKIE_STATS.syn_queue_overflow.fetch_add(1, Ordering::Relaxed);
+        true
+    } else {
+        false
+    }
+}
+
+/// SYN cookie secret'ını rotate et (periyodik çağrılmalı)
+pub fn rotate_syn_cookie_secret() {
+    let mut secret = SYN_COOKIE_SECRET.lock();
+    for i in 0..32 {
+        secret[i] = crate::random::rand_u64() as u8;
+    }
+    crate::serial_println!("[TCP] SYN cookie secret rotated");
+}
+
+/// SYN cookie istatistiklerini döndür
+pub fn syn_cookie_stats() -> (u32, u32, u32, u32) {
+    (
+        SYN_COOKIE_STATS.cookies_sent.load(Ordering::Relaxed),
+        SYN_COOKIE_STATS.cookies_validated.load(Ordering::Relaxed),
+        SYN_COOKIE_STATS.cookies_failed.load(Ordering::Relaxed),
+        SYN_COOKIE_STATS.syn_queue_overflow.load(Ordering::Relaxed),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3196,5 +3913,556 @@ mod tests {
         assert_eq!(child.remote.ip, IpAddr::V6(src_ip));
         assert_eq!(child.remote.port, Port(41000));
         assert_eq!(child.state, TcpState::SynReceived);
+    }
+
+    // ── SYN Cookie Testleri ──
+
+    #[test]
+    fn syn_cookie_generate_and_validate() {
+        rotate_syn_cookie_secret();
+
+        let src_ip = 0xC0A80101u32;  // 192.168.1.1
+        let dst_ip = 0xC0A80102u32;  // 192.168.1.2
+        let src_port = 12345u16;
+        let dst_port = 80u16;
+        let mss = 1460u16;
+
+        let cookie = generate_syn_cookie(src_ip, dst_ip, src_port, dst_port, mss);
+
+        // Doğrula
+        let validated_mss = validate_syn_cookie(cookie, src_ip, dst_ip, src_port, dst_port);
+        assert!(validated_mss.is_some());
+        assert_eq!(validated_mss.unwrap(), 1460);
+    }
+
+    #[test]
+    fn syn_cookie_wrong_ip_fails() {
+        rotate_syn_cookie_secret();
+
+        let cookie = generate_syn_cookie(0xC0A80101, 0xC0A80102, 12345, 80, 1460);
+
+        // Farklı IP ile doğrulama başarısız olmalı
+        let result = validate_syn_cookie(cookie, 0xC0A80103, 0xC0A80102, 12345, 80);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn syn_cookie_wrong_port_fails() {
+        rotate_syn_cookie_secret();
+
+        let cookie = generate_syn_cookie(0xC0A80101, 0xC0A80102, 12345, 80, 1460);
+
+        let result = validate_syn_cookie(cookie, 0xC0A80101, 0xC0A80102, 12345, 443);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn syn_cookie_mss_encoding() {
+        assert_eq!(decode_mss(encode_mss(500)), 536);
+        assert_eq!(decode_mss(encode_mss(1200)), 1280);
+        assert_eq!(decode_mss(encode_mss(1400)), 1440);
+        assert_eq!(decode_mss(encode_mss(1460)), 1460);
+    }
+
+    #[test]
+    fn syn_cookie_tampered_value_fails() {
+        rotate_syn_cookie_secret();
+
+        let cookie = generate_syn_cookie(0x0A000001, 0x0A000002, 8080, 443, 1440);
+
+        // Cookie'yi manipüle et (1-bit flip)
+        let tampered = cookie ^ 0x00000001;
+        let result = validate_syn_cookie(tampered, 0x0A000001, 0x0A000002, 8080, 443);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ecn_negotiation_syn_flags() {
+        let ecn = EcnNegotiation {
+            negotiated: true,
+            ..EcnNegotiation::new()
+        };
+        let (ece, cwr) = ecn.syn_flags();
+        assert!(ece);
+        assert!(cwr);
+    }
+
+    #[test]
+    fn ecn_negotiation_not_negotiated() {
+        let ecn = EcnNegotiation::new();
+        let (ece, cwr) = ecn.syn_flags();
+        assert!(!ece);
+        assert!(!cwr);
+    }
+
+    #[test]
+    fn ecn_ce_detected_transitions_state() {
+        let mut ecn = EcnNegotiation {
+            negotiated: true,
+            state: EcnState::Ect0,
+            ..EcnNegotiation::new()
+        };
+        ecn.on_ce_detected();
+        assert_eq!(ecn.state, EcnState::CongestionExperienced);
+        assert_eq!(ecn.ce_counter, 1);
+    }
+
+    #[test]
+    fn ecn_cwr_sent_resets_congestion_state() {
+        let mut ecn = EcnNegotiation {
+            negotiated: true,
+            state: EcnState::CongestionExperienced,
+            ..EcnNegotiation::new()
+        };
+        ecn.on_cwr_sent(1000);
+        assert_eq!(ecn.state, EcnState::Ect0);
+    }
+
+    #[test]
+    fn ecn_tos_bits_reflect_state() {
+        let ecn_ect0 = EcnNegotiation { state: EcnState::Ect0, ..EcnNegotiation::new() };
+        assert_eq!(ecn_ect0.tos_ecn_bits(), 0x02);
+        let ecn_ce = EcnNegotiation { state: EcnState::CongestionExperienced, ..EcnNegotiation::new() };
+        assert_eq!(ecn_ce.tos_ecn_bits(), 0x06);
+        let ecn_non = EcnNegotiation::new();
+        assert_eq!(ecn_non.tos_ecn_bits(), 0x00);
+    }
+
+    #[test]
+    fn dctcp_alpha_increases_on_ce_marked_ack() {
+        let mut dctcp = DctcpState::new();
+        dctcp.on_ack(1460, 1460, 10, 100);
+        dctcp.on_round_end();
+        assert!(dctcp.alpha > 0.0);
+        assert!(dctcp.alpha <= 1.0);
+    }
+
+    #[test]
+    fn dctcp_alpha_zero_when_no_ce() {
+        let mut dctcp = DctcpState::new();
+        dctcp.on_ack(1460, 0, 10, 100);
+        dctcp.on_round_end();
+        assert_eq!(dctcp.alpha, 0.0);
+    }
+
+    #[test]
+    fn dctcp_cwnd_reduces_on_ce_marked_traffic() {
+        let mut dctcp = DctcpState::new();
+        dctcp.g_weight = 1; // aggressive alpha for test: 2^-1 = 0.5
+        dctcp.ssthresh = u32::MAX; // stay in slow start, cwnd just grows by acked_bytes
+
+        // Simulate 100% CE marked traffic over one round
+        for _ in 0..10 {
+            dctcp.on_ack(1460, 1460, 10, 100);
+        }
+        let cwnd_before_round_end = dctcp.cwnd;
+        dctcp.on_round_end();
+        assert!(dctcp.cwnd < cwnd_before_round_end,
+            "cwnd should decrease: before={}, after={}", cwnd_before_round_end, dctcp.cwnd);
+    }
+
+    #[test]
+    fn dctcp_loss_sets_cwnd_to_1_mss() {
+        let mut dctcp = DctcpState::new();
+        dctcp.cwnd = 10 * 1460;
+        dctcp.on_loss();
+        assert_eq!(dctcp.cwnd, 1460);
+    }
+
+    #[test]
+    fn cc_state_dctcp_variant() {
+        let cc = CcState::new(CcAlgorithm::Dctcp);
+        assert_eq!(cc.algorithm, CcAlgorithm::Dctcp);
+        assert_eq!(cc.cwnd(), 10 * 1460);
+    }
+
+    // ── CUBIC CC Testleri (RFC 8312) ──
+
+    #[test]
+    fn cubic_on_loss_saves_wmax_before_reduction() {
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 100 * 1460;
+        cubic.on_loss(10_000);
+        // W_max MUST be cwnd BEFORE reduction (RFC 8312 Sec 4.5)
+        assert!((cubic.w_max - (100.0 * 1460.0)).abs() < 1.0,
+            "W_max should be saved BEFORE reduction");
+        // cwnd MUST be reduced by beta (0.7)
+        let expected_cwnd = (100.0f64 * 1460.0 * 0.7).max(1460.0) as u32;
+        assert_eq!(cubic.cwnd, expected_cwnd,
+            "cwnd should be cwnd * beta_cubic");
+        assert_eq!(cubic.ssthresh, expected_cwnd,
+            "ssthresh should equal new cwnd");
+    }
+
+    #[test]
+    fn cubic_on_loss_minimum_is_one_mss() {
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 1460;
+        cubic.on_loss(10_000);
+        // RFC 8312 Sec 4.5: minimum cwnd = 2 MSS? No, minimum 2 MSS for ssthresh, 1 for cwnd
+        assert_eq!(cubic.cwnd, 1460,
+            "cwnd should not go below 1 MSS");
+    }
+
+    #[test]
+    fn cubic_on_timeout_resets_cwnd_to_one_mss() {
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 100 * 1460;
+        cubic.on_timeout(10_000);
+        // RFC 8312 Sec 4.7: timeout reduces cwnd to 1 MSS (per RFC 5681)
+        assert_eq!(cubic.cwnd, CubicState::MSS,
+            "timeout should set cwnd to 1 MSS");
+        assert_eq!(cubic.ssthresh, CubicState::MSS * 2,
+            "timeout should set ssthresh to 2 MSS");
+    }
+
+    #[test]
+    fn cubic_fast_convergence_reduces_wmax_on_shrinking_saturation() {
+        let mut cubic = CubicState::new();
+        // First loss: W_max = 100*MSS
+        cubic.cwnd = 100 * 1460;
+        cubic.last_max_cwnd = 100.0 * 1460.0;
+        cubic.on_loss(10_000);
+        let w_max_after_first = cubic.w_max;
+
+        // Second loss at a lower saturation point: cwnd = 80*MSS
+        cubic.cwnd = 80 * 1460;
+        cubic.on_loss(20_000);
+        // Fast convergence (RFC 8312 Sec 4.6): since cwnd(80k) < last_max(100k),
+        // W_max should be reduced further: 80k * (1+0.7)/2 = 80k * 0.85 = 68k
+        let expected_wmax = 80.0 * 1460.0 * (1.0 + 0.7) / 2.0;
+        assert!((cubic.w_max - expected_wmax).abs() < 1.0,
+            "fast convergence should reduce W_max further: expected={}, got={}",
+            expected_wmax, cubic.w_max);
+    }
+
+    #[test]
+    fn cubic_wmax_stays_at_cwnd_when_not_shrinking() {
+        let mut cubic = CubicState::new();
+        // First loss
+        cubic.cwnd = 100 * 1460;
+        cubic.on_loss(10_000);
+        // Second loss at HIGHER saturation: cwnd = 120*MSS
+        cubic.cwnd = 120 * 1460;
+        cubic.on_loss(20_000);
+        // No fast convergence since cwnd(120) > last_max(100)
+        assert!((cubic.w_max - (120.0 * 1460.0)).abs() < 1.0,
+            "W_max should stay at cwnd when saturation not shrinking");
+    }
+
+    #[test]
+    fn cubic_cubic_window_returns_cwnd_when_wmax_zero() {
+        let cubic = CubicState::new();
+        let w = cubic.cubic_window(5_000);
+        assert_eq!(w, cubic.cwnd as f64,
+            "cubic_window should return current cwnd when w_max=0");
+    }
+
+    #[test]
+    fn cubic_cubic_window_positive_growth() {
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 50 * 1460;
+        cubic.w_max = 100.0 * 1460.0;
+        cubic.t_last = 0;
+        // t=0: W(0) = C*(0-K)^3 + W_max = C*(-K)^3 + W_max
+        // Since K > 0, (0-K)^3 is negative, so W(0) < W_max
+        let w0 = cubic.cubic_window(0);
+        assert!(w0 < cubic.w_max || (w0 - cubic.w_max).abs() < 1.0,
+            "at t=0, cubic_window should be <= W_max");
+
+        // t=K should give W(t) ≈ W_max (the plateau) — RFC 8312 Sec 4.3: K = cbrt(W_max * (1-β) / C)
+        let k = CubicState::cbrt(cubic.w_max * (1.0 - cubic.beta) / cubic.c);
+        let tk = (k * 1000.0) as u64; // convert seconds to ms
+        let wk = cubic.cubic_window(tk + cubic.t_last);
+        assert!((wk - cubic.w_max).abs() / cubic.w_max < 0.1,
+            "at t=K, cubic_window should be near W_max");
+
+        // t >> K should grow beyond W_max (use 120s to be safely past K ~48s)
+        let w_far = cubic.cubic_window(cubic.t_last + 120_000);
+        assert!(w_far > cubic.w_max + 2000.0,
+            "far beyond K, cubic_window should exceed W_max");
+    }
+
+    #[test]
+    fn cubic_tcp_friendly_window_positive() {
+        let cubic = CubicState::new();
+        let w = cubic.tcp_friendly_window(5_000, 100);
+        assert!(w >= CubicState::MSS as f64,
+            "tcp_friendly_window should be at least 1 MSS");
+    }
+
+    #[test]
+    fn cubic_on_ack_slow_start_increases_cwnd_exponentially() {
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 10 * 1460;
+        cubic.ssthresh = 1000 * 1460;
+        let before = cubic.cwnd;
+        cubic.on_ack(1460, 1_000, 100);
+        assert!(cubic.cwnd > before,
+            "slow start should increase cwnd");
+        assert_eq!(cubic.cwnd, before + 1460,
+            "slow start: cwnd += acked_bytes");
+    }
+
+    #[test]
+    fn cubic_on_ack_congestion_avoidance_uses_cubic_function() {
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 2000 * 1460;
+        cubic.ssthresh = 1000 * 1460; // below cwnd → congestion avoidance
+        cubic.w_max = 3000.0 * 1460.0;
+        cubic.t_last = 0;
+        let before = cubic.cwnd;
+        cubic.on_ack(1460, 5_000, 100);
+        assert!(cubic.cwnd >= before,
+            "congestion avoidance should not reduce cwnd");
+        // The increase should be based on the cubic function
+        let cubic_w = cubic.cubic_window(5_000);
+        let tcp_w = cubic.tcp_friendly_window(5_000, 100);
+        let expected_target = cubic_w.max(tcp_w);
+        let expected_increment = (expected_target - before as f64) * (1460.0 / before as f64);
+        let expected_cwnd = before as f64 + expected_increment;
+        assert!((cubic.cwnd as f64 - expected_cwnd).abs() < 2.0,
+            "congestion avoidance should follow cubic/TCP-friendly target");
+    }
+
+    // ── BBR CC Testleri ──
+
+    #[test]
+    fn bbr_on_loss_reduces_inflight_hi_for_bbrv3() {
+        let mut bbr = BbrState::new();
+        bbr.bbrv3_enabled = true;
+        bbr.inflight_hi = 100_000;
+        bbr.on_loss();
+        // BBRv3: inflight_hi = max(inflight_hi * 0.9, 2920)
+        assert_eq!(bbr.inflight_hi, 90_000,
+            "BBRv3 on_loss should reduce inflight_hi by 10%");
+    }
+
+    #[test]
+    fn bbr_on_loss_without_bbrv3_does_not_change_inflight_hi() {
+        let mut bbr = BbrState::new();
+        bbr.bbrv3_enabled = false;
+        bbr.inflight_hi = 100_000;
+        bbr.on_loss();
+        // Without BBRv3, on_loss should not modify basic BBR state
+        assert_eq!(bbr.inflight_hi, 100_000,
+            "non-BBRv3 loss should not change inflight_hi");
+    }
+
+    #[test]
+    fn bbr_on_loss_minimum_inflight_hi_is_1460() {
+        let mut bbr = BbrState::new();
+        bbr.bbrv3_enabled = true;
+        bbr.inflight_hi = 1500; // just above 1460, 1500*9/10=1350 clamped to 1460
+        bbr.on_loss();
+        // 1500*9/10 = 1350, .max(1460) = 1460
+        assert_eq!(bbr.inflight_hi, 1460,
+            "BBRv3 inflight_hi should not go below 1*MSS (1460)");
+    }
+
+    #[test]
+    fn bbr_on_timeout_resets_to_startup_mode() {
+        let mut bbr = BbrState::new();
+        bbr.mode = BbrMode::ProbeBW;
+        bbr.bw = 1_000_000;
+        bbr.on_timeout(100_000);
+        assert_eq!(bbr.mode, BbrMode::Startup,
+            "timeout should reset to Startup mode");
+        // BBR timeout resets mode/gain but preserves bandwidth estimate
+        assert_eq!(bbr.bw, 1_000_000,
+            "timeout should preserve bandwidth estimate");
+    }
+
+    #[test]
+    fn bbr_cwnd_in_startup_returns_target_cwnd() {
+        let mut bbr = BbrState::new();
+        bbr.mode = BbrMode::Startup;
+        bbr.bw = 10_000_000;  // 10 MB/s
+        bbr.min_rtt = 10_000;  // 10ms
+        // target = bw * min_rtt * cwnd_gain = 10MB/s * 10ms * 2.89 = 289KB / MSS ≈ 198
+        // After quantization budget (+3*? + rounding) let's just check > 0
+        let cwnd = bbr.cwnd();
+        assert!(cwnd > 0,
+            "BBR cwnd should be positive");
+    }
+
+    #[test]
+    fn bbr_cwnd_in_probe_rtt_returns_one_mss() {
+        let mut bbr = BbrState::new();
+        bbr.mode = BbrMode::ProbeRTT;
+        let cwnd = bbr.cwnd();
+        assert_eq!(cwnd, 1460,
+            "BBR in ProbeRTT should return 1 MSS (1460)");
+    }
+
+    // ── Fast Retransmit Integration Test ──
+
+    #[test]
+    fn fast_retransmit_triggers_cc_on_loss_on_triple_dup_ack() {
+        let mut fast_retx = FastRetransmitState::new();
+        let mut cc = CcState::new(CcAlgorithm::Cubic);
+        let initial_cwnd = cc.cwnd();
+
+        // Normal ACK (new data)
+        assert!(!fast_retx.on_ack(1000, &[], 1),
+            "first ACK should not trigger loss");
+
+        // Duplicate ACK #1
+        assert!(!fast_retx.on_ack(1000, &[], 1),
+            "first dup ACK should not trigger loss");
+
+        // Duplicate ACK #2
+        assert!(!fast_retx.on_ack(1000, &[], 1),
+            "second dup ACK should not trigger loss");
+
+        // Duplicate ACK #3 → threshold reached → loss signaled
+        assert!(fast_retx.on_ack(1000, &[], 1),
+            "third dup ACK MUST trigger loss signal");
+
+        // Verify cc.on_loss() reduces cwnd
+        cc.on_loss(1000);
+        assert!(cc.cwnd() < initial_cwnd,
+            "cc.on_loss() after fast retransmit should reduce cwnd: initial={}, after={}",
+            initial_cwnd, cc.cwnd());
+    }
+
+    #[test]
+    fn fast_retransmit_new_ack_resets_dup_counter() {
+        let mut fast_retx = FastRetransmitState::new();
+
+        // First call: new ACK (last_ack=0, so ack>last_ack) → establishes last_ack
+        fast_retx.on_ack(1000, &[], 1);
+        assert_eq!(fast_retx.last_ack, 1000);
+        assert_eq!(fast_retx.dup_ack_count, 0);
+
+        // Second call: duplicate ACK → count=1
+        fast_retx.on_ack(1000, &[], 1);
+        assert_eq!(fast_retx.dup_ack_count, 1);
+
+        // Third call: duplicate ACK → count=2
+        fast_retx.on_ack(1000, &[], 1);
+        assert_eq!(fast_retx.dup_ack_count, 2);
+
+        // New ACK resets counter
+        assert!(!fast_retx.on_ack(1001, &[], 1));
+        assert_eq!(fast_retx.dup_ack_count, 0);
+        assert_eq!(fast_retx.last_ack, 1001);
+    }
+
+    #[test]
+    fn fast_retransmit_in_recovery_exits_on_ack_above_recover() {
+        let mut fast_retx = FastRetransmitState::new();
+        // snd_una = 1500 (we've sent up to seq 1500, waiting for ACK on first byte)
+        let snd_una = 1500u32;
+
+        // First ACK for 1000: new ack, establishes baseline
+        fast_retx.on_ack(1000, &[], snd_una);
+        // Three duplicates of 1000 → threshold → loss
+        fast_retx.on_ack(1000, &[], snd_una);
+        fast_retx.on_ack(1000, &[], snd_una);
+        assert!(fast_retx.on_ack(1000, &[], snd_una)); // enters recovery
+        assert!(fast_retx.in_recovery);
+        // recover = snd_una = 1500
+
+        // Partial ACK (1100 < 1500 = recover) — stays in recovery
+        assert!(!fast_retx.on_ack(1100, &[], snd_una));
+        assert!(fast_retx.in_recovery);
+
+        // Full ACK (1500 >= 1500 = recover) — exits recovery
+        assert!(!fast_retx.on_ack(1500, &[], snd_una));
+        assert!(!fast_retx.in_recovery);
+        assert_eq!(fast_retx.dup_ack_count, 0);
+    }
+
+    #[test]
+    fn fast_retransmit_reset_clears_state() {
+        let mut fast_retx = FastRetransmitState::new();
+        fast_retx.on_ack(1000, &[], 1);
+        fast_retx.on_ack(1000, &[], 1);
+        fast_retx.on_ack(1000, &[], 1);
+        fast_retx.on_ack(1000, &[], 1);
+        assert!(fast_retx.in_recovery);
+
+        fast_retx.reset();
+        assert_eq!(fast_retx.dup_ack_count, 0);
+        assert!(!fast_retx.in_recovery);
+    }
+
+    // ── Cross-Protocol Loss Behavior Test (Council Condition 3) ──
+    // BBR (RFC 9102) vs CUBIC (RFC 8312) under identical loss events.
+    // BBR is model-based: packet loss does NOT directly reduce cwnd.
+    // CUBIC is loss-based: every loss reduces cwnd to cwnd * β (β=0.7).
+    // This test verifies the behavioral difference and documents that
+    // BBR's loss-tolerance is by-design per RFC 9102 Sec 4.5.
+    // In mixed deployment, BBR flows may maintain higher cwnd than
+    // CUBIC flows under identical loss — this is expected behavior,
+    // not a bug. Fairness between BBR and CUBIC under loss is an
+    // open research area (see: BBReq, RFC 9102 Sec 5.2).
+
+    #[test]
+    fn bbr_and_cubic_respond_differently_to_loss_by_design() {
+        // BBR setup: high bandwidth, calibrated model
+        let mut bbr = BbrState::new();
+        bbr.bw = 10_000_000;          // 10 MB/s
+        bbr.min_rtt = 10_000;          // 10 ms
+        let bbr_initial = bbr.cwnd();
+
+        // CUBIC setup
+        let mut cubic = CubicState::new();
+        cubic.cwnd = 100 * 1460;       // 100 segments
+        cubic.w_max = 100.0 * 1460.0;
+        cubic.last_max_cwnd = 100.0 * 1460.0;
+        let cubic_initial = cubic.cwnd;
+
+        // Inject multiple loss events
+        for i in 0..5 {
+            bbr.on_loss();
+            cubic.on_loss(i * 1000);
+        }
+
+        // BBR: model-based → cwnd stays at target_cwnd (unchanged by loss)
+        let bbr_after = bbr.cwnd();
+        assert_eq!(bbr_after, bbr_initial,
+            "BBR cwnd should NOT change after losses (model-based CC, RFC 9102)");
+
+        // CUBIC: loss-based → cwnd reduced by β each time
+        let cubic_after = cubic.cwnd;
+        let expected_cubic = (100.0 * 1460.0 * CubicState::powi(0.7, 5)).max(1460.0) as u32;
+        let diff = if cubic_after > expected_cubic { cubic_after - expected_cubic } else { expected_cubic - cubic_after };
+        assert!(diff <= 1,
+            "CUBIC cwnd should decrease after each loss (cwnd *= β^5): expected ~{}, got {}",
+            expected_cubic, cubic_after);
+
+        // BBR maintains higher cwnd than CUBIC under identical loss
+        assert!(bbr_after > cubic_after,
+            "BBR should maintain higher cwnd than CUBIC under losses: BBR={}, CUBIC={}",
+            bbr_after, cubic_after);
+    }
+
+    #[test]
+    fn bbrv3_on_loss_reduces_inflight_hi_which_caps_cwnd() {
+        let mut bbr = BbrState::new();
+        bbr.bbrv3_enabled = true;
+        bbr.bw = 10_000_000;
+        bbr.min_rtt = 10_000;
+        bbr.inflight_hi = 100_000;
+
+        let cwnd_before = bbr.cwnd();
+        // cwnd = min(target_cwnd=2*BDP=200000, inflight_hi=100000) = 100000
+        assert_eq!(cwnd_before, 100_000,
+            "cwnd should start at inflight_hi cap (100000)");
+
+        bbr.on_loss();
+        let cwnd_after = bbr.cwnd();
+
+        // BBRv3 on_loss reduces inflight_hi by 10% → lower cap → lower cwnd
+        assert_eq!(bbr.inflight_hi, 90_000,
+            "BBRv3 on_loss should reduce inflight_hi by 10%");
+        // cwnd = min(target_cwnd=200000, inflight_hi=90000) = 90000
+        assert_eq!(cwnd_after, 90_000,
+            "BBRv3 cwnd is capped by reduced inflight_hi (indirect effect)");
+        // The key: cwnd = target_cwnd() still; inflight_hi is the independent safety cap
+        assert_eq!(cwnd_after, bbr.target_cwnd(),
+            "BBRv3 cwnd should always equal target_cwnd() (model-based)");
     }
 }

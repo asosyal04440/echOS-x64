@@ -12,6 +12,7 @@
       <sourceFolder url="file://$MODULE_DIR$/sdk/echos-sdk/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/third_party/ironshim-rs/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/tools/arch_guard/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/echshell/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
     </content>
     <orderEntry type="inheritedJdk" />

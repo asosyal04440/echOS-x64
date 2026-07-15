@@ -3287,9 +3287,7 @@ fn draw_cursor(fb: &mut Framebuffer, position: Point, damage: Rect) {
     fill_rect_clipped(fb, hotspot, clip, 0xFF111827);
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_DISPLAY: Mutex<Option<Arc<EchDisplay>>> = Mutex::new(None);
-}
+static ECH_DISPLAY: spin::Lazy<Mutex<Option<Arc<EchDisplay>>>> = spin::Lazy::new(|| Mutex::new(None));
 
 fn sync_output_geometry(width: u32, height: u32) {
     crate::drivers::mouse::set_bounds(width as i32, height as i32);
@@ -3355,8 +3353,29 @@ mod tests {
     use alloc::sync::Arc;
     use spin::Mutex;
 
+    static DISPLAY_TEST_EPOCH: spin::Lazy<Mutex<()>> = spin::Lazy::new(|| Mutex::new(()));
+
+    fn display_test_epoch() -> spin::MutexGuard<'static, ()> {
+        let guard = DISPLAY_TEST_EPOCH.lock();
+        publish_state(0, 0, MouseButtons::default());
+        set_bounds(
+            super::DEFAULT_DESKTOP_WIDTH as i32,
+            super::DEFAULT_DESKTOP_HEIGHT as i32,
+        );
+        crate::gfx::scaling::init_from_resolution(
+            super::DEFAULT_DESKTOP_WIDTH,
+            super::DEFAULT_DESKTOP_HEIGHT,
+        );
+        crate::gui::login::init(
+            super::DEFAULT_DESKTOP_WIDTH as usize,
+            super::DEFAULT_DESKTOP_HEIGHT as usize,
+        );
+        guard
+    }
+
     #[test]
     fn sync_output_geometry_updates_mouse_bounds_and_scale() {
+        let _epoch = display_test_epoch();
         publish_state(4096, 4096, MouseButtons::default());
 
         sync_output_geometry(1920, 1080);
@@ -3367,6 +3386,7 @@ mod tests {
 
     #[test]
     fn output_mode_catalog_is_bounded_by_live_framebuffer() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
         let modes = display.supported_output_modes();
 
@@ -3377,6 +3397,7 @@ mod tests {
 
     #[test]
     fn set_output_mode_updates_effective_rect_and_mouse_bounds() {
+        let _epoch = display_test_epoch();
         publish_state(4096, 4096, MouseButtons::default());
 
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
@@ -3403,6 +3424,7 @@ mod tests {
 
     #[test]
     fn ensure_runtime_pointer_geometry_resyncs_bounds_when_runtime_drift_detected() {
+        let _epoch = display_test_epoch();
         publish_state(4096, 4096, MouseButtons::default());
 
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
@@ -3420,6 +3442,7 @@ mod tests {
 
     #[test]
     fn route_input_event_command_returns_routing_response() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1280, 720))));
         let response = display.process_command(DisplayCommand::RouteInputEvent {
             event: InputEvent::Key {
@@ -3438,6 +3461,7 @@ mod tests {
 
     #[test]
     fn list_windows_reflects_scene_surface_metadata_from_joined_snapshot() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1280, 720))));
         let response = display.process_command(DisplayCommand::CreateWindow {
             app_id: 77,
@@ -3483,6 +3507,7 @@ mod tests {
 
     #[test]
     fn unresolved_visible_windows_emit_diagnostic_and_are_excluded_from_present() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1280, 720))));
         let response = display.process_command(DisplayCommand::CreateWindow {
             app_id: 88,
@@ -3525,6 +3550,7 @@ mod tests {
 
     #[test]
     fn query_display_capability_reports_supported_modes() {
+        let _epoch = display_test_epoch();
         crate::drivers::drm::init();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
 
@@ -3543,6 +3569,7 @@ mod tests {
 
     #[test]
     fn set_display_profile_disables_unsupported_hdr_policy() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
         let mut profile = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
         profile.outputs[0].scale_100x = 163;
@@ -3561,6 +3588,7 @@ mod tests {
 
     #[test]
     fn set_display_profile_rebuilds_primary_output_when_missing() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
         let mut profile = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
         profile.primary_output = 9;
@@ -3577,6 +3605,7 @@ mod tests {
 
     #[test]
     fn mirrored_outputs_adopt_target_workspace_binding() {
+        let _epoch = display_test_epoch();
         let mut profile = DisplayProfile::single_output(OutputMode::new(1920, 1080, 60));
         profile.outputs.push(crate::gui::protocol::MonitorPolicy {
             output_id: 1,
@@ -3595,6 +3624,7 @@ mod tests {
 
     #[test]
     fn display_profile_rescues_windows_from_removed_workspace_binding() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
         let initial = DisplayProfile {
             primary_output: 0,
@@ -3652,6 +3682,7 @@ mod tests {
 
     #[test]
     fn runtime_display_state_enters_fullscreen_auto_mode_when_window_covers_output() {
+        let _epoch = display_test_epoch();
         let display = EchDisplay::new(Arc::new(Mutex::new(Framebuffer::new_for_test(1920, 1080))));
         let profile = DisplayProfile {
             primary_output: 0,

@@ -807,9 +807,7 @@ impl MountTable {
     }
 }
 
-lazy_static! {
-    pub static ref MOUNT_TABLE: MountTable = MountTable::new();
-}
+pub static MOUNT_TABLE: spin::Lazy<MountTable> = spin::Lazy::new(|| MountTable::new());
 
 /// Sanal dosya sistemleri icin varsayilan mount'lari kaydet
 pub fn mount_virtual_filesystems() {

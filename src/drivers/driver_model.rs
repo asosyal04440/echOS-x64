@@ -477,9 +477,7 @@ impl DriverModel {
     }
 }
 
-lazy_static::lazy_static! {
-    pub static ref DRIVER_MODEL: DriverModel = DriverModel::new();
-}
+pub static DRIVER_MODEL: spin::Lazy<DriverModel> = spin::Lazy::new(|| DriverModel::new());
 
 // ============================================================================
 // SYSFS BENZERI ARAYÜZLERİ (SYSFS-LIKE INTERFACE)

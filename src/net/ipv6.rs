@@ -85,6 +85,58 @@ static IPV6_NEXT_HEADER_HANDLERS: Mutex<BTreeMap<u8, Ipv6NextHeaderHandler>> =
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ipv6Addr(pub [u8; 16]);
 
+impl core::fmt::Display for Ipv6Addr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // 8 grup 16-bit hex
+        let groups = [
+            u16::from_be_bytes([self.0[0], self.0[1]]),
+            u16::from_be_bytes([self.0[2], self.0[3]]),
+            u16::from_be_bytes([self.0[4], self.0[5]]),
+            u16::from_be_bytes([self.0[6], self.0[7]]),
+            u16::from_be_bytes([self.0[8], self.0[9]]),
+            u16::from_be_bytes([self.0[10], self.0[11]]),
+            u16::from_be_bytes([self.0[12], self.0[13]]),
+            u16::from_be_bytes([self.0[14], self.0[15]]),
+        ];
+        // En uzun sıfır dizisini :: ile kısalt (RFC 5952)
+        let mut best_start = 8usize; // "başlangıç yok" anlamında
+        let mut best_len = 0usize;
+        let mut i = 0;
+        while i < 8 {
+            if groups[i] == 0 {
+                let mut j = i;
+                while j < 8 && groups[j] == 0 {
+                    j += 1;
+                }
+                if j - i > best_len && j - i > 1 {
+                    best_start = i;
+                    best_len = j - i;
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        let mut first = true;
+        for k in 0..8 {
+            if best_len > 0 && k == best_start {
+                write!(f, "{}", if first { "::" } else { ":" })?;
+                first = false;
+                continue;
+            }
+            if best_len > 0 && k > best_start && k < best_start + best_len {
+                continue;
+            }
+            if !first {
+                write!(f, ":")?;
+            }
+            write!(f, "{:x}", groups[k])?;
+            first = false;
+        }
+        Ok(())
+    }
+}
+
 impl Ipv6Addr {
     /// Belirsiz (unspecified) adres `::` — IPv4'teki 0.0.0.0 karşılığı
     pub const UNSPECIFIED: Self = Ipv6Addr([0; 16]);

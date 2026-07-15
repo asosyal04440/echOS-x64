@@ -32,14 +32,10 @@ pub mod buffer;
 pub mod ldisc;
 pub mod pty;
 
-use lazy_static::lazy_static;
-
-lazy_static! {
-    /// Sistem genelindeki varsayılan TTY Line Discipline instance'ı.
-    /// `lazy_static!` ile tanımlandığı için ilk erişimde initialize edilir.
-    /// Sonradan `prewarm` ile boot sırasında önceden başlatılır.
-    pub static ref DEFAULT_TTY: ldisc::LineDiscipline = ldisc::LineDiscipline::new();
-}
+/// Sistem genelindeki varsayılan TTY Line Discipline instance'ı.
+/// `spin::Lazy` ile tanımlandığı için ilk erişimde initialize edilir.
+/// Sonradan `prewarm` ile boot sırasında önceden başlatılır.
+pub static DEFAULT_TTY: spin::Lazy<ldisc::LineDiscipline> = spin::Lazy::new(|| ldisc::LineDiscipline::new());
 
 /// TTY alt sistemini başlatır.
 ///

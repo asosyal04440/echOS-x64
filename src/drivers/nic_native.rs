@@ -29,7 +29,7 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
 use crate::drivers::async_traits::{
-    AsyncIoError, AsyncNetDevice, CompletionEvent, DmaBuffer, SubmissionToken,
+    AsyncIoError, AsyncNetDevice, CompletionEvent, DmaBuffer, DmaSlice, SubmissionToken,
 };
 
 // ============================================================================
@@ -42,6 +42,11 @@ const RING_MASK: u32 = (RING_SIZE - 1) as u32;
 
 /// Maksimum paket boyutu (jumbo frame desteği)
 const MAX_PACKET_SIZE: usize = 9216;
+const MAX_TX_SG_FRAGS: usize = 16;
+
+const NIC_DESC_F_SG_FIRST: u32 = 1 << 0;
+const NIC_DESC_F_SG_MORE: u32 = 1 << 1;
+const NIC_DESC_F_SG_LAST: u32 = 1 << 2;
 
 /// Varsayılan MTU
 const DEFAULT_MTU: u32 = 1500;
@@ -70,7 +75,7 @@ const E1000_TCTL_PSP: u32 = 1 << 3; // Pad Short Packets
 // Intel 8254x TX Descriptor (16 bytes, SDM §3.3.3)
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-struct E1000TxDesc {
+pub struct E1000TxDesc {
     buffer_addr: u64,
     length: u16,
     cso: u8,
@@ -172,6 +177,31 @@ impl DescriptorRing {
         // smp_wmb: descriptor yazıldıktan SONRA head'i güncelle
         crate::memory_barriers::smp_wmb();
         self.head.store(next, Ordering::Release);
+        true
+    }
+
+    fn free_slots(&self) -> u32 {
+        (RING_SIZE as u32 - 1).saturating_sub(self.len())
+    }
+
+    /// N descriptor'ı tek publish adımıyla ekler; consumer partial packet görmez.
+    fn try_push_batch(&self, descs: &[NicDescriptor]) -> bool {
+        if descs.is_empty() || descs.len() > self.free_slots() as usize {
+            return false;
+        }
+
+        let head = self.head.load(Ordering::Relaxed);
+        let mut cursor = head;
+        unsafe {
+            let entries = &mut *self.entries.get();
+            for desc in descs {
+                entries[cursor as usize] = *desc;
+                cursor = (cursor + 1) & RING_MASK;
+            }
+        }
+
+        crate::memory_barriers::smp_wmb();
+        self.head.store(cursor, Ordering::Release);
         true
     }
 
@@ -364,9 +394,120 @@ impl NicNativeDevice {
 
     fn ring_tx_doorbell(&self) {
         if self.vendor_family == NicVendorFamily::Intel8254x {
-            let tail = self.tx_ring.head.load(Ordering::Acquire);
+            let logical_tail = self.tx_ring.head.load(Ordering::Acquire);
+            let tail = if self.e1000_tx_ring_len != 0 {
+                logical_tail % self.e1000_tx_ring_len
+            } else {
+                logical_tail
+            };
             self.write_mmio32(E1000_REG_TDT, tail);
         }
+    }
+
+    fn validate_tx_sg(&self, fragments: &[DmaSlice]) -> Result<usize, AsyncIoError> {
+        if !self.ready.load(Ordering::Acquire) || !self.link_up.load(Ordering::Acquire) {
+            return Err(AsyncIoError::DeviceGone);
+        }
+        if fragments.is_empty() || fragments.len() > MAX_TX_SG_FRAGS {
+            return Err(AsyncIoError::InvalidParam);
+        }
+
+        let mut total = 0usize;
+        for frag in fragments {
+            if frag.len == 0 {
+                return Err(AsyncIoError::InvalidParam);
+            }
+            total = total
+                .checked_add(frag.len)
+                .ok_or(AsyncIoError::InvalidParam)?;
+            if total > MAX_PACKET_SIZE {
+                return Err(AsyncIoError::InvalidParam);
+            }
+        }
+        Ok(total)
+    }
+
+    fn build_tx_sg_descriptors(
+        &self,
+        fragments: &[DmaSlice],
+        out: &mut [NicDescriptor; MAX_TX_SG_FRAGS],
+    ) {
+        let last = fragments.len() - 1;
+        for (idx, frag) in fragments.iter().enumerate() {
+            let mut flags = 0;
+            if idx == 0 {
+                flags |= NIC_DESC_F_SG_FIRST;
+            }
+            if idx == last {
+                flags |= NIC_DESC_F_SG_LAST;
+            } else {
+                flags |= NIC_DESC_F_SG_MORE;
+            }
+            out[idx] = NicDescriptor {
+                buffer_addr: frag.paddr,
+                length: frag.len as u32,
+                flags,
+            };
+        }
+    }
+
+    fn program_e1000_tx_sg(
+        &self,
+        start_idx: u32,
+        fragments: &[DmaSlice],
+    ) -> Result<(), AsyncIoError> {
+        if self.vendor_family != NicVendorFamily::Intel8254x || self.e1000_tx_desc_virt.is_null() {
+            return Ok(());
+        }
+        if self.e1000_tx_ring_len == 0 || fragments.len() > self.e1000_tx_ring_len as usize {
+            return Err(AsyncIoError::QueueFull);
+        }
+
+        let last = fragments.len() - 1;
+        for (offset, frag) in fragments.iter().enumerate() {
+            let hw_idx = (start_idx.wrapping_add(offset as u32) % self.e1000_tx_ring_len) as usize;
+            unsafe {
+                let hw_desc = &mut *self.e1000_tx_desc_virt.add(hw_idx);
+                hw_desc.buffer_addr = frag.paddr;
+                hw_desc.length = frag.len as u16;
+                hw_desc.cso = 0;
+                hw_desc.cmd = if offset == last {
+                    E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS
+                } else {
+                    0
+                };
+                hw_desc.status = 0;
+                hw_desc.css = 0;
+                hw_desc.special = 0;
+            }
+        }
+        Ok(())
+    }
+
+    fn submit_tx_sg_inner(&self, fragments: &[DmaSlice]) -> Result<SubmissionToken, AsyncIoError> {
+        let total_len = self.validate_tx_sg(fragments)?;
+        if self.tx_ring.free_slots() < fragments.len() as u32 {
+            self.tx_dropped.fetch_add(1, Ordering::Relaxed);
+            return Err(AsyncIoError::QueueFull);
+        }
+
+        let start_idx = self.tx_ring.head.load(Ordering::Acquire);
+        self.program_e1000_tx_sg(start_idx, fragments)?;
+
+        let mut descs = [NicDescriptor::empty(); MAX_TX_SG_FRAGS];
+        self.build_tx_sg_descriptors(fragments, &mut descs);
+        if !self.tx_ring.try_push_batch(&descs[..fragments.len()]) {
+            self.tx_dropped.fetch_add(1, Ordering::Relaxed);
+            return Err(AsyncIoError::QueueFull);
+        }
+
+        crate::memory_barriers::smp_wmb();
+        self.tx_packets.fetch_add(1, Ordering::Relaxed);
+        self.tx_bytes.fetch_add(total_len as u64, Ordering::Relaxed);
+        self.ring_tx_doorbell();
+
+        let token = SubmissionToken(self.next_token.fetch_add(1, Ordering::Relaxed));
+        Ok(token)
     }
 
     fn ring_rx_doorbell(&self) {
@@ -463,70 +604,45 @@ impl AsyncNetDevice for NicNativeDevice {
     }
 
     fn submit_tx(&self, dma_buf: &DmaBuffer, len: usize) -> Result<SubmissionToken, AsyncIoError> {
-        if !self.ready.load(Ordering::Acquire) {
-            return Err(AsyncIoError::DeviceGone);
-        }
-        if !self.link_up.load(Ordering::Acquire) {
-            return Err(AsyncIoError::DeviceGone);
-        }
-        if len > MAX_PACKET_SIZE {
+        if len == 0 || len > dma_buf.size {
             return Err(AsyncIoError::InvalidParam);
         }
+        self.submit_tx_sg_inner(&[DmaSlice::from_buffer(dma_buf, len)])
+    }
 
-        let desc = NicDescriptor {
-            buffer_addr: dma_buf.paddr,
-            length: len as u32,
-            flags: 0, // TX_PENDING
-        };
-
-        if self.tx_ring.push(desc) {
-            if self.vendor_family == NicVendorFamily::Intel8254x
-                && !self.e1000_tx_desc_virt.is_null()
-            {
-                let idx = self.tx_ring.head.load(Ordering::Acquire).wrapping_sub(1) & RING_MASK;
-                let hw_idx = idx % self.e1000_tx_ring_len;
-                unsafe {
-                    let hw_desc = &mut *self.e1000_tx_desc_virt.add(hw_idx as usize);
-                    hw_desc.buffer_addr = dma_buf.paddr;
-                    hw_desc.length = len as u16;
-                    hw_desc.cso = 0;
-                    hw_desc.cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS;
-                    hw_desc.status = 0;
-                    hw_desc.css = 0;
-                    hw_desc.special = 0;
-                }
-                crate::memory_barriers::smp_wmb();
-            }
-            self.tx_packets.fetch_add(1, Ordering::Relaxed);
-            self.tx_bytes.fetch_add(len as u64, Ordering::Relaxed);
-            self.ring_tx_doorbell();
-
-            let token = SubmissionToken(self.next_token.fetch_add(1, Ordering::Relaxed));
-            Ok(token)
-        } else {
-            self.tx_dropped.fetch_add(1, Ordering::Relaxed);
-            Err(AsyncIoError::QueueFull)
-        }
+    fn submit_tx_sg(&self, fragments: &[DmaSlice]) -> Result<SubmissionToken, AsyncIoError> {
+        self.submit_tx_sg_inner(fragments)
     }
 
     fn poll_tx_completion(&self) -> Option<CompletionEvent> {
         if self.vendor_family == NicVendorFamily::Intel8254x && !self.e1000_tx_desc_virt.is_null() {
-            let hw_tail = self.e1000_tx_hw_tail.load(Ordering::Acquire);
+            let start = self.e1000_tx_hw_tail.load(Ordering::Acquire);
             let ring_len = self.e1000_tx_ring_len;
-            if hw_tail >= ring_len {
+            if ring_len == 0 || start >= ring_len {
                 return None;
             }
+
+            let mut idx = start;
+            let mut data_len = 0usize;
             unsafe {
-                let desc = &*self.e1000_tx_desc_virt.add(hw_tail as usize);
-                if desc.status & E1000_TXD_STAT_DD != 0 {
-                    self.e1000_tx_hw_tail.store(hw_tail + 1, Ordering::Release);
-                    let token = SubmissionToken(hw_tail as u64);
-                    return Some(CompletionEvent {
-                        token,
-                        result: 0,
-                        data_len: desc.length as usize,
-                        flags: 0,
-                    });
+                for _ in 0..ring_len {
+                    let desc = &*self.e1000_tx_desc_virt.add(idx as usize);
+                    data_len = data_len.saturating_add(desc.length as usize);
+                    if desc.cmd & E1000_TXD_CMD_EOP != 0 {
+                        if desc.status & E1000_TXD_STAT_DD == 0 {
+                            return None;
+                        }
+
+                        let next = (idx + 1) % ring_len;
+                        self.e1000_tx_hw_tail.store(next, Ordering::Release);
+                        return Some(CompletionEvent {
+                            token: SubmissionToken(start as u64),
+                            result: 0,
+                            data_len,
+                            flags: 0,
+                        });
+                    }
+                    idx = (idx + 1) % ring_len;
                 }
             }
             return None;
@@ -754,6 +870,132 @@ mod tests {
             size: MAX_PACKET_SIZE + 1,
         };
         assert!(dev.submit_tx(&big_buf, MAX_PACKET_SIZE + 1).is_err());
+    }
+
+    #[test]
+    fn nic_submit_tx_sg_publishes_one_packet_with_multiple_fragments() {
+        let dev = make_device();
+        let fragments = [
+            DmaSlice::new(0, 0x1000, 128),
+            DmaSlice::new(0, 0x2000, 256),
+            DmaSlice::new(0, 0x3000, 64),
+        ];
+
+        assert!(dev.submit_tx_sg(&fragments).is_ok());
+        assert_eq!(dev.tx_ring.len(), 3);
+        assert_eq!(dev.tx_packets.load(Ordering::Relaxed), 1);
+        assert_eq!(dev.tx_bytes.load(Ordering::Relaxed), 448);
+
+        let first = dev.tx_ring.pop().unwrap();
+        let middle = dev.tx_ring.pop().unwrap();
+        let last = dev.tx_ring.pop().unwrap();
+        assert_eq!(first.buffer_addr, 0x1000);
+        assert_eq!(first.length, 128);
+        assert_eq!(first.flags, NIC_DESC_F_SG_FIRST | NIC_DESC_F_SG_MORE);
+        assert_eq!(middle.buffer_addr, 0x2000);
+        assert_eq!(middle.flags, NIC_DESC_F_SG_MORE);
+        assert_eq!(last.buffer_addr, 0x3000);
+        assert_eq!(last.flags, NIC_DESC_F_SG_LAST);
+    }
+
+    #[test]
+    fn nic_submit_tx_sg_rejects_empty_zero_and_oversized_fragments() {
+        let dev = make_device();
+        assert!(matches!(
+            dev.submit_tx_sg(&[]),
+            Err(AsyncIoError::InvalidParam)
+        ));
+        assert!(matches!(
+            dev.submit_tx_sg(&[DmaSlice::new(0, 0x1000, 0)]),
+            Err(AsyncIoError::InvalidParam)
+        ));
+        assert!(matches!(
+            dev.submit_tx_sg(&[DmaSlice::new(0, 0x1000, MAX_PACKET_SIZE + 1)]),
+            Err(AsyncIoError::InvalidParam)
+        ));
+    }
+
+    #[test]
+    fn nic_submit_tx_sg_requires_enough_ring_slots_before_publish() {
+        let dev = make_device();
+        let single = [DmaSlice::new(0, 0x1000, 64)];
+        for _ in 0..(RING_SIZE - 2) {
+            assert!(dev.submit_tx_sg(&single).is_ok());
+        }
+        let before_len = dev.tx_ring.len();
+        let fragments = [DmaSlice::new(0, 0x2000, 64), DmaSlice::new(0, 0x3000, 64)];
+        assert!(matches!(
+            dev.submit_tx_sg(&fragments),
+            Err(AsyncIoError::QueueFull)
+        ));
+        assert_eq!(dev.tx_ring.len(), before_len);
+    }
+
+    #[test]
+    fn nic_intel_sg_programs_descriptor_chain_with_eop_only_on_last_fragment() {
+        let mut dev = make_device();
+        let mut hw_ring = [E1000TxDesc {
+            buffer_addr: 0,
+            length: 0,
+            cso: 0,
+            cmd: 0,
+            status: 0,
+            css: 0,
+            special: 0,
+        }; 8];
+        dev.setup_e1000_tx_ring(0x8000_0000, hw_ring.as_mut_ptr(), hw_ring.len() as u32);
+
+        let fragments = [
+            DmaSlice::new(0, 0x1000, 100),
+            DmaSlice::new(0, 0x2000, 200),
+            DmaSlice::new(0, 0x3000, 300),
+        ];
+        assert!(dev.submit_tx_sg(&fragments).is_ok());
+
+        assert_eq!(hw_ring[0].buffer_addr, 0x1000);
+        assert_eq!(hw_ring[0].length, 100);
+        assert_eq!(hw_ring[0].cmd, 0);
+        assert_eq!(hw_ring[1].buffer_addr, 0x2000);
+        assert_eq!(hw_ring[1].cmd, 0);
+        assert_eq!(hw_ring[2].buffer_addr, 0x3000);
+        assert_eq!(hw_ring[2].length, 300);
+        assert_eq!(
+            hw_ring[2].cmd,
+            E1000_TXD_CMD_EOP | E1000_TXD_CMD_IFCS | E1000_TXD_CMD_RS
+        );
+        assert_eq!(dev.tx_ring.head.load(Ordering::Acquire), 3);
+    }
+
+    #[test]
+    fn nic_intel_sg_completion_waits_for_final_descriptor_and_reports_packet_len() {
+        let mut dev = make_device();
+        let mut hw_ring = [E1000TxDesc {
+            buffer_addr: 0,
+            length: 0,
+            cso: 0,
+            cmd: 0,
+            status: 0,
+            css: 0,
+            special: 0,
+        }; 8];
+        dev.setup_e1000_tx_ring(0x8000_0000, hw_ring.as_mut_ptr(), hw_ring.len() as u32);
+
+        let fragments = [
+            DmaSlice::new(0, 0x1000, 100),
+            DmaSlice::new(0, 0x2000, 200),
+            DmaSlice::new(0, 0x3000, 300),
+        ];
+        assert!(dev.submit_tx_sg(&fragments).is_ok());
+        assert!(dev.poll_tx_completion().is_none());
+
+        hw_ring[2].status = E1000_TXD_STAT_DD;
+        let event = dev
+            .poll_tx_completion()
+            .expect("final descriptor completes SG packet");
+        assert_eq!(event.token, SubmissionToken(0));
+        assert_eq!(event.result, 0);
+        assert_eq!(event.data_len, 600);
+        assert_eq!(dev.e1000_tx_hw_tail.load(Ordering::Acquire), 3);
     }
 
     #[test]

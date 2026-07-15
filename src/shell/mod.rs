@@ -9,6 +9,15 @@ pub mod cmd_eon;
 pub mod editor;
 pub mod expr;
 pub mod scripting;
+
+#[cfg(test)]
+static SHELL_GLOBAL_TEST_EPOCH: spin::Lazy<spin::Mutex<()>> =
+    spin::Lazy::new(|| spin::Mutex::new(()));
+
+#[cfg(test)]
+pub(crate) fn shell_global_test_epoch() -> spin::MutexGuard<'static, ()> {
+    SHELL_GLOBAL_TEST_EPOCH.lock()
+}
 pub mod shell_api;
 pub mod shell_syscall;
 
@@ -875,15 +884,31 @@ pub fn info_msg(msg: &str) -> String {
 mod tests {
     use super::*;
 
+    static SHELL_SESSION_TEST_EPOCH: spin::Lazy<spin::Mutex<()>> =
+        spin::Lazy::new(|| spin::Mutex::new(()));
+
+    struct ShellSessionTestEpoch {
+        _global: spin::MutexGuard<'static, ()>,
+        _session: spin::MutexGuard<'static, ()>,
+    }
+
+    fn shell_session_test_epoch() -> ShellSessionTestEpoch {
+        let global = crate::shell::shell_global_test_epoch();
+        let session = SHELL_SESSION_TEST_EPOCH.lock();
+        reset_shell_test_globals();
+        ShellSessionTestEpoch {
+            _global: global,
+            _session: session,
+        }
+    }
+
     fn reset_shell_test_globals() {
-        advanced::ENV.clear();
-        advanced::ENV.init_defaults();
-        advanced::ALIASES.clear();
+        advanced::reset_advanced_test_globals();
     }
 
     #[test]
     fn shell_env_is_session_scoped() {
-        reset_shell_test_globals();
+        let _epoch = shell_session_test_epoch();
         let mut first = Shell::new();
         let mut second = Shell::new();
 
@@ -900,7 +925,7 @@ mod tests {
 
     #[test]
     fn shell_alias_is_session_scoped() {
-        reset_shell_test_globals();
+        let _epoch = shell_session_test_epoch();
         let mut first = Shell::new();
         let mut second = Shell::new();
 
@@ -920,6 +945,7 @@ mod tests {
 
     #[test]
     fn history_reports_only_session_commands() {
+        let _epoch = shell_session_test_epoch();
         let mut shell = Shell::new();
 
         let _ = run_command_in_shell(&mut shell, "echo one");

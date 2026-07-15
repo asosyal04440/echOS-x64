@@ -1570,15 +1570,13 @@ impl ScriptState {
     }
 }
 
-lazy_static::lazy_static! {
-    /// Global betik çalışma zamanı durumu.
-    ///
-    /// `lazy_static!` ile uygulama ömrü boyunca tek bir instance tutulur.
-    /// Yorumlayıcının her yerde `SCRIPT_STATE.set_local()` gibi çağrılarla
-    /// erişebileceği merkezi durum deposudur.
-    pub static ref SCRIPT_STATE: ScriptState = ScriptState::new();
-    static ref SCRIPT_SHELL: Mutex<crate::shell::Shell> = Mutex::new(crate::shell::Shell::new());
-}
+/// Global betik çalışma zamanı durumu.
+///
+/// `spin::Lazy` ile uygulama ömrü boyunca tek bir instance tutulur.
+/// Yorumlayıcının her yerde `SCRIPT_STATE.set_local()` gibi çağrılarla
+/// erişebileceği merkezi durum deposudur.
+pub static SCRIPT_STATE: spin::Lazy<ScriptState> = spin::Lazy::new(|| ScriptState::new());
+static SCRIPT_SHELL: spin::Lazy<Mutex<crate::shell::Shell>> = spin::Lazy::new(|| Mutex::new(crate::shell::Shell::new()));
 
 fn reset_script_runtime() {
     SCRIPT_STATE.local_vars.lock().clear();
@@ -2100,8 +2098,15 @@ mod tests {
     use super::*;
     use crate::shell::advanced;
 
+    fn scripting_test_epoch() -> spin::MutexGuard<'static, ()> {
+        let guard = crate::shell::shell_global_test_epoch();
+        advanced::reset_advanced_test_globals();
+        guard
+    }
+
     #[test]
     fn lexer_emits_command_sub_end_for_assignment_rhs() {
+        let _epoch = scripting_test_epoch();
         let tokens = ScriptLexer::tokenize("MSG=$(echo $FOO)\n");
         assert!(tokens.contains(&ScriptToken::CommandSubStart));
         assert!(tokens.contains(&ScriptToken::CommandSubEnd));
@@ -2109,6 +2114,7 @@ mod tests {
 
     #[test]
     fn script_command_substitution_reuses_shell_session_env() {
+        let _epoch = scripting_test_epoch();
         let result = run_script("export FOO=alpha\nMSG=$(echo $FOO)\n").unwrap();
         assert_eq!(result, 0);
         assert_eq!(SCRIPT_STATE.get_var("MSG"), Some(String::from("alpha")));
@@ -2116,6 +2122,7 @@ mod tests {
 
     #[test]
     fn script_commands_execute_against_real_shell_session() {
+        let _epoch = scripting_test_epoch();
         let result = run_script("export FOO=alpha\necho $FOO\n").unwrap();
         assert_eq!(result, 0);
         assert_eq!(advanced::ENV.get("FOO"), Some(String::from("alpha")));

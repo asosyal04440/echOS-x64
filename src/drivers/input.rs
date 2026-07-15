@@ -66,11 +66,9 @@ pub enum InputEvent {
 // ABSOLUTE ZERO INPUT PIPELINE (SPSC)
 // ============================================================================
 
-lazy_static! {
-    /// SPSC Lock-Free Input Queue. Capacity 4096 (Power of Two).
-    /// Zero Mutex. Zero Contention.
-    static ref INPUT_SPSC: SpscQueue<InputEvent, 4096> = SpscQueue::new();
-}
+/// SPSC Lock-Free Input Queue. Capacity 4096 (Power of Two).
+/// Zero Mutex. Zero Contention.
+static INPUT_SPSC: spin::Lazy<SpscQueue<InputEvent, 4096>> = spin::Lazy::new(|| SpscQueue::new());
 
 /// Kuyruk maksimum boyutu.
 const MAX_INPUT_EVENTS: usize = 4096;

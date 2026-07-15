@@ -6,21 +6,21 @@ use core::cell::UnsafeCell;
 use core::panic::PanicInfo;
 
 extern crate alloc;
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
 
-mod shell_syscall;
-mod tokenizer;
 mod builtins;
-mod executor;
 mod environment;
+mod executor;
 mod history;
 mod scripting;
+mod shell_syscall;
+mod tokenizer;
 
-use shell_syscall as sc;
 use environment::ShellEnv;
 use history::ShellHistory;
+use shell_syscall as sc;
 
 // ============================================================================
 // BUMP ALLOCATOR
@@ -47,7 +47,7 @@ unsafe impl GlobalAlloc for BumpAllocator {
         loop {
             let current_next = self.next.load(Ordering::Relaxed);
             let current_heap_end = self.heap_end.load(Ordering::Relaxed);
-            
+
             // If the allocator hasn't been initialized yet, return null
             if current_heap_end == 0 {
                 return core::ptr::null_mut();
@@ -65,17 +65,28 @@ unsafe impl GlobalAlloc for BumpAllocator {
                 }
                 let returned_heap_end = ret as usize;
                 self.heap_end.store(returned_heap_end, Ordering::Relaxed);
-                dbg_print(b"[ALLOC] raw_syscall 12 returned heap_end", returned_heap_end);
+                dbg_print(
+                    b"[ALLOC] raw_syscall 12 returned heap_end",
+                    returned_heap_end,
+                );
                 if new_next > returned_heap_end {
                     dbg_print(b"[ALLOC] new_next still > heap_end", new_next);
                     return core::ptr::null_mut();
                 }
-                if self.next.compare_exchange(current_next, new_next, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                if self
+                    .next
+                    .compare_exchange(current_next, new_next, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
                     dbg_print(b"[ALLOC] returning ptr", ptr);
                     return ptr as *mut u8;
                 }
             } else {
-                if self.next.compare_exchange(current_next, new_next, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+                if self
+                    .next
+                    .compare_exchange(current_next, new_next, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok()
+                {
                     dbg_print(b"[ALLOC] returning ptr", ptr);
                     return ptr as *mut u8;
                 }
@@ -94,7 +105,11 @@ static ALLOCATOR: BumpAllocator = BumpAllocator {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     let _ = sc::sys_write(2, b"[echshell] PANIC\n");
-    loop { unsafe { core::arch::asm!("hlt"); } }
+    loop {
+        unsafe {
+            core::arch::asm!("hlt");
+        }
+    }
 }
 
 // ============================================================================
@@ -152,11 +167,23 @@ impl ShellState {
 // YAZI YARDIMCILARI
 // ============================================================================
 
-pub fn print(s: &str) { let _ = sc::sys_write(1, s.as_bytes()); }
-pub fn eprint(s: &str) { let _ = sc::sys_write(2, s.as_bytes()); }
-pub fn println(s: &str) { print(s); print("\n"); }
-pub fn eprintln_fn(s: &str) { eprint(s); eprint("\n"); }
-pub fn write_fd(fd: usize, s: &str) { let _ = sc::sys_write(fd, s.as_bytes()); }
+pub fn print(s: &str) {
+    let _ = sc::sys_write(1, s.as_bytes());
+}
+pub fn eprint(s: &str) {
+    let _ = sc::sys_write(2, s.as_bytes());
+}
+pub fn println(s: &str) {
+    print(s);
+    print("\n");
+}
+pub fn eprintln_fn(s: &str) {
+    eprint(s);
+    eprint("\n");
+}
+pub fn write_fd(fd: usize, s: &str) {
+    let _ = sc::sys_write(fd, s.as_bytes());
+}
 
 pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
     print(prompt);
@@ -168,7 +195,10 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
     loop {
         match sc::sys_read(0, &mut buf) {
             Ok(1) => match buf[0] {
-                b'\n' | b'\r' => { print("\n"); return Some(line); }
+                b'\n' | b'\r' => {
+                    print("\n");
+                    return Some(line);
+                }
                 0x08 | 0x7F => {
                     if cursor_pos > 0 {
                         line.remove(cursor_pos - 1);
@@ -177,11 +207,19 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                         let remaining: String = line[cursor_pos..].chars().collect();
                         print(&remaining);
                         print(" \x08");
-                        for _ in remaining.chars() { print("\x08"); }
+                        for _ in remaining.chars() {
+                            print("\x08");
+                        }
                     }
                 }
-                0x03 => { println("^C"); return Some(String::from("__ECHOS_SIGINT__")); }
-                0x04 => { println("^D"); return None; }
+                0x03 => {
+                    println("^C");
+                    return Some(String::from("__ECHOS_SIGINT__"));
+                }
+                0x04 => {
+                    println("^D");
+                    return None;
+                }
                 0x09 => {
                     if let Some(s) = state {
                         let completed = complete_word(&line, cursor_pos, s);
@@ -190,7 +228,9 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                             line = completed;
                             cursor_pos = line.len();
                             let _tail: String = line.chars().skip(cursor_pos).collect();
-                            for _ in 0..old_len { print("\x08 \x08"); }
+                            for _ in 0..old_len {
+                                print("\x08 \x08");
+                            }
                             print(&line);
                         }
                     }
@@ -204,7 +244,9 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                                 let new_idx = idx - 1;
                                 history_index = Some(new_idx);
                                 let old_len = line.len();
-                                for _ in 0..old_len { print("\x08 \x08"); }
+                                for _ in 0..old_len {
+                                    print("\x08 \x08");
+                                }
                                 line = history[new_idx].clone();
                                 cursor_pos = line.len();
                                 print(&line);
@@ -236,10 +278,14 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                         let removed: String = line[..cursor_pos].chars().collect();
                         line = line[cursor_pos..].to_string();
                         cursor_pos = 0;
-                        for _ in removed.chars() { print("\x08 \x08"); }
+                        for _ in removed.chars() {
+                            print("\x08 \x08");
+                        }
                         let remaining: String = line.clone();
                         print(&remaining);
-                        for _ in remaining.chars() { print("\x08"); }
+                        for _ in remaining.chars() {
+                            print("\x08");
+                        }
                     }
                 }
                 0x0B => {
@@ -271,7 +317,9 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                                                 let new_idx = idx - 1;
                                                 history_index = Some(new_idx);
                                                 let old_len = line.len();
-                                                for _ in 0..old_len { print("\x08 \x08"); }
+                                                for _ in 0..old_len {
+                                                    print("\x08 \x08");
+                                                }
                                                 line = history[new_idx].clone();
                                                 cursor_pos = line.len();
                                                 print(&line);
@@ -287,14 +335,18 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                                                 let new_idx = idx + 1;
                                                 history_index = Some(new_idx);
                                                 let old_len = line.len();
-                                                for _ in 0..old_len { print("\x08 \x08"); }
+                                                for _ in 0..old_len {
+                                                    print("\x08 \x08");
+                                                }
                                                 line = history[new_idx].clone();
                                                 cursor_pos = line.len();
                                                 print(&line);
                                             } else {
                                                 history_index = None;
                                                 let old_len = line.len();
-                                                for _ in 0..old_len { print("\x08 \x08"); }
+                                                for _ in 0..old_len {
+                                                    print("\x08 \x08");
+                                                }
                                                 line.clear();
                                                 cursor_pos = 0;
                                             }
@@ -338,7 +390,9 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
                         let remaining: String = line[cursor_pos..].chars().collect();
                         print(&remaining);
                         print(" \x08");
-                        for _ in remaining.chars() { print("\x08"); }
+                        for _ in remaining.chars() {
+                            print("\x08");
+                        }
                     } else {
                         line.push(c as char);
                         cursor_pos += 1;
@@ -354,32 +408,28 @@ pub fn read_line(prompt: &str, state: Option<&ShellState>) -> Option<String> {
 
 fn complete_word(line: &str, _cursor_pos: usize, state: &ShellState) -> String {
     let words: Vec<&str> = line.split_whitespace().collect();
-    if words.is_empty() { return line.to_string(); }
+    if words.is_empty() {
+        return line.to_string();
+    }
     let last_word = words.last().unwrap();
-    if last_word.is_empty() { return line.to_string(); }
+    if last_word.is_empty() {
+        return line.to_string();
+    }
     let prefix = *last_word;
-    let paths = state.env.get("PATH").unwrap_or(String::from("/bin:/usr/bin"));
+    let paths = state
+        .env
+        .get("PATH")
+        .unwrap_or(String::from("/bin:/usr/bin"));
     let mut candidates: Vec<String> = Vec::new();
     for dir in paths.split(':') {
         let mut buf = [0u8; 8192];
         if let Ok(fd) = sc::sys_open(if dir.is_empty() { "." } else { dir }, 0) {
             if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-                let mut offset = 0;
-                while offset < n {
-                    let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                    let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                    if name_len > 0 {
-                        let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                        if let Ok(name) = core::str::from_utf8(name_bytes) {
-                            let name = name.trim_end_matches('\0');
-                            if name.starts_with(prefix) && name != "." && name != ".." {
-                                candidates.push(name.to_string());
-                            }
-                        }
+                sc::for_each_dirent64(&buf, n, |name, _| {
+                    if name.starts_with(prefix) && name != "." && name != ".." {
+                        candidates.push(name.to_string());
                     }
-                    if rec_len == 0 { break; }
-                    offset += rec_len;
-                }
+                });
             }
             let _ = sc::sys_close(fd);
         }
@@ -389,22 +439,11 @@ fn complete_word(line: &str, _cursor_pos: usize, state: &ShellState) -> String {
         let mut buf = [0u8; 8192];
         if let Ok(fd) = sc::sys_open(&home_dir, 0) {
             if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-                let mut offset = 0;
-                while offset < n {
-                    let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                    let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                    if name_len > 0 {
-                        let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                        if let Ok(name) = core::str::from_utf8(name_bytes) {
-                            let name = name.trim_end_matches('\0');
-                            if name.starts_with(prefix) && name != "." && name != ".." {
-                                candidates.push(name.to_string());
-                            }
-                        }
+                sc::for_each_dirent64(&buf, n, |name, _| {
+                    if name.starts_with(prefix) && name != "." && name != ".." {
+                        candidates.push(name.to_string());
                     }
-                    if rec_len == 0 { break; }
-                    offset += rec_len;
-                }
+                });
             }
             let _ = sc::sys_close(fd);
         }
@@ -422,7 +461,9 @@ fn complete_word(line: &str, _cursor_pos: usize, state: &ShellState) -> String {
         result
     } else if candidates.len() > 1 {
         crate::println("");
-        for c in &candidates { crate::print(&format!("{} ", c)); }
+        for c in &candidates {
+            crate::print(&format!("{} ", c));
+        }
         crate::println("");
         line.to_string()
     } else {
@@ -442,7 +483,11 @@ fn expand_ps1(ps1: &str, state: &ShellState) -> String {
     let hour24 = (epoch / 3600) % 24;
     let hour12 = {
         let h = hour24 % 12;
-        if h == 0 { 12 } else { h }
+        if h == 0 {
+            12
+        } else {
+            h
+        }
     };
     let ampm = if hour24 < 12 { "AM" } else { "PM" };
 
@@ -463,7 +508,9 @@ fn expand_ps1(ps1: &str, state: &ShellState) -> String {
                                 result.push_str("echos");
                             }
                         }
-                        Err(_) => { result.push_str("echos"); }
+                        Err(_) => {
+                            result.push_str("echos");
+                        }
                     }
                     i += 2;
                 }
@@ -477,7 +524,9 @@ fn expand_ps1(ps1: &str, state: &ShellState) -> String {
                                 result.push_str("echos");
                             }
                         }
-                        Err(_) => { result.push_str("echos"); }
+                        Err(_) => {
+                            result.push_str("echos");
+                        }
                     }
                     result.push(':');
                     result.push_str(&state.env.get("PWD").unwrap_or(String::from("/")));
@@ -534,11 +583,20 @@ fn expand_ps1(ps1: &str, state: &ShellState) -> String {
                     i += 2;
                 }
                 's' => {
-                    result.push_str(&state.env.get("_shell_name").unwrap_or(String::from("echshell")));
+                    result.push_str(
+                        &state
+                            .env
+                            .get("_shell_name")
+                            .unwrap_or(String::from("echshell")),
+                    );
                     i += 2;
                 }
                 '$' => {
-                    if sc::sys_getuid() == 0 { result.push('#'); } else { result.push('$'); }
+                    if sc::sys_getuid() == 0 {
+                        result.push('#');
+                    } else {
+                        result.push('$');
+                    }
                     i += 2;
                 }
                 '\\' => {
@@ -574,7 +632,9 @@ pub extern "C" fn _start() -> ! {
     let _hostname = {
         let mut buf = [0u8; 256];
         match sc::sys_eon_get_hostname(&mut buf) {
-            Ok(n) => core::str::from_utf8(&buf[..n]).unwrap_or("echos").to_string(),
+            Ok(n) => core::str::from_utf8(&buf[..n])
+                .unwrap_or("echos")
+                .to_string(),
             Err(_) => String::from("echos"),
         }
     };
@@ -601,7 +661,9 @@ pub extern "C" fn _start() -> ! {
             scripting::run_trap_action(&mut state, "TSTP");
             continue;
         }
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         state.history.push(line.to_string());
         executor::execute_line(&mut state, line);
         if state.exit_code != 0 {

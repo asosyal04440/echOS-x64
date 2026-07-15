@@ -69,13 +69,11 @@ pub struct VoiceSelectionError {
     pub detail: String,
 }
 
-lazy_static! {
-    static ref VOICE_CATALOG: Vec<VoiceProfile> = vec![
+static VOICE_CATALOG: spin::Lazy<Vec<VoiceProfile>> = spin::Lazy::new(|| vec![
         parse_voice_profile("alex", VOICE_ALEX),
         parse_voice_profile("alicia", VOICE_ALICIA),
         parse_voice_profile("gene", VOICE_GENE),
-    ];
-}
+    ]);
 
 pub fn builtin_voices() -> &'static [VoiceProfile] {
     VOICE_CATALOG.as_slice()

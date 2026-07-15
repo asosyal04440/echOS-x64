@@ -387,11 +387,9 @@ static NEXT_PROCESS_BROKER_TICKET: AtomicU64 = AtomicU64::new(1);
 static NEXT_CAPABILITY_TOKEN_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_ADDRESS_SPACE_HANDLE: AtomicU64 = AtomicU64::new(1);
 
-lazy_static! {
-    static ref RUNTIME_COORDINATOR: Mutex<RuntimeCoordinator> =
-        Mutex::new(RuntimeCoordinator::new());
-    static ref PROCESS_BROKER: Mutex<ProcessBroker> = Mutex::new(ProcessBroker::new());
-}
+static RUNTIME_COORDINATOR: spin::Lazy<Mutex<RuntimeCoordinator>> =
+    spin::Lazy::new(|| Mutex::new(RuntimeCoordinator::new()));
+static PROCESS_BROKER: spin::Lazy<Mutex<ProcessBroker>> = spin::Lazy::new(|| Mutex::new(ProcessBroker::new()));
 
 pub fn register_launch_session(
     session: LaunchSession,

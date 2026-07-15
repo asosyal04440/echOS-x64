@@ -978,6 +978,106 @@ impl IoUring {
                 }
             }
 
+            IORING_OP_SENDMSG => {
+                let fd = match self.resolve_fd(sqe) {
+                    Ok(fd) => fd,
+                    Err(errno) => return errno,
+                };
+                let msghdr = unsafe { &*(sqe.addr as *const MsgHdrRaw) };
+                if msghdr.msg_iov.is_null() || msghdr.msg_iovlen == 0 {
+                    return -22; // -EINVAL
+                }
+                let iovecs = unsafe {
+                    core::slice::from_raw_parts(msghdr.msg_iov, msghdr.msg_iovlen)
+                };
+                let mut total = 0usize;
+                for iv in iovecs {
+                    total = total.saturating_add(iv.iov_len);
+                }
+                let mut buf = alloc::vec::Vec::with_capacity(total);
+                for iv in iovecs {
+                    if !iv.iov_base.is_null() && iv.iov_len > 0 {
+                        let s = unsafe {
+                            core::slice::from_raw_parts(iv.iov_base as *const u8, iv.iov_len)
+                        };
+                        buf.extend_from_slice(s);
+                    }
+                }
+                if !msghdr.msg_name.is_null() && msghdr.msg_namelen >= 8 {
+                    let addr_bytes = unsafe {
+                        core::slice::from_raw_parts(msghdr.msg_name as *const u8, 8)
+                    };
+                    let ip = crate::net::Ipv4Addr::from_bytes([
+                        addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7],
+                    ]);
+                    let port = u16::from_be_bytes([addr_bytes[2], addr_bytes[3]]);
+                    let addr = crate::net::SocketAddr::new(ip, crate::net::Port(port));
+                    match crate::net::udp::send_to(fd, &buf, addr) {
+                        Ok(n) => n as i32,
+                        Err(_) => -5,
+                    }
+                } else {
+                    match crate::net::socket::send(fd, &buf, 0) {
+                        Ok(n) => n as i32,
+                        Err(_) => -5,
+                    }
+                }
+            }
+
+            IORING_OP_RECVMSG => {
+                let fd = match self.resolve_fd(sqe) {
+                    Ok(fd) => fd,
+                    Err(errno) => return errno,
+                };
+                let msghdr = unsafe { &mut *(sqe.addr as *mut MsgHdrRaw) };
+                if msghdr.msg_iov.is_null() || msghdr.msg_iovlen == 0 {
+                    return -22;
+                }
+                let first = unsafe { &mut *msghdr.msg_iov };
+                if first.iov_base.is_null() || first.iov_len == 0 {
+                    return -22;
+                }
+                let buf = unsafe {
+                    core::slice::from_raw_parts_mut(first.iov_base as *mut u8, first.iov_len)
+                };
+                if !msghdr.msg_name.is_null() && msghdr.msg_namelen >= 8 {
+                    match crate::net::udp::recv_from(fd, buf) {
+                        Ok((n, src)) => {
+                            let dst_bytes = unsafe {
+                                core::slice::from_raw_parts_mut(
+                                    msghdr.msg_name as *mut u8,
+                                    msghdr.msg_namelen as usize,
+                                )
+                            };
+                            if dst_bytes.len() >= 8 {
+                                dst_bytes[0] = 2;
+                                dst_bytes[1] = 0;
+                                let pb = src.port.0.to_be_bytes();
+                                dst_bytes[2] = pb[0];
+                                dst_bytes[3] = pb[1];
+                                match src.ip {
+                                    crate::net::IpAddr::V4(ipv4) => {
+                                        let ib = ipv4.0;
+                                        dst_bytes[4] = ib[0];
+                                        dst_bytes[5] = ib[1];
+                                        dst_bytes[6] = ib[2];
+                                        dst_bytes[7] = ib[3];
+                                    }
+                                    crate::net::IpAddr::V6(_) => {}
+                                }
+                            }
+                            n as i32
+                        }
+                        Err(_) => -11,
+                    }
+                } else {
+                    match crate::net::socket::recv(fd, buf, 0) {
+                        Ok(n) => n as i32,
+                        Err(_) => -5,
+                    }
+                }
+            }
+
             IORING_OP_POLL_ADD => {
                 let fd = match self.resolve_fd(sqe) {
                     Ok(fd) => fd,
@@ -1107,6 +1207,29 @@ pub struct IoUringTimeout {
     pub ts_nsec: u64,
     pub flags: u32,
     pub count: u32,
+}
+
+/// Raw `struct iovec` (Linux ABI) — userspace'tan okumak için
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IovecRaw {
+    pub iov_base: *mut u8,
+    pub iov_len: usize,
+}
+
+/// Raw `struct msghdr` (Linux x86_64 ABI) — userspace'tan okumak için
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MsgHdrRaw {
+    pub msg_name: *mut u8,
+    pub msg_namelen: i32,
+    _pad1: u32,
+    pub msg_iov: *mut IovecRaw,
+    pub msg_iovlen: usize,
+    pub msg_control: *mut u8,
+    pub msg_controllen: usize,
+    pub msg_flags: u32,
+    _pad2: u32,
 }
 
 /// io_uring hata türleri
@@ -1340,4 +1463,159 @@ pub fn wait_cqe(fd: u32, timeout_ms: u64) -> Option<IoUringCqe> {
 /// io_uring alt sistemini başlatır.
 pub fn init() {
     crate::serial_println!("[IO_URING] Initialized");
+}
+
+// ============================================================================
+// TESTLER
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    #[test]
+    fn iovec_raw_size() {
+        assert_eq!(size_of::<IovecRaw>(), 16);
+    }
+
+    #[test]
+    fn iovec_raw_offsets() {
+        assert_eq!(offset_of!(IovecRaw, iov_base), 0);
+        assert_eq!(offset_of!(IovecRaw, iov_len), 8);
+    }
+
+    #[test]
+    fn msghdr_raw_size() {
+        assert_eq!(size_of::<MsgHdrRaw>(), 56);
+    }
+
+    #[test]
+    fn msghdr_raw_offsets() {
+        assert_eq!(offset_of!(MsgHdrRaw, msg_name), 0);
+        assert_eq!(offset_of!(MsgHdrRaw, msg_namelen), 8);
+        assert_eq!(offset_of!(MsgHdrRaw, msg_iov), 16);
+        assert_eq!(offset_of!(MsgHdrRaw, msg_iovlen), 24);
+        assert_eq!(offset_of!(MsgHdrRaw, msg_control), 32);
+        assert_eq!(offset_of!(MsgHdrRaw, msg_controllen), 40);
+        assert_eq!(offset_of!(MsgHdrRaw, msg_flags), 48);
+    }
+
+    #[test]
+    fn sendmsg_einval_on_null_iov() {
+        let mut ring = IoUring::new(4, None).unwrap();
+        let mut sqe = IoUringSqe::default();
+        sqe.opcode = IORING_OP_SENDMSG;
+        sqe.fd = 1;
+        sqe.addr = 0;
+        let result = ring.execute_op(&sqe);
+        assert_eq!(result, -22);
+    }
+
+    #[test]
+    fn recvmsg_einval_on_null_iov() {
+        let mut ring = IoUring::new(4, None).unwrap();
+        let mut sqe = IoUringSqe::default();
+        sqe.opcode = IORING_OP_RECVMSG;
+        sqe.fd = 1;
+        sqe.addr = 0;
+        let result = ring.execute_op(&sqe);
+        assert_eq!(result, -22);
+    }
+
+    #[test]
+    fn sendmsg_basic_send_invokes_send_on_bad_fd() {
+        let mut ring = IoUring::new(4, None).unwrap();
+        let data = b"hello";
+        let iovec = IovecRaw {
+            iov_base: data.as_ptr() as *mut u8,
+            iov_len: data.len(),
+        };
+        let msghdr = MsgHdrRaw {
+            msg_name: core::ptr::null_mut(),
+            msg_namelen: 0,
+            _pad1: 0,
+            msg_iov: &iovec as *const _ as *mut IovecRaw,
+            msg_iovlen: 1,
+            msg_control: core::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+            _pad2: 0,
+        };
+        let mut sqe = IoUringSqe::default();
+        sqe.opcode = IORING_OP_SENDMSG;
+        sqe.fd = 999;
+        sqe.addr = &msghdr as *const _ as u64;
+        let result = ring.execute_op(&sqe);
+        assert_eq!(result, -5);
+    }
+
+    #[test]
+    fn recvmsg_einval_on_empty_iov_len() {
+        let mut ring = IoUring::new(4, None).unwrap();
+        let mut buf = [0u8; 4];
+        let iovec = IovecRaw {
+            iov_base: buf.as_mut_ptr(),
+            iov_len: 0,
+        };
+        let msghdr = MsgHdrRaw {
+            msg_name: core::ptr::null_mut(),
+            msg_namelen: 0,
+            _pad1: 0,
+            msg_iov: &iovec as *const _ as *mut IovecRaw,
+            msg_iovlen: 1,
+            msg_control: core::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+            _pad2: 0,
+        };
+        let mut sqe = IoUringSqe::default();
+        sqe.opcode = IORING_OP_RECVMSG;
+        sqe.fd = 999;
+        sqe.addr = &msghdr as *const _ as u64;
+        let result = ring.execute_op(&sqe);
+        assert_eq!(result, -22);
+    }
+
+    #[test]
+    fn sendmsg_copies_iovec_data() {
+        let mut ring = IoUring::new(4, None).unwrap();
+        let part1 = b"hello ";
+        let part2 = b"world";
+        let iovecs = [
+            IovecRaw {
+                iov_base: part1.as_ptr() as *mut u8,
+                iov_len: part1.len(),
+            },
+            IovecRaw {
+                iov_base: part2.as_ptr() as *mut u8,
+                iov_len: part2.len(),
+            },
+        ];
+        let msghdr = MsgHdrRaw {
+            msg_name: core::ptr::null_mut(),
+            msg_namelen: 0,
+            _pad1: 0,
+            msg_iov: &iovecs as *const _ as *mut IovecRaw,
+            msg_iovlen: 2,
+            msg_control: core::ptr::null_mut(),
+            msg_controllen: 0,
+            msg_flags: 0,
+            _pad2: 0,
+        };
+        let mut sqe = IoUringSqe::default();
+        sqe.opcode = IORING_OP_SENDMSG;
+        sqe.fd = 999;
+        sqe.addr = &msghdr as *const _ as u64;
+        let result = ring.execute_op(&sqe);
+        assert_eq!(result, -5);
+    }
+
+    #[test]
+    fn opcode_constants_are_correct() {
+        assert_eq!(IORING_OP_SENDMSG, 8);
+        assert_eq!(IORING_OP_RECVMSG, 9);
+        assert_eq!(IORING_OP_SEND, 17);
+        assert_eq!(IORING_OP_RECV, 18);
+    }
 }

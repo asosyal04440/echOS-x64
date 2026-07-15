@@ -2105,6 +2105,17 @@ mod tests {
         prog_type == CUSTOM_PROG_TYPE
     }
 
+    static EBPF_TEST_EPOCH: spin::Lazy<Mutex<()>> = spin::Lazy::new(|| Mutex::new(()));
+
+    fn ebpf_test_epoch() -> spin::MutexGuard<'static, ()> {
+        let guard = EBPF_TEST_EPOCH.lock();
+        *GLOBAL_EBPF_LOADER.lock() = EbpfLoader::new();
+        EBPF_PROG_TYPE_REGISTRY.lock().clear();
+        EBPF_ATTACH_REGISTRY.lock().clear();
+        EBPF_ATTACH_FAMILY_REGISTRY.lock().clear();
+        guard
+    }
+
     fn encode_insn(opcode: u8, dst: u8, src: u8, off: i16, imm: i32) -> u64 {
         ((opcode as u64) << 56)
             | ((dst as u64) << 48)
@@ -2175,6 +2186,7 @@ mod tests {
 
     #[test]
     fn elf_loader_accepts_socket_filter_section_and_jit_runs() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 1),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2195,6 +2207,7 @@ mod tests {
 
     #[test]
     fn ingress_attach_registry_runs_jit_compiled_program() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 1),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2210,6 +2223,7 @@ mod tests {
 
     #[test]
     fn classifier_and_xdp_packet_program_types_attach_and_run() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 7),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2222,6 +2236,7 @@ mod tests {
 
     #[test]
     fn egress_reuseport_and_flow_dissector_helpers_attach_and_run() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 5),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2240,6 +2255,7 @@ mod tests {
 
     #[test]
     fn elf_loader_accepts_xdp_and_reuseport_section_names() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 9),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2273,6 +2289,7 @@ mod tests {
 
     #[test]
     fn extended_attach_family_accepts_supported_prog_types() {
+        let _epoch = ebpf_test_epoch();
         let mut loader = EbpfLoader::new();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 1),
@@ -2337,6 +2354,7 @@ mod tests {
 
     #[test]
     fn elf_loader_accepts_extended_section_families() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 3),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2367,6 +2385,7 @@ mod tests {
 
     #[test]
     fn trace_cgroup_lwt_and_sock_helpers_attach_and_run() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 11),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2405,6 +2424,7 @@ mod tests {
 
     #[test]
     fn attach_point_family_accepts_extended_namespace_paths() {
+        let _epoch = ebpf_test_epoch();
         let mut loader = EbpfLoader::new();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 13),
@@ -2443,6 +2463,7 @@ mod tests {
 
     #[test]
     fn attach_point_aliases_normalize_to_supported_canonical_hooks() {
+        let _epoch = ebpf_test_epoch();
         let mut loader = EbpfLoader::new();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 11),
@@ -2475,6 +2496,7 @@ mod tests {
 
     #[test]
     fn dynamic_prog_type_and_attach_registry_accept_custom_family() {
+        let _epoch = ebpf_test_epoch();
         register_program_type(CUSTOM_PROG_TYPE);
         register_attach_point("vendor:flow", custom_attach_accepts_custom_prog_type);
 
@@ -2497,6 +2519,7 @@ mod tests {
 
     #[test]
     fn dynamic_attach_family_registry_accepts_nested_custom_paths() {
+        let _epoch = ebpf_test_epoch();
         register_program_type(CUSTOM_PROG_TYPE);
         register_attach_family("vendor", custom_attach_family_accepts_custom_prog_type);
 
@@ -2521,6 +2544,7 @@ mod tests {
 
     #[test]
     fn wildcard_attach_family_registry_accepts_unknown_namespace_paths() {
+        let _epoch = ebpf_test_epoch();
         register_program_type(CUSTOM_PROG_TYPE);
         register_attach_family("*", custom_attach_family_accepts_custom_prog_type);
 
@@ -2545,6 +2569,7 @@ mod tests {
 
     #[test]
     fn generic_attach_fallback_accepts_unregistered_prog_type_and_attach_point() {
+        let _epoch = ebpf_test_epoch();
         const GENERIC_PROG_TYPE: u32 = 0xA300_0042;
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 29),
@@ -2567,6 +2592,7 @@ mod tests {
 
     #[test]
     fn wildcard_attachment_lookup_rehydrates_unknown_runtime_paths() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_imm_insn(BPF_ALU | BPF_MOV | BPF_K, BPF_REG_0, 0, 31),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2586,6 +2612,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_unreachable_instruction() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2599,6 +2626,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_uninitialized_register_read() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_insn(BPF_ALU | BPF_MOV | BPF_SRC_X, BPF_REG_0, BPF_REG_2, 0, 0),
             encode_insn(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
@@ -2612,6 +2640,7 @@ mod tests {
 
     #[test]
     fn verifier_rejects_stack_read_before_write() {
+        let _epoch = ebpf_test_epoch();
         let program = vec![
             encode_insn(BPF_ALU | BPF_MOV | BPF_SRC_X, BPF_REG_1, BPF_REG_10, 0, 0),
             encode_imm_insn(BPF_ALU | BPF_ADD | BPF_K, BPF_REG_1, 0, -8),

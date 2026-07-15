@@ -509,9 +509,7 @@ impl EchAudio {
 }
 
 /// Global EchAudio örneği
-lazy_static::lazy_static! {
-    static ref ECH_AUDIO: Arc<EchAudio> = Arc::new(EchAudio::new());
-}
+static ECH_AUDIO: spin::Lazy<Arc<EchAudio>> = spin::Lazy::new(|| Arc::new(EchAudio::new()));
 
 /// EchAudio'yu başlat
 pub fn init() {

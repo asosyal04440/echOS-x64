@@ -3904,6 +3904,19 @@ mod tests {
     use alloc::vec::Vec;
     use core::mem;
 
+    static USB_TEST_EPOCH: spin::Mutex<()> = spin::Mutex::new(());
+
+    fn usb_test_epoch() -> spin::MutexGuard<'static, ()> {
+        let guard = USB_TEST_EPOCH.lock();
+        *super::XHCI_CONTROLLER.lock() = None;
+        super::XHCI_RUNTIMES.lock().clear();
+        super::DEVICE_SLOTS.lock().clear();
+        super::USB_DEVICES.lock().clear();
+        super::HID_DEVICES.lock().clear();
+        super::MASS_STORAGE_DEVICES.lock().clear();
+        guard
+    }
+
     fn slot(slot_id: u8, bus: u8, device: u8, function: u8, port: u8, enabled: bool) -> DeviceSlot {
         DeviceSlot {
             slot_id,
@@ -3937,6 +3950,7 @@ mod tests {
 
     #[test]
     fn trb_layout_is_dma_ready() {
+        let _epoch = usb_test_epoch();
         assert_eq!(mem::size_of::<super::Trb>(), 16);
         assert_eq!(mem::align_of::<super::Trb>(), 16);
         assert_eq!(mem::align_of::<super::ErstEntry>(), 64);
@@ -3944,6 +3958,7 @@ mod tests {
 
     #[test]
     fn build_control_transfer_trbs_for_in_data_sets_out_status_stage() {
+        let _epoch = usb_test_epoch();
         let setup = UsbSetupPacket {
             request_type: 0x80,
             request: 0x06,
@@ -3963,6 +3978,7 @@ mod tests {
 
     #[test]
     fn build_control_transfer_trbs_for_out_data_sets_in_status_stage() {
+        let _epoch = usb_test_epoch();
         let setup = UsbSetupPacket {
             request_type: 0x21,
             request: 0x09,
@@ -3978,11 +3994,8 @@ mod tests {
 
     #[test]
     fn submit_ep0_transfer_resolves_usb_address_to_slot_id() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
-        {
-            let mut runtimes = super::XHCI_RUNTIMES.lock();
-            runtimes.clear();
-        }
         let mut control_ring = TransferRing::new(16);
         control_ring.phys = 0x2000;
         let trbs = build_control_transfer_trbs(
@@ -4024,6 +4037,7 @@ mod tests {
 
     #[test]
     fn configuration_parser_preserves_interface_endpoints() {
+        let _epoch = usb_test_epoch();
         let config_desc = [
             9, 2, 34, 0, 1, 1, 0, 0x80, 50, // configuration
             9, 4, 0, 0, 2, 3, 1, 1, 0, // interface
@@ -4043,6 +4057,7 @@ mod tests {
 
     #[test]
     fn endpoint_id_formula_matches_xhci_dci_layout() {
+        let _epoch = usb_test_epoch();
         let interrupt_in = UsbEndpoint {
             address: 0x81,
             direction: UsbDirection::In,
@@ -4063,6 +4078,7 @@ mod tests {
 
     #[test]
     fn xhci_interrupt_interval_encoding_follows_speed_rules() {
+        let _epoch = usb_test_epoch();
         let mut endpoint = UsbEndpoint {
             address: 0x81,
             direction: UsbDirection::In,
@@ -4082,6 +4098,7 @@ mod tests {
 
     #[test]
     fn hid_device_discovers_interrupt_endpoint_addresses() {
+        let _epoch = usb_test_epoch();
         let device = UsbDevice {
             address: 4,
             port: 2,
@@ -4122,6 +4139,7 @@ mod tests {
 
     #[test]
     fn hid_send_output_uses_control_transfer_and_fails_without_controller() {
+        let _epoch = usb_test_epoch();
         let mut hid = HidDevice::new(
             UsbDevice {
                 address: 4,
@@ -4145,6 +4163,7 @@ mod tests {
 
     #[test]
     fn port_status_change_event_decodes_xhci_port_id_field() {
+        let _epoch = usb_test_epoch();
         let trb = super::Trb {
             dword0: 3u32 << 24,
             dword1: 0,
@@ -4164,6 +4183,7 @@ mod tests {
 
     #[test]
     fn port_recovery_snapshot_classifies_remove_and_reenumerate() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         {
             let mut slots = super::DEVICE_SLOTS.lock();
@@ -4186,10 +4206,10 @@ mod tests {
 
     #[test]
     fn teardown_usb_port_purges_slot_and_class_caches() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         {
             let mut runtimes = super::XHCI_RUNTIMES.lock();
-            runtimes.clear();
             let mut rings = super::XhciRings::new(16, 16);
             rings.command_phys = 0x8000;
             let mut dcbaa = vec![0u64; 9].into_boxed_slice();
@@ -4290,6 +4310,7 @@ mod tests {
 
     #[test]
     fn normal_bulk_transfer_submission_queues_ioc_trb_on_endpoint_ring() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         let endpoint = UsbEndpoint {
             address: 0x02,
@@ -4337,11 +4358,11 @@ mod tests {
 
     #[test]
     fn transfer_wait_reports_port_teardown_cancellation() {
+        let _epoch = usb_test_epoch();
         let mut ctrl = ctrl();
         ctrl.mmio_base = 0x1000;
         {
             let mut runtimes = super::XHCI_RUNTIMES.lock();
-            runtimes.clear();
             runtimes.push(super::XhciControllerRuntime {
                 bus: ctrl.bus,
                 device: ctrl.device,
@@ -4368,6 +4389,7 @@ mod tests {
 
     #[test]
     fn transfer_residual_is_subtracted_from_requested_length() {
+        let _epoch = usb_test_epoch();
         assert_eq!(transfer_completed_len(512, 0), Ok(512));
         assert_eq!(transfer_completed_len(512, 12), Ok(500));
         assert_eq!(
@@ -4378,6 +4400,7 @@ mod tests {
 
     #[test]
     fn complete_interrupt_transfer_moves_buffer_to_completed_queue() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         let endpoint = UsbEndpoint {
             address: 0x81,
@@ -4420,6 +4443,7 @@ mod tests {
 
     #[test]
     fn interrupt_transfer_in_consumes_completed_report_before_queueing() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         *super::XHCI_CONTROLLER.lock() = Some(ctrl.clone());
         let endpoint = UsbEndpoint {
@@ -4477,10 +4501,10 @@ mod tests {
 
     #[test]
     fn event_ring_consumes_hardware_written_command_completion() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         {
             let mut runtimes = super::XHCI_RUNTIMES.lock();
-            runtimes.clear();
             let mut rings = super::XhciRings::new(16, 16);
             rings.event_phys = 0x4000;
             rings.event.segment.trbs[0] = super::Trb {
@@ -4513,11 +4537,11 @@ mod tests {
 
     #[test]
     fn transfer_completion_wait_rejects_wrong_endpoint_identity() {
+        let _epoch = usb_test_epoch();
         let mut ctrl = ctrl();
         ctrl.mmio_base = 0x1000;
         {
             let mut runtimes = super::XHCI_RUNTIMES.lock();
-            runtimes.clear();
             runtimes.push(super::XhciControllerRuntime {
                 bus: ctrl.bus,
                 device: ctrl.device,
@@ -4546,10 +4570,10 @@ mod tests {
 
     #[test]
     fn publish_slot_output_context_updates_dcbaa_slot_entry() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         {
             let mut runtimes = super::XHCI_RUNTIMES.lock();
-            runtimes.clear();
             runtimes.push(super::XhciControllerRuntime {
                 bus: ctrl.bus,
                 device: ctrl.device,
@@ -4571,6 +4595,7 @@ mod tests {
 
     #[test]
     fn controller_slot_id_reuses_existing_port_mapping() {
+        let _epoch = usb_test_epoch();
         let ctrl = ctrl();
         let slots = vec![slot(3, 0, 20, 0, 2, true)];
         assert_eq!(controller_slot_id(&slots, &ctrl, 2).unwrap(), 3);
@@ -4578,6 +4603,7 @@ mod tests {
 
     #[test]
     fn controller_slot_id_picks_first_free_slot_per_controller() {
+        let _epoch = usb_test_epoch();
         let mut ctrl = ctrl();
         ctrl.max_slots = 4;
         let slots = vec![
@@ -4590,6 +4616,7 @@ mod tests {
 
     #[test]
     fn controller_slot_id_fails_when_controller_slots_are_exhausted() {
+        let _epoch = usb_test_epoch();
         let mut ctrl = ctrl();
         ctrl.max_slots = 2;
         let slots = vec![slot(1, 0, 20, 0, 1, true), slot(2, 0, 20, 0, 2, true)];

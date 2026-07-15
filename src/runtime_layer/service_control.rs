@@ -500,6 +500,7 @@ impl NetworkBrokerError {
                 crate::net::NetError::InvalidPacket => NetworkBrokerErrorKind::InvalidPacket,
                 crate::net::NetError::InvalidFd => NetworkBrokerErrorKind::InvalidFd,
                 crate::net::NetError::InvalidParam => NetworkBrokerErrorKind::InvalidParam,
+                crate::net::NetError::InvalidArg => NetworkBrokerErrorKind::InvalidParam,
                 crate::net::NetError::ChecksumError => NetworkBrokerErrorKind::ChecksumError,
                 crate::net::NetError::Timeout => NetworkBrokerErrorKind::Timeout,
                 crate::net::NetError::ConnectionRefused => {

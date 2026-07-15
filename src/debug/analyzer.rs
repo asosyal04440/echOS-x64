@@ -335,7 +335,7 @@ macro_rules! trace {
     ($($arg:tt)*) => {
         $crate::debug::analyzer::log(
             $crate::debug::analyzer::LogLevel::Trace,
-            format_args!($($arg)*),
+            format_args!("[{}ms] {}", $crate::cpu::tsc::read_ms(), format_args!($($arg)*)),
             file!(),
             line!(),
             module_path!(),
@@ -359,7 +359,7 @@ macro_rules! log_debug {
     ($($arg:tt)*) => {
         $crate::debug::analyzer::log(
             $crate::debug::analyzer::LogLevel::Debug,
-            format_args!($($arg)*),
+            format_args!("[{}ms] {}", $crate::cpu::tsc::read_ms(), format_args!($($arg)*)),
             file!(),
             line!(),
             module_path!(),
@@ -373,7 +373,7 @@ macro_rules! log_info {
     ($($arg:tt)*) => {
         $crate::debug::analyzer::log(
             $crate::debug::analyzer::LogLevel::Info,
-            format_args!($($arg)*),
+            format_args!("[{}ms] {}", $crate::cpu::tsc::read_ms(), format_args!($($arg)*)),
             file!(),
             line!(),
             module_path!(),
@@ -387,7 +387,7 @@ macro_rules! log_warn {
     ($($arg:tt)*) => {
         $crate::debug::analyzer::log(
             $crate::debug::analyzer::LogLevel::Warn,
-            format_args!($($arg)*),
+            format_args!("[{}ms] {}", $crate::cpu::tsc::read_ms(), format_args!($($arg)*)),
             file!(),
             line!(),
             module_path!(),
@@ -401,10 +401,67 @@ macro_rules! log_error {
     ($($arg:tt)*) => {
         $crate::debug::analyzer::log(
             $crate::debug::analyzer::LogLevel::Error,
-            format_args!($($arg)*),
+            format_args!("[{}ms] {}", $crate::cpu::tsc::read_ms(), format_args!($($arg)*)),
             file!(),
             line!(),
             module_path!(),
         );
     };
+}
+
+/// Build a JSON-like structured message string from key=value pairs.
+pub fn format_json_msg(base: &str, pairs: &[(&str, &str)]) -> String {
+    let mut msg = String::from(base);
+    msg.push_str(" {");
+    for (i, (key, val)) in pairs.iter().enumerate() {
+        if i > 0 {
+            msg.push_str(", ");
+        }
+        msg.push_str(key);
+        msg.push('=');
+        msg.push_str(val);
+    }
+    msg.push_str(" }");
+    msg
+}
+
+/// Makro: JSON benzeri yapılandırılmış log kaydı oluşturur.
+/// `fmt` mesaj metni, ardından `key: value` çiftleri gelir.
+///
+/// # Kullanım
+/// ```ignore
+/// log_json!(LogLevel::Info, "request", method: "GET", status: 200);
+/// // Çıktı: [1234ms] [INFO 5] request { method=GET, status=200 }
+/// ```
+#[macro_export]
+macro_rules! log_json {
+    ($lvl:expr, $fmt:expr $(, $key:ident : $val:expr)* $(,)?) => {
+        $crate::debug::analyzer::log(
+            $lvl,
+            format_args!("{}", $crate::debug::analyzer::format_json_msg(
+                $fmt,
+                &[$( (stringify!($key), &::alloc::format!("{}", $val)) ),*]
+            )),
+            file!(),
+            line!(),
+            module_path!(),
+        );
+    };
+}
+
+/// Halka tampondaki tüm kayıtları seri porta döker (flush).
+pub fn flush_logs() {
+    let snapshot = LOG_RING.lock().snapshot();
+    if snapshot.is_empty() {
+        return;
+    }
+    for entry in &snapshot {
+        crate::serial_println!(
+            "[{}ms] [{}] {}: {}",
+            crate::cpu::tsc::read_ms(),
+            level_prefix(entry.level),
+            entry.module,
+            entry.message
+        );
+    }
 }

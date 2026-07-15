@@ -94,9 +94,7 @@ impl PsiState {
 
 static PSI_ENABLED: AtomicBool = AtomicBool::new(true);
 
-lazy_static::lazy_static! {
-    static ref PSI: Mutex<PsiState> = Mutex::new(PsiState::new());
-}
+static PSI: spin::Lazy<Mutex<PsiState>> = spin::Lazy::new(|| Mutex::new(PsiState::new()));
 
 pub fn init(enabled: bool) {
     PSI_ENABLED.store(enabled, Ordering::SeqCst);

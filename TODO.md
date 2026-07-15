@@ -122,10 +122,12 @@ Not:
   - [src/net/netdev.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/net/netdev.rs)
   - [src/net/mod.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/net/mod.rs)
   - [src/drivers/virtio_net.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/drivers/virtio_net.rs)
+  - [src/net/zero_copy.rs](C:/Users/Bahadir/Desktop/dersler_ve_projeler/echOS/src/net/zero_copy.rs)
 - Kapanan kapsam:
   - varsayilan interface secimi artik loopback-oncelikli degil
   - transport/netdev truthfulness shell'e yansitildi
   - gercek aygit ile loopback ayrimi capability matrix'e baglandi
+  - packet buffer yonetimi (netmem, Device Memory TCP, MSG_ZEROCOPY) 28 test + 0 compile hatasi ile kapandi
 
 ### 1.2 DHCP / DNS / TCP / HTTP cekirdegi
 - Durum: `Verified`

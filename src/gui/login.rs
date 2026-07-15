@@ -753,9 +753,7 @@ pub enum LoginEvent {
     Lock,
 }
 
-lazy_static::lazy_static! {
-    static ref LOGIN: Mutex<LoginScreen> = Mutex::new(LoginScreen::new(1920, 1080));
-}
+static LOGIN: spin::Lazy<Mutex<LoginScreen>> = spin::Lazy::new(|| Mutex::new(LoginScreen::new(1920, 1080)));
 
 pub fn init(width: usize, height: usize) {
     let mut login = LOGIN.lock();

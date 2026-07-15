@@ -101,6 +101,34 @@ pub struct DmaBuffer {
     pub size: usize,
 }
 
+/// Scatter/gather DMA fragment view.
+///
+/// Her parça fiziksel olarak contiguous olmalıdır; parça dizisi tek ağ paketi
+/// olarak yayınlanır ve TX completion gelene kadar caller sahipliği korur.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DmaSlice {
+    /// Sanal adres (opsiyonel kernel mapping; 0 olabilir)
+    pub vaddr: usize,
+    /// Fiziksel/DMA adresi
+    pub paddr: u64,
+    /// Fragment uzunluğu
+    pub len: usize,
+}
+
+impl DmaSlice {
+    pub const fn new(vaddr: usize, paddr: u64, len: usize) -> Self {
+        Self { vaddr, paddr, len }
+    }
+
+    pub const fn from_buffer(buffer: &DmaBuffer, len: usize) -> Self {
+        Self {
+            vaddr: buffer.vaddr,
+            paddr: buffer.paddr,
+            len,
+        }
+    }
+}
+
 // ────────────────────────────────────────────────────────────
 // TIER 1 Async Trait: Block Device (NVMe)
 // ────────────────────────────────────────────────────────────
@@ -201,6 +229,23 @@ pub trait AsyncNetDevice: Send + Sync {
     /// - `dma_buf`: Gönderilecek paket verisi (Ethernet frame dahil)
     /// - `len`: Paket uzunluğu (byte)
     fn submit_tx(&self, dma_buf: &DmaBuffer, len: usize) -> Result<SubmissionToken, AsyncIoError>;
+
+    /// Scatter/gather asenkron paket gönderimi.
+    ///
+    /// Fragment'lar tek Ethernet frame'e aittir. SG desteklemeyen sürücüler tek
+    /// fragment için `submit_tx`, çoklu fragment için `NotSupported` döndürür.
+    fn submit_tx_sg(&self, fragments: &[DmaSlice]) -> Result<SubmissionToken, AsyncIoError> {
+        if fragments.len() != 1 {
+            return Err(AsyncIoError::NotSupported);
+        }
+        let frag = fragments[0];
+        let dma_buf = DmaBuffer {
+            vaddr: frag.vaddr,
+            paddr: frag.paddr,
+            size: frag.len,
+        };
+        self.submit_tx(&dma_buf, frag.len)
+    }
 
     /// RX (alım) descriptor ring'inden paket al (non-blocking)
     ///

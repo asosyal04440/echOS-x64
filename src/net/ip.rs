@@ -50,6 +50,7 @@ use super::{local_ip, Ipv4Addr, NetError};
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::Ordering;
 use spin::Mutex;
 
 // ============================================================================
@@ -468,6 +469,7 @@ pub fn compute_checksum(data: &[u8]) -> u16 {
 /// 2. Hedef IP bizim mi? (unicast, broadcast veya multicast)
 /// 3. Protokol alanına göre ICMP, TCP veya UDP'ye yönlendir
 pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
+    super::NET_COUNTERS.ip.in_receives.fetch_add(1, Ordering::Relaxed);
     let mut filtered_buf = data.to_vec();
     let prerouting_verdict = super::netfilter::process_ipv4_packet(
         &mut filtered_buf,
@@ -476,10 +478,17 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
         None,
     )?;
     if prerouting_verdict == super::netfilter::NF_DROP {
+        super::NET_COUNTERS.ip.in_discards.fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
 
-    let mut packet = Ipv4Packet::parse(&filtered_buf)?;
+    let mut packet = match Ipv4Packet::parse(&filtered_buf) {
+        Ok(p) => p,
+        Err(e) => {
+            super::NET_COUNTERS.ip.in_hdr_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+    };
 
     // ── Source Route Rejection (RFC 7126) ──
     // IHL > 5 demek IP seçenekleri mevcut; LSRR (0x83) ve SSRR (0x89) güvenlik riski.
@@ -504,6 +513,7 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
                     "[IP] Source route option 0x{:02X} rejected (RFC 7126)",
                     opt_type
                 );
+                super::NET_COUNTERS.ip.in_discards.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
             // Diğer seçenekler: uzunluk alanını oku ve atla
@@ -534,8 +544,8 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
                 packet.header.src,
                 packet.header.dst
             );
-            // ICMP Time Exceeded (type 11) gönder — traceroute için gerekli
             send_icmp_time_exceeded(&packet.header, &fwd_data[..20]);
+            super::NET_COUNTERS.ip.in_discards.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         fwd_data[8] = ttl - 1;
@@ -553,6 +563,7 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
             None,
         )?;
         if forward_verdict == super::netfilter::NF_DROP {
+            super::NET_COUNTERS.ip.in_addr_errors.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         return Ok(());
@@ -589,13 +600,14 @@ pub fn process_packet(data: &[u8]) -> Result<(), NetError> {
         None,
     )?;
     if local_in_verdict == super::netfilter::NF_DROP {
+        super::NET_COUNTERS.ip.in_discards.fetch_add(1, Ordering::Relaxed);
         return Ok(());
     }
     packet = Ipv4Packet::parse(&filtered_buf)?;
 
     super::socket::deliver_raw_ipv4(&filtered_buf, &packet.header);
 
-    // Parçalanmamış paket — doğrudan protokol dağıtımı
+    super::NET_COUNTERS.ip.in_delivers.fetch_add(1, Ordering::Relaxed);
     dispatch_protocol(&packet.header, packet.payload)?;
     Ok(())
 }
@@ -618,7 +630,7 @@ fn dispatch_protocol(header: &Ipv4Header, payload: &[u8]) -> Result<(), NetError
             super::udp::process_packet(&pkt)?;
         }
         _ => {
-            // Unknown protocol
+            super::NET_COUNTERS.ip.in_unknown_protos.fetch_add(1, Ordering::Relaxed);
         }
     }
     Ok(())
@@ -711,8 +723,13 @@ pub fn send_icmp_echo_request(
     let mut ip_buf = vec![0u8; 1500];
     let len = build_packet(dest, IpProtocol::ICMP, &icmp_buf, &mut ip_buf)?;
     match super::arp::send_to_ip(dest, &ip_buf[..len]) {
-        Ok(()) | Err(NetError::WouldBlock) => {}
-        Err(err) => return Err(err),
+        Ok(()) | Err(NetError::WouldBlock) => {
+            super::NET_COUNTERS.icmp.out_msgs.fetch_add(1, Ordering::Relaxed);
+        }
+        Err(err) => {
+            super::NET_COUNTERS.icmp.out_errors.fetch_add(1, Ordering::Relaxed);
+            return Err(err);
+        }
     }
 
     ICMP_ECHO_OUTSTANDING.lock().insert(
@@ -799,6 +816,7 @@ pub fn send_icmp_time_exceeded(orig_ip_hdr: &Ipv4Header, orig_payload: &[u8]) {
     match build_packet(orig_ip_hdr.src, IpProtocol::ICMP, &icmp_buf, &mut ip_buf) {
         Ok(len) => match super::arp::send_to_ip(orig_ip_hdr.src, &ip_buf[..len]) {
             Ok(()) | Err(NetError::WouldBlock) => {
+                super::NET_COUNTERS.icmp.out_msgs.fetch_add(1, Ordering::Relaxed);
                 crate::serial_println!(
                     "[ICMP] Time Exceeded sent to {} (orig src: {})",
                     orig_ip_hdr.src,
@@ -806,18 +824,22 @@ pub fn send_icmp_time_exceeded(orig_ip_hdr: &Ipv4Header, orig_payload: &[u8]) {
                 );
             }
             Err(e) => {
+                super::NET_COUNTERS.icmp.out_errors.fetch_add(1, Ordering::Relaxed);
                 crate::serial_println!("[ICMP] Failed to send Time Exceeded: {:?}", e);
             }
         },
         Err(e) => {
+            super::NET_COUNTERS.icmp.out_errors.fetch_add(1, Ordering::Relaxed);
             crate::serial_println!("[ICMP] Failed to build Time Exceeded packet: {:?}", e);
         }
     }
 }
 
 pub fn icmp_process(packet: &Ipv4Packet) -> Result<(), NetError> {
+    super::NET_COUNTERS.icmp.in_msgs.fetch_add(1, Ordering::Relaxed);
     if packet.payload.len() < 8 {
         crate::serial_println!("[ICMP] Paket çok kısa: {} bayt", packet.payload.len());
+        super::NET_COUNTERS.icmp.in_errors.fetch_add(1, Ordering::Relaxed);
         return Err(NetError::InvalidPacket);
     }
 
@@ -855,8 +877,13 @@ pub fn icmp_process(packet: &Ipv4Packet) -> Result<(), NetError> {
         )?;
 
         match super::arp::send_to_ip(packet.header.src, &ip_buf[..len]) {
-            Ok(()) | Err(NetError::WouldBlock) => {}
-            Err(err) => return Err(err),
+            Ok(()) | Err(NetError::WouldBlock) => {
+                super::NET_COUNTERS.icmp.out_msgs.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(err) => {
+                super::NET_COUNTERS.icmp.out_errors.fetch_add(1, Ordering::Relaxed);
+                return Err(err);
+            }
         }
 
         crate::serial_println!("[ICMP] Echo Reply sent to {}", packet.header.src);

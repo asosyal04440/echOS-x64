@@ -358,16 +358,16 @@ mod tests {
         data[80..84].copy_from_slice(&128u32.to_le_bytes());
         data[84..88].copy_from_slice(&128u32.to_le_bytes());
 
+        // Header CRC covers the partition-entry-array CRC field, so finalize it first.
+        let entries_crc = crc32(&data[block_size..]);
+        data[88..92].copy_from_slice(&entries_crc.to_le_bytes());
+
         // Compute header CRC
         let mut header_buf = alloc::vec![0u8; 92];
         header_buf.copy_from_slice(&data[..92]);
         header_buf[16..20].copy_from_slice(&0u32.to_le_bytes());
         let header_crc = crc32(&header_buf);
         data[16..20].copy_from_slice(&header_crc.to_le_bytes());
-
-        // Compute partition entry array CRC
-        let entries_crc = crc32(&data[block_size..]);
-        data[88..92].copy_from_slice(&entries_crc.to_le_bytes());
 
         data
     }

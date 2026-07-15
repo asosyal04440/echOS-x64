@@ -145,6 +145,7 @@ use super::{
     allocator, cpu, drivers, ecosystem_exactness, fs, random, security, serial_print,
     serial_println, tty,
 };
+use crate::fs::FsError;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -164,7 +165,6 @@ use echos_sdk_sys::{
     MAX_SCENE_OPS, MAX_SERVICE_NOTIFICATION_ITEMS,
 };
 use lazy_static::lazy_static;
-use crate::fs::FsError;
 use rcore_fs::vfs::FsError as RcFsError;
 use rcore_fs::vfs::{FileType, INode};
 use spin::Mutex;
@@ -1272,12 +1272,12 @@ pub fn set_root_for_current(root: alloc::string::String) {
     }
 }
 
-lazy_static! {
-    pub static ref FILE_TABLE: Mutex<Vec<Option<FileState>>> = Mutex::new(vec![None; MAX_FDS]);
-    pub static ref FILE_GENERATION: Mutex<Vec<u64>> = Mutex::new(vec![0; MAX_FDS]);
-    static ref RING_TABLE: Mutex<alloc::collections::BTreeMap<usize, LockFreeIoUring>> =
-        Mutex::new(alloc::collections::BTreeMap::new());
-}
+pub static FILE_TABLE: spin::Lazy<Mutex<Vec<Option<FileState>>>> =
+    spin::Lazy::new(|| Mutex::new(vec![None; MAX_FDS]));
+pub static FILE_GENERATION: spin::Lazy<Mutex<Vec<u64>>> =
+    spin::Lazy::new(|| Mutex::new(vec![0; MAX_FDS]));
+static RING_TABLE: spin::Lazy<Mutex<alloc::collections::BTreeMap<usize, LockFreeIoUring>>> =
+    spin::Lazy::new(|| Mutex::new(alloc::collections::BTreeMap::new()));
 
 #[derive(Clone)]
 pub struct FileState {
@@ -1371,85 +1371,165 @@ fn unsupported_errno(surface: &'static str) -> usize {
 // Burada posix.rs'den user pointer'ları okuyup fs::xattr'a yönlendiriyoruz.
 // ============================================================================
 
-fn sys_setxattr(path_ptr: usize, name_ptr: usize, value_ptr: usize, size: usize, _flags: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+fn sys_setxattr(
+    path_ptr: usize,
+    name_ptr: usize,
+    value_ptr: usize,
+    size: usize,
+    _flags: usize,
+) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     if value_ptr == 0 && size == 0 {
         return fs::xattr::sys_setxattr(&path, &name, &[], _flags as i32) as usize;
     }
     let mut buf = alloc::vec![0u8; size];
-    if let Err(e) = copy_from_user(&mut buf, value_ptr) { return e; }
+    if let Err(e) = copy_from_user(&mut buf, value_ptr) {
+        return e;
+    }
     fs::xattr::sys_setxattr(&path, &name, &buf, _flags as i32) as usize
 }
 
-fn sys_lsetxattr(path_ptr: usize, name_ptr: usize, value_ptr: usize, size: usize, _flags: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+fn sys_lsetxattr(
+    path_ptr: usize,
+    name_ptr: usize,
+    value_ptr: usize,
+    size: usize,
+    _flags: usize,
+) -> usize {
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let mut buf = alloc::vec![0u8; size];
-    if let Err(e) = copy_from_user(&mut buf, value_ptr) { return e; }
+    if let Err(e) = copy_from_user(&mut buf, value_ptr) {
+        return e;
+    }
     fs::xattr::sys_lsetxattr(&path, &name, &buf, _flags as i32) as usize
 }
 
-fn sys_fsetxattr(fd: usize, name_ptr: usize, value_ptr: usize, size: usize, _flags: usize) -> usize {
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+fn sys_fsetxattr(
+    fd: usize,
+    name_ptr: usize,
+    value_ptr: usize,
+    size: usize,
+    _flags: usize,
+) -> usize {
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let mut buf = alloc::vec![0u8; size];
-    if let Err(e) = copy_from_user(&mut buf, value_ptr) { return e; }
+    if let Err(e) = copy_from_user(&mut buf, value_ptr) {
+        return e;
+    }
     fs::xattr::sys_fsetxattr(fd as i32, &name, &buf, _flags as i32) as usize
 }
 
 fn sys_getxattr(path_ptr: usize, name_ptr: usize, buf_ptr: usize, size: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let mut user_buf = alloc::vec![0u8; size];
     let ret = fs::xattr::sys_getxattr(&path, &name, &mut user_buf);
-    if ret < 0 { return ret as usize; }
+    if ret < 0 {
+        return ret as usize;
+    }
     if buf_ptr != 0 && ret > 0 {
-        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) {
+            return e;
+        }
     }
     ret as usize
 }
 
 fn sys_lgetxattr(path_ptr: usize, name_ptr: usize, buf_ptr: usize, size: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let mut user_buf = alloc::vec![0u8; size];
     let ret = fs::xattr::sys_lgetxattr(&path, &name, &mut user_buf);
-    if ret < 0 { return ret as usize; }
+    if ret < 0 {
+        return ret as usize;
+    }
     if buf_ptr != 0 && ret > 0 {
-        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) {
+            return e;
+        }
     }
     ret as usize
 }
 
 fn sys_fgetxattr(fd: usize, name_ptr: usize, buf_ptr: usize, size: usize) -> usize {
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     let mut user_buf = alloc::vec![0u8; size];
     let ret = fs::xattr::sys_fgetxattr(fd as i32, &name, &mut user_buf);
-    if ret < 0 { return ret as usize; }
+    if ret < 0 {
+        return ret as usize;
+    }
     if buf_ptr != 0 && ret > 0 {
-        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) {
+            return e;
+        }
     }
     ret as usize
 }
 
 fn sys_listxattr(path_ptr: usize, buf_ptr: usize, size: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     let mut user_buf = alloc::vec![0u8; size];
     let ret = fs::xattr::sys_listxattr(&path, &mut user_buf);
-    if ret < 0 { return ret as usize; }
+    if ret < 0 {
+        return ret as usize;
+    }
     if buf_ptr != 0 && ret > 0 {
-        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) {
+            return e;
+        }
     }
     ret as usize
 }
 
 fn sys_llistxattr(path_ptr: usize, buf_ptr: usize, size: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     let mut user_buf = alloc::vec![0u8; size];
     let ret = fs::xattr::sys_llistxattr(&path, &mut user_buf);
-    if ret < 0 { return ret as usize; }
+    if ret < 0 {
+        return ret as usize;
+    }
     if buf_ptr != 0 && ret > 0 {
-        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) {
+            return e;
+        }
     }
     ret as usize
 }
@@ -1457,27 +1537,46 @@ fn sys_llistxattr(path_ptr: usize, buf_ptr: usize, size: usize) -> usize {
 fn sys_flistxattr(fd: usize, buf_ptr: usize, size: usize) -> usize {
     let mut user_buf = alloc::vec![0u8; size];
     let ret = fs::xattr::sys_flistxattr(fd as i32, &mut user_buf);
-    if ret < 0 { return ret as usize; }
+    if ret < 0 {
+        return ret as usize;
+    }
     if buf_ptr != 0 && ret > 0 {
-        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) { return e; }
+        if let Err(e) = write_user_slice(buf_ptr, &user_buf[..ret as usize]) {
+            return e;
+        }
     }
     ret as usize
 }
 
 fn sys_removexattr(path_ptr: usize, name_ptr: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     fs::xattr::sys_removexattr(&path, &name) as usize
 }
 
 fn sys_lremovexattr(path_ptr: usize, name_ptr: usize) -> usize {
-    let path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     fs::xattr::sys_lremovexattr(&path, &name) as usize
 }
 
 fn sys_fremovexattr(fd: usize, name_ptr: usize) -> usize {
-    let name = match read_user_cstring(name_ptr, 256) { Ok(n) => n, Err(e) => return e };
+    let name = match read_user_cstring(name_ptr, 256) {
+        Ok(n) => n,
+        Err(e) => return e,
+    };
     fs::xattr::sys_fremovexattr(fd as i32, &name) as usize
 }
 
@@ -1492,7 +1591,10 @@ fn sys_getdents_compat(fd: usize, dirp_ptr: usize, count: usize) -> usize {
 
 /// utime(2) → basit time ayarlama
 fn sys_utime(path_ptr: usize, times_ptr: usize) -> usize {
-    let _path = match read_user_cstring(path_ptr, 4096) { Ok(p) => p, Err(e) => return e };
+    let _path = match read_user_cstring(path_ptr, 4096) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
     // times_ptr == 0 → mevcut zamanı kullan (atime=mtime=now)
     // aksi halde [actime, modtime] Timespec yapısı
     if times_ptr == 0 {
@@ -1500,7 +1602,9 @@ fn sys_utime(path_ptr: usize, times_ptr: usize) -> usize {
     } else {
         // Timespec yapısını oku: 2 * i64 = 16 bayt
         let mut times = [0i64; 2];
-        if let Err(e) = copy_from_user_slice(&mut times, times_ptr) { return e; }
+        if let Err(e) = copy_from_user_slice(&mut times, times_ptr) {
+            return e;
+        }
         let _actime = times[0];
         let _modtime = times[1];
         0
@@ -1515,7 +1619,9 @@ fn sys_adjtimex(buf_ptr: usize) -> usize {
     // Timex yapısı: mode(4) + status(4) + offset(8) + freq(8) + ...
     // Basitçe mode oku ve SUCCESS (NTP_SYNC) döndür
     let mut mode = [0i32; 1];
-    if let Err(e) = copy_from_user_slice(&mut mode, buf_ptr) { return e; }
+    if let Err(e) = copy_from_user_slice(&mut mode, buf_ptr) {
+        return e;
+    }
     // Timex modes: ADJ_OFFSET=0x0001, ADJ_FREQUENCY=0x0002, ADJ_STATUS=0x0004, ...
     // Timex states: TIME_OK=0, TIME_WARN=1, TIME_ERROR=2
     let state: i32 = 0; // TIME_OK
@@ -1565,7 +1671,13 @@ fn sys_epoll_wait_old(epfd: usize, events_ptr: usize, maxevents: usize, timeout:
 }
 
 /// remap_file_pages(2) → mmap ile aynı (deprecated since 3.16)
-fn sys_remap_file_pages(start: usize, size: usize, _prot: usize, pgoff: usize, _flags: usize) -> usize {
+fn sys_remap_file_pages(
+    start: usize,
+    size: usize,
+    _prot: usize,
+    pgoff: usize,
+    _flags: usize,
+) -> usize {
     // remap_file_pages() artık mmap ile aynı davranışı sergiler
     sys_mmap(start, size, 0, 0x08 /* MAP_SHARED */, pgoff, 0)
 }
@@ -1605,7 +1717,13 @@ fn sys_get_kernel_syms(_table_ptr: usize) -> usize {
 }
 
 /// query_module(2) → removed from kernel (ENOSYS)
-fn sys_query_module(_name_ptr: usize, _which: usize, _buf_ptr: usize, _buflen: usize, _ret_len_ptr: usize) -> usize {
+fn sys_query_module(
+    _name_ptr: usize,
+    _which: usize,
+    _buf_ptr: usize,
+    _buflen: usize,
+    _ret_len_ptr: usize,
+) -> usize {
     errno(ENOSYS)
 }
 
@@ -1625,7 +1743,13 @@ fn sys_putpmsg(_fd: usize, _band_ptr: usize, _flags_ptr: usize) -> usize {
 }
 
 /// afs_syscall(2) → removed from kernel (ENOSYS)
-fn sys_afs_syscall(_syscall: usize, _arg1: usize, _arg2: usize, _arg3: usize, _arg4: usize) -> usize {
+fn sys_afs_syscall(
+    _syscall: usize,
+    _arg1: usize,
+    _arg2: usize,
+    _arg3: usize,
+    _arg4: usize,
+) -> usize {
     errno(ENOSYS)
 }
 
@@ -1877,7 +2001,9 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_TEE => sys_tee(args[0], args[1], args[2], args[3]),
         SYS_VMSPLICE => sys_vmsplice(args[0], args[1], args[2], args[3]),
         SYS_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
-        SYS_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_COPY_FILE_RANGE => {
+            sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
         SYS_MEMFD_CREATE => sys_memfd_create(args[0], args[1]),
         SYS_SELECT => sys_select(args[0], args[1], args[2], args[3], args[4]),
         SYS_SCHED_YIELD => sys_sched_yield(),
@@ -2217,8 +2343,12 @@ pub fn dispatch(number: usize, args: [usize; 6]) -> usize {
         SYS_SEMTIMEDOP => sys_semtimedop(args[0], args[1], args[2], args[3]),
 
         // Process VM
-        SYS_PROCESS_VM_READV => sys_process_vm_readv(args[0], args[1], args[2], args[3], args[4], args[5]),
-        SYS_PROCESS_VM_WRITEV => sys_process_vm_writev(args[0], args[1], args[2], args[3], args[4], args[5]),
+        SYS_PROCESS_VM_READV => {
+            sys_process_vm_readv(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
+        SYS_PROCESS_VM_WRITEV => {
+            sys_process_vm_writev(args[0], args[1], args[2], args[3], args[4], args[5])
+        }
 
         // Sistem
         SYS_SYSLOG => sys_syslog(args[0], args[1], args[2]),
@@ -2488,19 +2618,10 @@ fn sys_write(fd: usize, buf: usize, count: usize) -> usize {
                     let Some(Some(state)) = files.get(fd) else {
                         return errno(EBADF);
                     };
-                    (
-                        state.inode.clone(),
-                        state.offset,
-                        state.size,
-                        state.flags,
-                    )
+                    (state.inode.clone(), state.offset, state.size, state.flags)
                 };
                 // O_APPEND: her write öncesi offset'i EOF'a ayarla
-                let write_offset = if flags & O_APPEND != 0 {
-                    size
-                } else {
-                    offset
-                };
+                let write_offset = if flags & O_APPEND != 0 { size } else { offset };
                 let written = match fs::vfs_write_at(&inode, write_offset, bytes) {
                     Ok(value) => value,
                     Err(err) => return vfs_errno(err),
@@ -2637,7 +2758,8 @@ fn sys_read(fd: usize, buf: usize, count: usize) -> usize {
                 let mut pool = PIPE_POOL.lock();
                 match pool.get_mut(&pipe_id) {
                     Some(pipe) => {
-                        let slice = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
+                        let slice =
+                            unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, count) };
                         match pipe.pipe_read(slice) {
                             Ok(read) => read,
                             Err(e) => errno(-e as usize),
@@ -2944,9 +3066,15 @@ fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> usize {
             let files = FILE_TABLE.lock();
             if let Some(Some(_)) = files.get(fd_usize) {
                 // Dosya açık — yazma okunabilir, okuma her zaman hazır
-                if events & 0x001 != 0 { revents |= 0x001; } // POLLIN
-                if events & 0x004 != 0 { revents |= 0x004; } // POLLOUT
-                if events & 0x020 != 0 { revents |= 0x020; } // POLLHUP (eof kontrolü)
+                if events & 0x001 != 0 {
+                    revents |= 0x001;
+                } // POLLIN
+                if events & 0x004 != 0 {
+                    revents |= 0x004;
+                } // POLLOUT
+                if events & 0x020 != 0 {
+                    revents |= 0x020;
+                } // POLLHUP (eof kontrolü)
             }
         }
 
@@ -2978,13 +3106,21 @@ fn sys_poll(fds_ptr: usize, nfds: usize, timeout_ms: usize) -> usize {
             if fd_usize < 64 {
                 let files = FILE_TABLE.lock();
                 if let Some(Some(_)) = files.get(fd_usize) {
-                    if events & 0x001 != 0 { revents |= 0x001; }
-                    if events & 0x004 != 0 { revents |= 0x004; }
-                    if events & 0x020 != 0 { revents |= 0x020; }
+                    if events & 0x001 != 0 {
+                        revents |= 0x001;
+                    }
+                    if events & 0x004 != 0 {
+                        revents |= 0x004;
+                    }
+                    if events & 0x020 != 0 {
+                        revents |= 0x020;
+                    }
                 }
             }
             let _ = write_user(base + 6, revents as u16);
-            if revents != 0 { total_revents += 1; }
+            if revents != 0 {
+                total_revents += 1;
+            }
         }
     }
 
@@ -3369,8 +3505,12 @@ fn drm_mmap(len: usize, off: usize) -> usize {
 
 fn sys_pread64(fd: usize, buf: usize, count: usize, pos: usize) -> usize {
     // pread64: dosyadan belirli offset'ten oku, dosya konumunu değiştirme
-    if count == 0 { return 0; }
-    if let Err(err) = validate_user_range(buf, count) { return err; }
+    if count == 0 {
+        return 0;
+    }
+    if let Err(err) = validate_user_range(buf, count) {
+        return err;
+    }
 
     // Mevcut offset'i kaydet
     let saved_offset = {
@@ -3406,8 +3546,12 @@ fn sys_pread64(fd: usize, buf: usize, count: usize, pos: usize) -> usize {
 
 fn sys_pwrite64(fd: usize, buf: usize, count: usize, pos: usize) -> usize {
     // pwrite64: dosyaya belirli offset'e yaz, dosya konumunu değiştirme
-    if count == 0 { return 0; }
-    if let Err(err) = validate_user_range(buf, count) { return err; }
+    if count == 0 {
+        return 0;
+    }
+    if let Err(err) = validate_user_range(buf, count) {
+        return err;
+    }
 
     let saved_offset = {
         let files = FILE_TABLE.lock();
@@ -3737,7 +3881,12 @@ fn sys_access(path: usize, mode: usize) -> usize {
                     // POSIX permission check — arşiv: inodes.html i_mode
                     // owner_bits = (mode >> 6) & 0o7, group_bits = (mode >> 3) & 0o7, other_bits = mode & 0o7
                     // uid/gid eşleştirmesi ile owner/group/other kontrolü
-                    if !fs::check_permission(meta.mode as u16, meta.uid as u16, meta.gid as u16, mode as u32) {
+                    if !fs::check_permission(
+                        meta.mode as u16,
+                        meta.uid as u16,
+                        meta.gid as u16,
+                        mode as u32,
+                    ) {
                         return errno(EACCES);
                     }
                     0
@@ -4185,7 +4334,9 @@ fn sys_fsync(fd: usize) -> usize {
     // Öncelikle posix FILE_TABLE üzerinden dene
     let inode_opt = {
         let files = FILE_TABLE.lock();
-        files.get(fd).and_then(|s| s.as_ref().map(|st| st.inode.clone()))
+        files
+            .get(fd)
+            .and_then(|s| s.as_ref().map(|st| st.inode.clone()))
     };
     match inode_opt {
         Some(inode) => match inode.sync_all() {
@@ -4198,12 +4349,10 @@ fn sys_fsync(fd: usize) -> usize {
                 }
             }
         },
-        None => {
-            match fs::sys_fsync(fd) {
-                Ok(_) => 0,
-                Err(e) => vfs_errno(e),
-            }
-        }
+        None => match fs::sys_fsync(fd) {
+            Ok(_) => 0,
+            Err(e) => vfs_errno(e),
+        },
     }
 }
 
@@ -4287,7 +4436,11 @@ fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> usize {
 
         F_GETFD => {
             let cloexec = FD_CLOEXEC.lock();
-            if cloexec[fd] { FD_CLOEXEC_FLAG } else { 0 }
+            if cloexec[fd] {
+                FD_CLOEXEC_FLAG
+            } else {
+                0
+            }
         }
 
         F_SETFD => {
@@ -4325,8 +4478,10 @@ fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> usize {
                     match files.get_mut(fd) {
                         Some(Some(state)) => {
                             // APUE §3.14: Sadece O_APPEND, O_NONBLOCK, O_SYNC, O_DSYNC, O_ASYNC değiştirilebilir
-                            let preserved = state.flags & !(O_APPEND | O_NONBLOCK as usize | O_SYNC | O_DSYNC);
-                            state.flags = preserved | (arg & (O_APPEND | O_NONBLOCK as usize | O_SYNC | O_DSYNC));
+                            let preserved =
+                                state.flags & !(O_APPEND | O_NONBLOCK as usize | O_SYNC | O_DSYNC);
+                            state.flags = preserved
+                                | (arg & (O_APPEND | O_NONBLOCK as usize | O_SYNC | O_DSYNC));
                             0
                         }
                         _ => errno(EBADF),
@@ -4391,15 +4546,18 @@ fn sys_getdents64(fd: usize, dirp: usize, count: usize) -> usize {
     if count < 24 {
         return errno(EINVAL); // minimum dirent64 boyutu
     }
-    let dir_path = {
+    let (dir_path, already_read) = {
         let files = FILE_TABLE.lock();
         let Some(Some(state)) = files.get(fd) else {
             return errno(EBADF);
         };
-        state.path.clone()
+        (state.path.clone(), state.offset != 0)
     };
     if dir_path.is_empty() {
         return errno(ENOTDIR); // path olmayan fd'ler için
+    }
+    if already_read {
+        return 0;
     }
     let entries = match fs::f2fs::list_dir(&dir_path) {
         Ok(e) => e,
@@ -4472,9 +4630,8 @@ fn sys_utimensat(dirfd: usize, pathname_ptr: usize, times_ptr: usize, flags: usi
         if let Err(e) = validate_user_range(times_ptr, 2 * core::mem::size_of::<Timespec>()) {
             return e;
         }
-        let times: [Timespec; 2] = with_user_access(|| unsafe {
-            core::ptr::read(times_ptr as *const [Timespec; 2])
-        });
+        let times: [Timespec; 2] =
+            with_user_access(|| unsafe { core::ptr::read(times_ptr as *const [Timespec; 2]) });
         let atime_sec = if times[0].tv_nsec as usize == UTIME_OMIT {
             0 // unchanged — skip below
         } else if times[0].tv_nsec as usize == UTIME_NOW {
@@ -4482,9 +4639,13 @@ fn sys_utimensat(dirfd: usize, pathname_ptr: usize, times_ptr: usize, flags: usi
         } else {
             times[0].tv_sec
         };
-        let atime_nsec = if times[0].tv_nsec as usize == UTIME_OMIT { 0 }
-        else if times[0].tv_nsec as usize == UTIME_NOW { 0 }
-        else { times[0].tv_nsec };
+        let atime_nsec = if times[0].tv_nsec as usize == UTIME_OMIT {
+            0
+        } else if times[0].tv_nsec as usize == UTIME_NOW {
+            0
+        } else {
+            times[0].tv_nsec
+        };
         let mtime_sec = if times[1].tv_nsec as usize == UTIME_OMIT {
             0 // unchanged — skip below
         } else if times[1].tv_nsec as usize == UTIME_NOW {
@@ -4492,9 +4653,13 @@ fn sys_utimensat(dirfd: usize, pathname_ptr: usize, times_ptr: usize, flags: usi
         } else {
             times[1].tv_sec
         };
-        let mtime_nsec = if times[1].tv_nsec as usize == UTIME_OMIT { 0 }
-        else if times[1].tv_nsec as usize == UTIME_NOW { 0 }
-        else { times[1].tv_nsec };
+        let mtime_nsec = if times[1].tv_nsec as usize == UTIME_OMIT {
+            0
+        } else if times[1].tv_nsec as usize == UTIME_NOW {
+            0
+        } else {
+            times[1].tv_nsec
+        };
         match fs::f2fs::update_timestamps(&resolved, atime_sec, atime_nsec, mtime_sec, mtime_nsec) {
             Ok(_) => 0,
             Err(e) => vfs_errno(e),
@@ -4615,7 +4780,13 @@ fn sys_fstatfs(_fd: usize, buf: usize) -> usize {
 }
 
 /// linkat(2) — create a hard link relative to directory fds
-fn sys_linkat(olddirfd: usize, oldpath_ptr: usize, newdirfd: usize, newpath_ptr: usize, flags: usize) -> usize {
+fn sys_linkat(
+    olddirfd: usize,
+    oldpath_ptr: usize,
+    newdirfd: usize,
+    newpath_ptr: usize,
+    flags: usize,
+) -> usize {
     if flags & AT_EMPTY_PATH != 0 {
         return errno(ENOSYS);
     }
@@ -4685,7 +4856,13 @@ fn sys_syncfs(_fd: usize) -> usize {
 }
 
 /// mount(2) — mount a filesystem
-fn sys_mount(source_ptr: usize, target_ptr: usize, fstype_ptr: usize, _flags: usize, _data_ptr: usize) -> usize {
+fn sys_mount(
+    source_ptr: usize,
+    target_ptr: usize,
+    fstype_ptr: usize,
+    _flags: usize,
+    _data_ptr: usize,
+) -> usize {
     let source = match read_user_cstring(source_ptr, 4096) {
         Ok(s) => s,
         Err(e) => return e,
@@ -4728,14 +4905,20 @@ fn sys_select(
     exceptfds: usize,
     timeout: usize,
 ) -> usize {
-    if nfds > 1024 { return errno(EINVAL); }
+    if nfds > 1024 {
+        return errno(EINVAL);
+    }
 
     // timeout: { long tv_sec; long tv_usec; } — 0 = non-blocking, NULL = infinite
     let timeout_ms: usize = if timeout != 0 {
-        if let Err(e) = validate_user_range(timeout, 16) { return e; }
+        if let Err(e) = validate_user_range(timeout, 16) {
+            return e;
+        }
         let tv_sec: i64 = with_user_access(|| unsafe { *(timeout as *const i64) });
         let tv_usec: i64 = with_user_access(|| unsafe { *((timeout + 8) as *const i64) });
-        if tv_sec < 0 || tv_usec < 0 { return errno(EINVAL); }
+        if tv_sec < 0 || tv_usec < 0 {
+            return errno(EINVAL);
+        }
         (tv_sec as usize) * 1000 + (tv_usec as usize) / 1000
     } else {
         0 // non-blocking
@@ -4747,17 +4930,22 @@ fn sys_select(
     let mut total: usize = 0;
 
     let check = |fd_set: usize, nfds_inner: usize, mask: u64, check_read: bool| -> (u64, usize) {
-        if fd_set == 0 { return (0, 0); }
+        if fd_set == 0 {
+            return (0, 0);
+        }
         let mut result: u64 = 0;
         let mut count: usize = 0;
         for bit in 0..nfds_inner {
-            if mask & (1u64 << bit) == 0 { continue; }
+            if mask & (1u64 << bit) == 0 {
+                continue;
+            }
             let byte_offset = bit / 8;
             let bit_offset = bit % 8;
-            let fd_set_byte: u8 = with_user_access(|| unsafe {
-                *((fd_set + byte_offset) as *const u8)
-            });
-            if fd_set_byte & (1 << bit_offset) == 0 { continue; }
+            let fd_set_byte: u8 =
+                with_user_access(|| unsafe { *((fd_set + byte_offset) as *const u8) });
+            if fd_set_byte & (1 << bit_offset) == 0 {
+                continue;
+            }
 
             let files = FILE_TABLE.lock();
             let is_ready = match files.get(bit) {
@@ -4778,19 +4966,27 @@ fn sys_select(
         let mut m: u64 = 0;
         for i in 0..nfds.min(64) {
             let byte = with_user_access(|| unsafe { *((readfds + i / 8) as *const u8) });
-            if byte & (1 << (i % 8)) != 0 { m |= 1u64 << i; }
+            if byte & (1 << (i % 8)) != 0 {
+                m |= 1u64 << i;
+            }
         }
         m
-    } else { 0 };
+    } else {
+        0
+    };
 
     let write_mask: u64 = if writefds != 0 {
         let mut m: u64 = 0;
         for i in 0..nfds.min(64) {
             let byte = with_user_access(|| unsafe { *((writefds + i / 8) as *const u8) });
-            if byte & (1 << (i % 8)) != 0 { m |= 1u64 << i; }
+            if byte & (1 << (i % 8)) != 0 {
+                m |= 1u64 << i;
+            }
         }
         m
-    } else { 0 };
+    } else {
+        0
+    };
 
     // Basit kontrol: dosya açık mı?
     if read_mask != 0 {
@@ -4824,10 +5020,16 @@ fn sys_select(
             let mut val: u8 = 0;
             for bit in 0..8 {
                 let fd = byte_idx * 8 + bit;
-                if fd >= nfds { break; }
-                if read_ready & (1u64 << fd) != 0 { val |= 1 << bit; }
+                if fd >= nfds {
+                    break;
+                }
+                if read_ready & (1u64 << fd) != 0 {
+                    val |= 1 << bit;
+                }
             }
-            with_user_access(|| unsafe { *((readfds + byte_idx) as *mut u8) = val; });
+            with_user_access(|| unsafe {
+                *((readfds + byte_idx) as *mut u8) = val;
+            });
         }
     }
     if writefds != 0 {
@@ -4835,15 +5037,23 @@ fn sys_select(
             let mut val: u8 = 0;
             for bit in 0..8 {
                 let fd = byte_idx * 8 + bit;
-                if fd >= nfds { break; }
-                if write_ready & (1u64 << fd) != 0 { val |= 1 << bit; }
+                if fd >= nfds {
+                    break;
+                }
+                if write_ready & (1u64 << fd) != 0 {
+                    val |= 1 << bit;
+                }
             }
-            with_user_access(|| unsafe { *((writefds + byte_idx) as *mut u8) = val; });
+            with_user_access(|| unsafe {
+                *((writefds + byte_idx) as *mut u8) = val;
+            });
         }
     }
     if exceptfds != 0 {
         for byte_idx in 0..((nfds + 7) / 8) {
-            with_user_access(|| unsafe { *((exceptfds + byte_idx) as *mut u8) = 0; });
+            with_user_access(|| unsafe {
+                *((exceptfds + byte_idx) as *mut u8) = 0;
+            });
         }
     }
 
@@ -4871,7 +5081,6 @@ struct SigAction {
     sa_restorer: usize,
     sa_mask: [u64; 1],
 }
-
 
 /// rt_sigaction - examine and change a signal action (per-process)
 fn sys_rt_sigaction(sig: usize, act_ptr: usize, oldact_ptr: usize, _sigsetsize: usize) -> usize {
@@ -5014,7 +5223,10 @@ fn sys_rt_sigprocmask(how: usize, set_ptr: usize, oldset_ptr: usize, _sigsetsize
                     _ => {}
                 }
                 // SIGKILL (bit 9) ve SIGSTOP (bit 17) asla block edilemez
-                current.cold.signals.set_mask(current.cold.signals.get_mask() & !(1u64 << 8) & !(1u64 << 16));
+                current
+                    .cold
+                    .signals
+                    .set_mask(current.cold.signals.get_mask() & !(1u64 << 8) & !(1u64 << 16));
             }
         });
     }
@@ -5085,8 +5297,12 @@ fn sys_kill(pid: usize, sig: usize) -> usize {
 
 /// rt_sigqueueinfo - queue a signal and data to a process
 fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info_ptr: usize) -> usize {
-    if sig == 0 || sig > 64 { return errno(EINVAL); }
-    if pid == 0 { return errno(EINVAL); }
+    if sig == 0 || sig > 64 {
+        return errno(EINVAL);
+    }
+    if pid == 0 {
+        return errno(EINVAL);
+    }
 
     // siginfo_t yapısını oku: { int si_signo; int si_errno; int si_code; union { ... } }
     let si_signo: i32 = if info_ptr != 0 {
@@ -5094,7 +5310,9 @@ fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info_ptr: usize) -> usize {
     } else {
         sig as i32
     };
-    if si_signo != sig as i32 { return errno(EINVAL); }
+    if si_signo != sig as i32 {
+        return errno(EINVAL);
+    }
 
     // SI_QUEUE-only: sadece sendici Process si_code == SI_QUEUE (12) olabilir
     let si_code: i32 = if info_ptr != 0 {
@@ -5102,7 +5320,8 @@ fn sys_rt_sigqueueinfo(pid: usize, sig: usize, info_ptr: usize) -> usize {
     } else {
         0
     };
-    if si_code != 12 && si_code != 0 { // SI_QUEUE=12 veya SI_USER=0
+    if si_code != 12 && si_code != 0 {
+        // SI_QUEUE=12 veya SI_USER=0
         return errno(EPERM);
     }
 
@@ -5123,23 +5342,28 @@ fn sys_sigaltstack(ss_ptr: usize, old_ss_ptr: usize) -> usize {
 
     // Eski stack bilgisini yaz (eğer istenirse)
     if old_ss_ptr != 0 {
-        if let Err(e) = validate_user_range(old_ss_ptr, 24) { return e; }
+        if let Err(e) = validate_user_range(old_ss_ptr, 24) {
+            return e;
+        }
         // Şimdilik: her zaman SS_DISABLE ile yanıt ver (alt stack desteklenmiyor)
         with_user_access(|| unsafe {
-            *((old_ss_ptr) as *mut usize) = 0;     // ss_sp = NULL
-            *((old_ss_ptr + 8) as *mut i32) = 2;   // SS_DISABLE
+            *((old_ss_ptr) as *mut usize) = 0; // ss_sp = NULL
+            *((old_ss_ptr + 8) as *mut i32) = 2; // SS_DISABLE
             *((old_ss_ptr + 16) as *mut usize) = 0; // ss_size = 0
         });
     }
 
     // Yeni stack ayarla
     if ss_ptr != 0 {
-        if let Err(e) = validate_user_range(ss_ptr, 24) { return e; }
+        if let Err(e) = validate_user_range(ss_ptr, 24) {
+            return e;
+        }
         let ss_sp: usize = with_user_access(|| unsafe { *(ss_ptr as *const usize) });
         let ss_flags: i32 = with_user_access(|| unsafe { *((ss_ptr + 8) as *const i32) });
         let ss_size: usize = with_user_access(|| unsafe { *((ss_ptr + 16) as *const usize) });
 
-        if ss_flags & 2 != 0 { // SS_DISABLE
+        if ss_flags & 2 != 0 {
+            // SS_DISABLE
             return 0; // Devre dışı bırakma — zaten desteklenmiyor
         }
         if ss_sp == 0 || ss_size < 2048 {
@@ -5160,18 +5384,28 @@ fn sys_rt_sigtimedwait(
     timeout_ptr: usize,
     sigsetsize: usize,
 ) -> usize {
-    if sigsetsize != 8 { return errno(EINVAL); }
-    if set_ptr == 0 { return errno(EINVAL); }
+    if sigsetsize != 8 {
+        return errno(EINVAL);
+    }
+    if set_ptr == 0 {
+        return errno(EINVAL);
+    }
 
-    if let Err(e) = validate_user_range(set_ptr, 8) { return e; }
+    if let Err(e) = validate_user_range(set_ptr, 8) {
+        return e;
+    }
     let signal_mask: u64 = with_user_access(|| unsafe { *(set_ptr as *const u64) });
 
     // Timeout oku
     let timeout_ms: usize = if timeout_ptr != 0 {
-        if let Err(e) = validate_user_range(timeout_ptr, 16) { return e; }
+        if let Err(e) = validate_user_range(timeout_ptr, 16) {
+            return e;
+        }
         let tv_sec: i64 = with_user_access(|| unsafe { *(timeout_ptr as *const i64) });
         let tv_usec: i64 = with_user_access(|| unsafe { *((timeout_ptr + 8) as *const i64) });
-        if tv_sec < 0 || tv_usec < 0 { return errno(EINVAL); }
+        if tv_sec < 0 || tv_usec < 0 {
+            return errno(EINVAL);
+        }
         (tv_sec as usize) * 1000 + (tv_usec as usize) / 1000
     } else {
         usize::MAX // süresiz bekleme
@@ -5202,13 +5436,21 @@ fn sys_rt_sigtimedwait(
     errno(EAGAIN) // Timeout doldu, sinyal gelmedi
 }
 
-fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, new_addr: usize) -> usize {
+fn sys_mremap(
+    old_addr: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_addr: usize,
+) -> usize {
     // mremap(2): remap virtual memory address
     const MREMAP_MAYMOVE: usize = 0x01;
     const MREMAP_FIXED: usize = 0x02;
     const MREMAP_DONTUNMAP: usize = 0x04;
 
-    if old_size == 0 || new_size == 0 { return errno(EINVAL); }
+    if old_size == 0 || new_size == 0 {
+        return errno(EINVAL);
+    }
     if !kernel_memory::is_user_range(old_addr as u64, old_size as u64) {
         return errno(EINVAL);
     }
@@ -5216,8 +5458,12 @@ fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, n
     let may_move = flags & MREMAP_MAYMOVE != 0;
     let is_fixed = flags & MREMAP_FIXED != 0;
     let dont_unmap = flags & MREMAP_DONTUNMAP != 0;
-    if is_fixed && !may_move { return errno(EINVAL); }
-    if dont_unmap && !may_move { return errno(EINVAL); }
+    if is_fixed && !may_move {
+        return errno(EINVAL);
+    }
+    if dont_unmap && !may_move {
+        return errno(EINVAL);
+    }
 
     let old_addr_aligned = old_addr & !0xFFF;
     let old_end = old_addr_aligned.saturating_add(old_size);
@@ -5233,7 +5479,10 @@ fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, n
         let free_start_aligned = free_start & page_mask;
         let free_end_aligned = (free_end + kernel_memory::PAGE_SIZE as u64 - 1) & page_mask;
         if free_end_aligned > free_start_aligned {
-            kernel_memory::unmap_user_range(free_start_aligned, free_end_aligned - free_start_aligned);
+            kernel_memory::unmap_user_range(
+                free_start_aligned,
+                free_end_aligned - free_start_aligned,
+            );
         }
         return old_addr_aligned;
     }
@@ -5257,7 +5506,9 @@ fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, n
 
     // MREMAP_MAYMOVE: allocate new address
     let target = if is_fixed {
-        if new_addr == 0 { return errno(EINVAL); }
+        if new_addr == 0 {
+            return errno(EINVAL);
+        }
         let target_u64 = new_addr as u64;
         if !kernel_memory::is_user_range(target_u64, new_size as u64) {
             return errno(EINVAL);
@@ -5274,13 +5525,19 @@ fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, n
     };
 
     // Copy old VMA type to new location
-    kernel_memory::clone_vma_to(old_addr_aligned as u64, old_size as u64, target, new_size as u64);
+    kernel_memory::clone_vma_to(
+        old_addr_aligned as u64,
+        old_size as u64,
+        target,
+        new_size as u64,
+    );
 
     // Copy physical page contents
     let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
     let copy_pages = (old_size + kernel_memory::PAGE_SIZE - 1) / kernel_memory::PAGE_SIZE;
     for i in 0..copy_pages {
-        let src_virt = (old_addr_aligned as u64).wrapping_add(i as u64 * kernel_memory::PAGE_SIZE as u64);
+        let src_virt =
+            (old_addr_aligned as u64).wrapping_add(i as u64 * kernel_memory::PAGE_SIZE as u64);
         let dst_virt = target.wrapping_add(i as u64 * kernel_memory::PAGE_SIZE as u64);
         if let Some(src_phys) = kernel_memory::translate_addr(src_virt & page_mask) {
             let src_data = unsafe {
@@ -5303,8 +5560,12 @@ fn sys_mremap(old_addr: usize, old_size: usize, new_size: usize, flags: usize, n
 
 fn sys_msync(addr: usize, len: usize, flags: usize) -> usize {
     // msync(2): flush dirty pages back to filesystem
-    if len == 0 { return errno(EINVAL); }
-    if addr % kernel_memory::PAGE_SIZE != 0 { return errno(EINVAL); }
+    if len == 0 {
+        return errno(EINVAL);
+    }
+    if addr % kernel_memory::PAGE_SIZE != 0 {
+        return errno(EINVAL);
+    }
     if !kernel_memory::is_user_range(addr as u64, len as u64) {
         return errno(ENOMEM);
     }
@@ -5341,15 +5602,21 @@ fn sys_msync(addr: usize, len: usize, flags: usize) -> usize {
 
 fn sys_mincore(addr: usize, len: usize, vec: usize) -> usize {
     // mincore(2): check which pages are resident in memory
-    if len == 0 { return errno(EINVAL); }
-    if addr % kernel_memory::PAGE_SIZE != 0 { return errno(EINVAL); }
+    if len == 0 {
+        return errno(EINVAL);
+    }
+    if addr % kernel_memory::PAGE_SIZE != 0 {
+        return errno(EINVAL);
+    }
     if !kernel_memory::is_user_range(addr as u64, len as u64) {
         return errno(ENOMEM);
     }
 
     let page_count = (len + kernel_memory::PAGE_SIZE - 1) / kernel_memory::PAGE_SIZE;
     if vec != 0 {
-        if let Err(e) = validate_user_range(vec, page_count) { return e; }
+        if let Err(e) = validate_user_range(vec, page_count) {
+            return e;
+        }
         with_user_access(|| unsafe {
             core::ptr::write_bytes(vec as *mut u8, 0, page_count);
         });
@@ -5370,7 +5637,9 @@ fn sys_mincore(addr: usize, len: usize, vec: usize) -> usize {
 
 fn sys_madvise(addr: usize, len: usize, advice: usize) -> usize {
     // madvise(2): bellek kullanım ipuçları
-    if len == 0 { return errno(EINVAL); }
+    if len == 0 {
+        return errno(EINVAL);
+    }
     if !kernel_memory::is_user_range(addr as u64, len as u64) {
         return errno(EINVAL);
     }
@@ -5434,9 +5703,7 @@ fn sys_madvise(addr: usize, len: usize, advice: usize) -> usize {
             // Core dump hariç/tut — no-op
             0
         }
-        MADV_WIPEONFORK | MADV_KEEPONFORK => {
-            0
-        }
+        MADV_WIPEONFORK | MADV_KEEPONFORK => 0,
         MADV_COLD | MADV_PAGEOUT => {
             // Sayfaları soğuk/listeye al — no-op
             0
@@ -5647,20 +5914,18 @@ impl PipeRingBuffer {
 
 use spin::Mutex as PipeMutex;
 
-lazy_static! {
-    /// Pipe havuzu: pipe_id → PipeRingBuffer
-    static ref PIPE_POOL: PipeMutex<alloc::collections::BTreeMap<u32, PipeRingBuffer>> =
-        PipeMutex::new(alloc::collections::BTreeMap::new());
-    /// Sonraki pipe ID
-    static ref NEXT_PIPE_ID: core::sync::atomic::AtomicU32 =
-        core::sync::atomic::AtomicU32::new(1);
-    /// read_fd → pipe_id eşlemesi
-    static ref PIPE_READ_MAP: PipeMutex<alloc::collections::BTreeMap<usize, u32>> =
-        PipeMutex::new(alloc::collections::BTreeMap::new());
-    /// write_fd → pipe_id eşlemesi
-    static ref PIPE_WRITE_MAP: PipeMutex<alloc::collections::BTreeMap<usize, u32>> =
-        PipeMutex::new(alloc::collections::BTreeMap::new());
-}
+/// Pipe havuzu: pipe_id → PipeRingBuffer
+static PIPE_POOL: spin::Lazy<PipeMutex<alloc::collections::BTreeMap<u32, PipeRingBuffer>>> =
+    spin::Lazy::new(|| PipeMutex::new(alloc::collections::BTreeMap::new()));
+/// Sonraki pipe ID
+static NEXT_PIPE_ID: spin::Lazy<core::sync::atomic::AtomicU32> =
+    spin::Lazy::new(|| core::sync::atomic::AtomicU32::new(1));
+/// read_fd → pipe_id eşlemesi
+static PIPE_READ_MAP: spin::Lazy<PipeMutex<alloc::collections::BTreeMap<usize, u32>>> =
+    spin::Lazy::new(|| PipeMutex::new(alloc::collections::BTreeMap::new()));
+/// write_fd → pipe_id eşlemesi
+static PIPE_WRITE_MAP: spin::Lazy<PipeMutex<alloc::collections::BTreeMap<usize, u32>>> =
+    spin::Lazy::new(|| PipeMutex::new(alloc::collections::BTreeMap::new()));
 
 /// Pipe FD türü — hangi uç olduğunu belirtir
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6486,7 +6751,11 @@ fn sys_statx(dirfd: usize, pathname: usize, flags: usize, mask: usize, statxbuf:
     } else {
         (S_IFREG | MODE_FILE) as u16
     };
-    let file_size = if entry.is_dir { 0u64 } else { entry.size as u64 };
+    let file_size = if entry.is_dir {
+        0u64
+    } else {
+        entry.size as u64
+    };
     let blocks = (file_size + 511) / 512;
     let now = tasking::scheduler::get_ticks() as u64 * TICK_NS;
 
@@ -7283,7 +7552,9 @@ fn sys_ptrace(request: usize, pid: usize, addr: usize, data: usize) -> usize {
         }
         PTRACE_ATTACH => {
             // ptrace ATTACH: hedef process'i durdur ve tracer olarak bağlan
-            if pid == 0 { return errno(EINVAL); }
+            if pid == 0 {
+                return errno(EINVAL);
+            }
             if tasking::task_exists(pid) {
                 // Tracee olarak işaretle (basit:tracer_pid ayarla)
                 // Gerçek implementasyon: SIGSTOP gönder, ptrace state machine başlat
@@ -7626,7 +7897,7 @@ struct SocketState {
     local_port: u16,
     remote_port: u16,
     remote_addr: [u8; 4],
-    tcp_id: u32,  // TCP bağlantı tablosu ID'si (0 = TCP değil)
+    tcp_id: u32, // TCP bağlantı tablosu ID'si (0 = TCP değil)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -7676,13 +7947,11 @@ fn sys_socket(domain: usize, type_: usize, protocol: usize) -> usize {
 
             // Create socket state
             let tcp_id = if type_ == SOCK_STREAM {
-                super::net::tcp::create_socket(
-                    if domain == AF_INET6 {
-                        super::net::socket::AddressFamily::IPV6
-                    } else {
-                        super::net::socket::AddressFamily::IPV4
-                    },
-                )
+                super::net::tcp::create_socket(if domain == AF_INET6 {
+                    super::net::socket::AddressFamily::IPV6
+                } else {
+                    super::net::socket::AddressFamily::IPV4
+                })
             } else {
                 0
             };
@@ -7876,11 +8145,7 @@ fn sys_accept(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
             // port (network byte order)
             *((addr_ptr + 2) as *mut u16) = u16::from_be(remote_port);
             // IPv4 address
-            core::ptr::copy_nonoverlapping(
-                remote_ip.as_ptr(),
-                (addr_ptr + 4) as *mut u8,
-                4,
-            );
+            core::ptr::copy_nonoverlapping(remote_ip.as_ptr(), (addr_ptr + 4) as *mut u8, 4);
             // padding zero
             core::ptr::write_bytes((addr_ptr + 8) as *mut u8, 0, 8);
         });
@@ -8037,7 +8302,14 @@ fn sys_recvfrom(
                                 remote_addr[1],
                                 remote_addr[2],
                                 remote_addr[3],
-                                0, 0, 0, 0, 0, 0, 0, 0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
+                                0,
                             ];
                             let _ = write_user_slice(addr_ptr, &sa);
                         }
@@ -8058,13 +8330,7 @@ fn sys_recvfrom(
     0
 }
 
-fn sys_setsockopt(
-    fd: usize,
-    level: usize,
-    optname: usize,
-    optval: usize,
-    optlen: usize,
-) -> usize {
+fn sys_setsockopt(fd: usize, level: usize, optname: usize, optval: usize, optlen: usize) -> usize {
     // kTLS (Kernel TLS) rezervasyonu
     if level == SOL_TCP && optname == 31 {
         // TCP_ULP
@@ -8107,11 +8373,7 @@ fn sys_setsockopt(
         if let Some(opt) = socket_option {
             // SocketOptionsState'e kaydet
             let _ = super::net::socket::setsockopt(
-                SOCKET_TABLE
-                    .lock()
-                    .get(&fd)
-                    .map(|s| s.tcp_id)
-                    .unwrap_or(0),
+                SOCKET_TABLE.lock().get(&fd).map(|s| s.tcp_id).unwrap_or(0),
                 opt,
             );
 
@@ -8187,13 +8449,7 @@ fn sys_setsockopt(
     }
 }
 
-fn sys_getsockopt(
-    fd: usize,
-    level: usize,
-    optname: usize,
-    optval: usize,
-    optlen: usize,
-) -> usize {
+fn sys_getsockopt(fd: usize, level: usize, optname: usize, optval: usize, optlen: usize) -> usize {
     // getsockopt(2): soket seçeneklerini oku
     if optval != 0 && optlen != 0 {
         if let Err(e) = validate_user_range(optlen, 4) {
@@ -8210,10 +8466,10 @@ fn sys_getsockopt(
                             // SOL_TCP
                             match optname {
                                 1 => Some(if !conn.nagle_enabled { 1 } else { 0 }), // TCP_NODELAY
-                                2 => Some(conn.mss as u32),      // TCP_MAXSEG
-                                4 => Some(conn.keepalive_idle),   // TCP_KEEPIDLE
-                                5 => Some(conn.keepalive_intvl),  // TCP_KEEPINTVL
-                                6 => Some(conn.keepalive_probes), // TCP_KEEPCNT
+                                2 => Some(conn.mss as u32),                         // TCP_MAXSEG
+                                4 => Some(conn.keepalive_idle),                     // TCP_KEEPIDLE
+                                5 => Some(conn.keepalive_intvl),                    // TCP_KEEPINTVL
+                                6 => Some(conn.keepalive_probes),                   // TCP_KEEPCNT
                                 _ => None,
                             }
                         }
@@ -8394,23 +8650,34 @@ fn sys_getpeername(fd: usize, addr_ptr: usize, addr_len_ptr: usize) -> usize {
 fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) -> usize {
     // msghdr: { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov;
     //           size_t msg_iovlen; void *msg_control; size_t msg_controllen; int msg_flags; }
-    if msg_ptr == 0 { return errno(EINVAL); }
-    if let Err(e) = validate_user_range(msg_ptr, 56) { return e; }
+    if msg_ptr == 0 {
+        return errno(EINVAL);
+    }
+    if let Err(e) = validate_user_range(msg_ptr, 56) {
+        return e;
+    }
 
     let msg_name: usize = with_user_access(|| unsafe { *(msg_ptr as *const usize) });
     let msg_namelen: u32 = with_user_access(|| unsafe { *((msg_ptr + 8) as *const u32) });
     let msg_iov: usize = with_user_access(|| unsafe { *((msg_ptr + 16) as *const usize) });
     let msg_iovlen: usize = with_user_access(|| unsafe { *((msg_ptr + 24) as *const usize) });
 
-    if msg_iov == 0 || msg_iovlen == 0 { return errno(EINVAL); }
+    if msg_iov == 0 || msg_iovlen == 0 {
+        return errno(EINVAL);
+    }
 
     // Tüm iovec'leri topla ve tek buffer'a yaz
     let mut total_data = alloc::vec::Vec::new();
     for i in 0..msg_iovlen {
         let iov_base: usize = with_user_access(|| unsafe { *((msg_iov + i * 16) as *const usize) });
-        let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
-        if iov_len == 0 { continue; }
-        if let Err(e) = validate_user_range(iov_base, iov_len) { return e; }
+        let iov_len: usize =
+            with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
+        if iov_len == 0 {
+            continue;
+        }
+        if let Err(e) = validate_user_range(iov_base, iov_len) {
+            return e;
+        }
         let mut chunk = alloc::vec![0u8; iov_len];
         with_user_access(|| unsafe {
             core::ptr::copy_nonoverlapping(iov_base as *const u8, chunk.as_mut_ptr(), iov_len);
@@ -8420,29 +8687,45 @@ fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: usize) -> usize {
 
     // sendto ile gönder
     let addr_ptr = if msg_name != 0 { msg_name } else { 0 };
-    sys_sendto(fd, total_data.as_ptr() as usize, total_data.len(), flags, addr_ptr, msg_namelen as usize)
+    sys_sendto(
+        fd,
+        total_data.as_ptr() as usize,
+        total_data.len(),
+        flags,
+        addr_ptr,
+        msg_namelen as usize,
+    )
 }
 
 /// `recvmsg` — msghdr yapısı ile mesaj al (scatter-gather I/O)
 fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) -> usize {
     // msghdr: { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov;
     //           size_t msg_iovlen; void *msg_control; size_t msg_controllen; int msg_flags; }
-    if msg_ptr == 0 { return errno(EINVAL); }
-    if let Err(e) = validate_user_range(msg_ptr, 56) { return e; }
+    if msg_ptr == 0 {
+        return errno(EINVAL);
+    }
+    if let Err(e) = validate_user_range(msg_ptr, 56) {
+        return e;
+    }
 
     let msg_name: usize = with_user_access(|| unsafe { *(msg_ptr as *const usize) });
     let msg_iov: usize = with_user_access(|| unsafe { *((msg_ptr + 16) as *const usize) });
     let msg_iovlen: usize = with_user_access(|| unsafe { *((msg_ptr + 24) as *const usize) });
 
-    if msg_iov == 0 || msg_iovlen == 0 { return errno(EINVAL); }
+    if msg_iov == 0 || msg_iovlen == 0 {
+        return errno(EINVAL);
+    }
 
     // Toplam buffer boyutunu hesapla
     let mut total_buf_size: usize = 0;
     for i in 0..msg_iovlen {
-        let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
+        let iov_len: usize =
+            with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
         total_buf_size += iov_len;
     }
-    if total_buf_size == 0 { return 0; }
+    if total_buf_size == 0 {
+        return 0;
+    }
 
     // Tek buffer'da oku
     let mut data = alloc::vec![0u8; total_buf_size];
@@ -8453,11 +8736,16 @@ fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: usize) -> usize {
     let mut bytes_copied: usize = 0;
     for i in 0..msg_iovlen {
         let iov_base: usize = with_user_access(|| unsafe { *((msg_iov + i * 16) as *const usize) });
-        let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
+        let iov_len: usize =
+            with_user_access(|| unsafe { *((msg_iov + i * 16 + 8) as *const usize) });
         let copy_len = core::cmp::min(iov_len, bytes_read - offset);
         if copy_len > 0 {
             with_user_access(|| unsafe {
-                core::ptr::copy_nonoverlapping(data[offset..].as_ptr(), iov_base as *mut u8, copy_len);
+                core::ptr::copy_nonoverlapping(
+                    data[offset..].as_ptr(),
+                    iov_base as *mut u8,
+                    copy_len,
+                );
             });
             bytes_copied += copy_len;
             offset += copy_len;
@@ -8570,14 +8858,18 @@ fn free_fd(fd: usize) -> usize {
     drop(cloexec);
     if kind == Some(FdKind::File) {
         // APUE §14.3: fd kapanırken POSIX lock'ları release et
-        let _ = fs::file_lock::sys_fcntl_lock(fd as i32, 6, &mut fs::file_lock::FileLock {
-            l_type: 2, // F_UNLCK
-            l_whence: 0, // SEEK_SET
-            l_start: 0,
-            l_len: 0, // entire file
-            l_pid: 0,
-            is_ofd: false,
-        });
+        let _ = fs::file_lock::sys_fcntl_lock(
+            fd as i32,
+            6,
+            &mut fs::file_lock::FileLock {
+                l_type: 2,   // F_UNLCK
+                l_whence: 0, // SEEK_SET
+                l_start: 0,
+                l_len: 0, // entire file
+                l_pid: 0,
+                is_ofd: false,
+            },
+        );
         // man fcntl_locking(2): OFD locks released on last close of OFD
         fs::file_lock::release_ofd_locks(fd as u64);
         let mut files = FILE_TABLE.lock();
@@ -8932,7 +9224,9 @@ fn sys_eon_memory_stats(buf_ptr: usize, buf_len: usize) -> usize {
     let stats = crate::memory::get_memory_stats();
     let out = alloc::format!(
         "{{\"total_kb\":{},\"free_kb\":{},\"available_kb\":{}}}",
-        stats.total_kb, stats.free_kb, stats.available_kb
+        stats.total_kb,
+        stats.free_kb,
+        stats.available_kb
     );
     let bytes = out.as_bytes();
     let copy_len = bytes.len().min(buf_len);
@@ -8986,7 +9280,9 @@ fn sys_eon_mount_list(buf_ptr: usize, buf_len: usize) -> usize {
     for m in &mounts {
         out.push_str(&alloc::format!(
             "{} on {} type {}\n",
-            m.device, m.mountpoint, m.fs_type
+            m.device,
+            m.mountpoint,
+            m.fs_type
         ));
     }
     let bytes = out.as_bytes();
@@ -9007,7 +9303,9 @@ fn sys_eon_driver_list(buf_ptr: usize, buf_len: usize) -> usize {
     for d in &drivers {
         out.push_str(&alloc::format!(
             "{{\"id\":{},\"name\":\"{}\",\"tier\":\"{}\"}}\n",
-            d.driver_id, d.name, d.tier
+            d.driver_id,
+            d.name,
+            d.tier
         ));
     }
     let bytes = out.as_bytes();
@@ -9040,7 +9338,9 @@ fn sys_eon_net_config(buf_ptr: usize, buf_len: usize) -> usize {
     };
     let out = alloc::format!(
         "{{\"ip\":\"{}\",\"gateway\":\"{}\",\"dns\":\"{}\"}}",
-        ip_str, gw_str, dns_str
+        ip_str,
+        gw_str,
+        dns_str
     );
     let bytes = out.as_bytes();
     let copy_len = bytes.len().min(buf_len);
@@ -9063,7 +9363,13 @@ fn sys_eon_reboot() -> usize {
 }
 
 /// IPC mesajı gönder/al
-fn sys_eon_ipc_send(service_id: usize, req_ptr: usize, req_len: usize, resp_ptr: usize, resp_len: usize) -> usize {
+fn sys_eon_ipc_send(
+    service_id: usize,
+    req_ptr: usize,
+    req_len: usize,
+    resp_ptr: usize,
+    resp_len: usize,
+) -> usize {
     if req_ptr == 0 || req_len == 0 {
         return errno(EINVAL);
     }
@@ -9254,8 +9560,14 @@ fn sys_waitid(idtype: usize, id: usize, infop_ptr: usize, options: usize) -> usi
     // WNOHANG: çocuk yoksa hemen dön
     if options & WNOHANG != 0 {
         let info = SiginfoChild {
-            si_signo: 0, si_errno: 0, si_code: 0, _pad0: 0,
-            si_pid: 0, si_uid: 0, si_status: 0, _pad1: 0,
+            si_signo: 0,
+            si_errno: 0,
+            si_code: 0,
+            _pad0: 0,
+            si_pid: 0,
+            si_uid: 0,
+            si_status: 0,
+            _pad1: 0,
         };
         if let Err(err) = write_user(infop_ptr, info) {
             return err;
@@ -9265,12 +9577,7 @@ fn sys_waitid(idtype: usize, id: usize, infop_ptr: usize, options: usize) -> usi
     // P_PID: belirli pid'yi bekle → wait4 ile aynı mantık
     if idtype == P_PID {
         let mut status: u32 = 0;
-        let ret = process_bridge::sys_wait4(
-            id,
-            &mut status as *mut u32 as usize,
-            options,
-            0,
-        );
+        let ret = process_bridge::sys_wait4(id, &mut status as *mut u32 as usize, options, 0);
         if ret == usize::MAX || (ret as isize) < 0 {
             return ret;
         }
@@ -9293,21 +9600,26 @@ fn sys_waitid(idtype: usize, id: usize, infop_ptr: usize, options: usize) -> usi
     }
     // P_ALL / P_PGID: tüm çocuklar veya süreç grubu
     let mut status: u32 = 0;
-    let wait_pid = if idtype == P_PGID { usize::MAX - id + 1 } else { usize::MAX }; // -id or -1 as usize
-    let ret = process_bridge::sys_wait4(
-        wait_pid,
-        &mut status as *mut u32 as usize,
-        options,
-        0,
-    );
+    let wait_pid = if idtype == P_PGID {
+        usize::MAX - id + 1
+    } else {
+        usize::MAX
+    }; // -id or -1 as usize
+    let ret = process_bridge::sys_wait4(wait_pid, &mut status as *mut u32 as usize, options, 0);
     if ret == usize::MAX || (ret as isize) < 0 {
         return ret;
     }
     let child_pid = ret as i32;
     let exit_status = ((status >> 8) & 0xFF) as i32;
     let info = SiginfoChild {
-        si_signo: 17, si_errno: 0, si_code: 1, _pad0: 0,
-        si_pid: child_pid, si_uid: 0, si_status: exit_status, _pad1: 0,
+        si_signo: 17,
+        si_errno: 0,
+        si_code: 1,
+        _pad0: 0,
+        si_pid: child_pid,
+        si_uid: 0,
+        si_status: exit_status,
+        _pad1: 0,
     };
     if let Err(err) = write_user(infop_ptr, info) {
         return err;
@@ -9419,8 +9731,8 @@ fn sys_capset(header_ptr: usize, data_ptr: usize) -> usize {
 
 /// `unshare` — Süreç bağlamının parçalarını ayır.
 fn sys_unshare(flags: usize) -> usize {
-    let valid = CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC
-        | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET;
+    let valid =
+        CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET;
     if flags & !valid != 0 {
         return errno(EINVAL);
     }
@@ -9456,7 +9768,11 @@ fn sys_kcmp(pid1: usize, pid2: usize, kcmp_type: usize, idx1: usize, idx2: usize
             return errno(EBADF);
         }
         // Aynı fd ise 0, farklı ise 1
-        if idx1 == idx2 { 0 } else { 1 }
+        if idx1 == idx2 {
+            0
+        } else {
+            1
+        }
     } else {
         // Diğer kcmp tipleri (VM, FILES, FS, SIGHAND, IO, SYSVSEM)
         // Aynı süreç için her zaman 0 döndür (aynı kaynak)
@@ -9562,8 +9878,16 @@ fn sys_io_submit(ctx: usize, nr: usize, iocbpp_ptr: usize) -> usize {
         let iocb: IoCb = if iocb_ptr != 0 {
             with_user_access(|| unsafe { *(iocb_ptr as usize as *const IoCb) })
         } else {
-            IoCb { aio_data: 0, aio_key: 0, aio_lio_opcode: 0, aio_reqprio: 0,
-                   aio_fildes: 0, aio_buf: 0, aio_nbytes: 0, aio_offset: 0 }
+            IoCb {
+                aio_data: 0,
+                aio_key: 0,
+                aio_lio_opcode: 0,
+                aio_reqprio: 0,
+                aio_fildes: 0,
+                aio_buf: 0,
+                aio_nbytes: 0,
+                aio_offset: 0,
+            }
         };
         // Her I/O'yu hemen tamamlanmış olarak işaretle
         let event = IoEvent {
@@ -9578,7 +9902,13 @@ fn sys_io_submit(ctx: usize, nr: usize, iocbpp_ptr: usize) -> usize {
 }
 
 /// `io_getevents` — Tamamlanmış AIO event'lerini al.
-fn sys_io_getevents(ctx: usize, min_nr: usize, nr: usize, events_ptr: usize, timeout_ptr: usize) -> usize {
+fn sys_io_getevents(
+    ctx: usize,
+    min_nr: usize,
+    nr: usize,
+    events_ptr: usize,
+    timeout_ptr: usize,
+) -> usize {
     let _ = timeout_ptr; // timeout şimdilik yoksay
     let ctx_id = ctx as u64;
     if !AIO_CONTEXTS.lock().contains_key(&ctx_id) {
@@ -9641,7 +9971,12 @@ fn sys_mq_open(name_ptr: usize, oflag: usize, mode: usize, attr_ptr: usize) -> u
             let attr = if attr_ptr != 0 {
                 with_user_access(|| unsafe { *(attr_ptr as *const MqAttr) })
             } else {
-                MqAttr { mq_flags: 0, mq_maxmsg: 10, mq_msgsize: 8192, mq_curmsgs: 0 }
+                MqAttr {
+                    mq_flags: 0,
+                    mq_maxmsg: 10,
+                    mq_msgsize: 8192,
+                    mq_curmsgs: 0,
+                }
             };
             mq_table.insert(name, (attr, Vec::new()));
         }
@@ -9667,7 +10002,13 @@ fn sys_mq_unlink(name_ptr: usize) -> usize {
 }
 
 /// `mq_timedsend` — Mesaj kuyruğuna mesaj gönder.
-fn sys_mq_timedsend(mqdes: usize, msg_ptr: usize, msg_len: usize, msg_prio: usize, timeout_ptr: usize) -> usize {
+fn sys_mq_timedsend(
+    mqdes: usize,
+    msg_ptr: usize,
+    msg_len: usize,
+    msg_prio: usize,
+    timeout_ptr: usize,
+) -> usize {
     let _ = (msg_prio, timeout_ptr);
     if get_fd(mqdes).is_none() {
         return errno(EBADF);
@@ -9689,7 +10030,13 @@ fn sys_mq_timedsend(mqdes: usize, msg_ptr: usize, msg_len: usize, msg_prio: usiz
 }
 
 /// `mq_timedreceive` — Mesaj kuyruğundan mesaj al.
-fn sys_mq_timedreceive(mqdes: usize, msg_ptr: usize, msg_len: usize, msg_prio_ptr: usize, timeout_ptr: usize) -> usize {
+fn sys_mq_timedreceive(
+    mqdes: usize,
+    msg_ptr: usize,
+    msg_len: usize,
+    msg_prio_ptr: usize,
+    timeout_ptr: usize,
+) -> usize {
     let _ = (msg_prio_ptr, timeout_ptr);
     if get_fd(mqdes).is_none() {
         return errno(EBADF);
@@ -9775,8 +10122,12 @@ fn sys_quotactl(cmd: usize, special_ptr: usize, id: usize, addr: usize) -> usize
         0x03 => {
             // Q_GETFMT — format: QFMT_VFS_V0 = 2
             if addr != 0 {
-                if let Err(e) = validate_user_range(addr, 4) { return e; }
-                with_user_access(|| unsafe { *((addr) as *mut u32) = 2; });
+                if let Err(e) = validate_user_range(addr, 4) {
+                    return e;
+                }
+                with_user_access(|| unsafe {
+                    *((addr) as *mut u32) = 2;
+                });
             }
             0
         }
@@ -9786,7 +10137,9 @@ fn sys_quotactl(cmd: usize, special_ptr: usize, id: usize, addr: usize) -> usize
                 // dqblk: { u64 dqb_bhardlimit; u64 dqb_bsoftlimit; u64 dqb_curspace;
                 //           u64 dqb_btime; u64 dqb_ihardlimit; u64 dqb_isoftlimit;
                 //           u64 dqb_curinodes; u64 dqb_itime; u32 dqb_bvalid; u32 dqb_valid; }
-                if let Err(e) = validate_user_range(addr, 72) { return e; }
+                if let Err(e) = validate_user_range(addr, 72) {
+                    return e;
+                }
                 with_user_access(|| unsafe {
                     core::ptr::write_bytes(addr as *mut u8, 0, 72);
                 });
@@ -9833,7 +10186,9 @@ fn sys_keyctl(cmd: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) ->
         11 => {
             // KEYCTL_DESCRIBE — bilgi yok
             if arg3 != 0 && arg4 > 0 {
-                if let Err(e) = validate_user_range(arg3, arg4) { return e; }
+                if let Err(e) = validate_user_range(arg3, arg4) {
+                    return e;
+                }
                 // "keyring;0;0;0000" formatında bilgi yaz
                 let desc = b"unknown;0;0;0000\0";
                 let copy_len = core::cmp::min(desc.len(), arg4);
@@ -9843,14 +10198,18 @@ fn sys_keyctl(cmd: usize, arg2: usize, arg3: usize, arg4: usize, arg5: usize) ->
             }
             0
         }
-        _ => {
-            errno(ENOSYS)
-        }
+        _ => errno(ENOSYS),
     }
 }
 
 /// `move_mount` — Mount noktasını taşı.
-fn sys_move_mount(from_dfd: usize, from_path_ptr: usize, to_dfd: usize, to_path_ptr: usize, flags: usize) -> usize {
+fn sys_move_mount(
+    from_dfd: usize,
+    from_path_ptr: usize,
+    to_dfd: usize,
+    to_path_ptr: usize,
+    flags: usize,
+) -> usize {
     // move_mount: bir mount noktasını başka bir yere taşı
     // from_path_ptr → to_path_ptr
     let from_path = if from_path_ptr != 0 {
@@ -9896,7 +10255,9 @@ fn sys_fsopen(fsname_ptr: usize, flags: usize) -> usize {
 
     // fsconfig fd oluştur
     let fd = allocate_fd(FdKind::File);
-    if fd >= MAX_FDS { return errno(EMFILE); }
+    if fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
 
     // Basit: fd'yi returned, fsconfig/fsmount'ta kullanılacak
     fd
@@ -9937,7 +10298,9 @@ fn sys_fsmount(fd: usize, flags: usize, attr_flags: usize) -> usize {
 
     // Mount fd oluştur
     let mount_fd = allocate_fd(FdKind::File);
-    if mount_fd >= MAX_FDS { return errno(EMFILE); }
+    if mount_fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
 
     // Basit: mount fd returned
     // move_mount ile bir yere taşınacak
@@ -9949,11 +10312,21 @@ fn sys_fsmount(fd: usize, flags: usize, attr_flags: usize) -> usize {
 // ============================================================================
 
 /// `perf_event_open` — Performans izleme olayı aç.
-fn sys_perf_event_open(attr_ptr: usize, pid: usize, cpu: usize, group_fd: usize, flags: usize) -> usize {
+fn sys_perf_event_open(
+    attr_ptr: usize,
+    pid: usize,
+    cpu: usize,
+    group_fd: usize,
+    flags: usize,
+) -> usize {
     // perf_event_open, donanım/yazılım sayaçlarını izler
     // struct perf_event_attr { __u32 type; __u32 size; __u64 config; ... }
-    if attr_ptr == 0 { return errno(EFAULT); }
-    if let Err(e) = validate_user_range(attr_ptr, 64) { return e; }
+    if attr_ptr == 0 {
+        return errno(EFAULT);
+    }
+    if let Err(e) = validate_user_range(attr_ptr, 64) {
+        return e;
+    }
 
     let _event_type: u32 = with_user_access(|| unsafe { *(attr_ptr as *const u32) });
     let _config: u64 = with_user_access(|| unsafe { *((attr_ptr + 8) as *const u64) });
@@ -9962,7 +10335,9 @@ fn sys_perf_event_open(attr_ptr: usize, pid: usize, cpu: usize, group_fd: usize,
     // Gerçek implementasyon: perf_event_open kernel altyapısı + RDPMC/NMI desteği gerekir
     // Basit: fd dön ama hiçbir şey izleme
     let fd = allocate_fd(FdKind::File);
-    if fd >= MAX_FDS { return errno(EMFILE); }
+    if fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
     fd
 }
 
@@ -9986,21 +10361,27 @@ fn sys_bpf(cmd: usize, attr_ptr: usize, size: usize) -> usize {
             // BPF_MAP_CREATE — harita oluştur
             // Basit: fd dön ama harita yok
             let fd = allocate_fd(FdKind::File);
-            if fd >= MAX_FDS { return errno(EMFILE); }
+            if fd >= MAX_FDS {
+                return errno(EMFILE);
+            }
             fd
         }
         5 => {
             // BPF_PROG_LOAD — program yükle
             errno(ENOSYS)
         }
-        _ => {
-            errno(ENOSYS)
-        }
+        _ => errno(ENOSYS),
     }
 }
 
 /// `kexec_file_load` — Yeni çekirdek yükle ve çalıştır.
-fn sys_kexec_file_load(kernel_fd: usize, initrd_fd: usize, cmdline_len: usize, cmdline_ptr: usize, flags: usize) -> usize {
+fn sys_kexec_file_load(
+    kernel_fd: usize,
+    initrd_fd: usize,
+    cmdline_len: usize,
+    cmdline_ptr: usize,
+    flags: usize,
+) -> usize {
     // kexec_file_load, dosyadan yeni kernel yükler
     // echoOS'ta kexec henüz desteklenmiyor — kernel yükleme altyapısı gerekir
     // CAP_SYS_BOOT yetkisi de gerekir
@@ -10044,9 +10425,15 @@ fn sys_gettimeofday(tv_ptr: usize, _tz_ptr: usize) -> usize {
             return err;
         }
         // clock_gettime ile aynı zamanı kullan
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let _ = clock_gettime_impl(CLOCK_REALTIME, &mut ts);
-        let tv = Timeval { tv_sec: ts.tv_sec, tv_usec: ts.tv_nsec / 1000 };
+        let tv = Timeval {
+            tv_sec: ts.tv_sec,
+            tv_usec: ts.tv_nsec / 1000,
+        };
         let _ = write_user(tv_ptr, tv);
     }
     0
@@ -10068,7 +10455,10 @@ fn sys_clock_getres(clock_id: usize, res_ptr: usize) -> usize {
             return err;
         }
         // echOS timer çözünürlüğü: 1 tick = 10ms = 10_000_000 ns
-        let ts = Timespec { tv_sec: 0, tv_nsec: TICK_NS as i64 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: TICK_NS as i64,
+        };
         let _ = write_user(res_ptr, ts);
     }
     0
@@ -10084,7 +10474,7 @@ fn sys_clock_nanosleep(clock_id: usize, flags: usize, req_ptr: usize, _rem_ptr: 
     }
     let req: Timespec = with_user_access(|| unsafe { *(req_ptr as *const Timespec) });
     let _flags = flags; // TIMER_ABSTIME = 1
-    // nanosleep ile aynı mantık
+                        // nanosleep ile aynı mantık
     let total_ns = (req.tv_sec as u64) * 1_000_000_000 + (req.tv_nsec as u64);
     let ticks = (total_ns + TICK_NS - 1) / TICK_NS;
     let mut elapsed: u64 = 0;
@@ -10102,7 +10492,10 @@ fn sys_clock_adjtime(_clock_id: usize, _tx_ptr: usize) -> usize {
 
 /// `time` — Unix epoch'tan saniye cinsinden zamanı döndürür.
 fn sys_time(t_ptr: usize) -> usize {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let _ = clock_gettime_impl(CLOCK_REALTIME, &mut ts);
     if t_ptr != 0 {
         if let Err(err) = validate_user_range(t_ptr, core::mem::size_of::<i64>()) {
@@ -10238,7 +10631,11 @@ fn sys_setfsgid(_gid: usize) -> usize {
 
 /// `close_range` — Belirtilen aralıktaki tüm fd'leri kapatır.
 fn sys_close_range(first: usize, max: usize, _flags: usize) -> usize {
-    let end = if max == 0 || max > MAX_FDS { MAX_FDS } else { max };
+    let end = if max == 0 || max > MAX_FDS {
+        MAX_FDS
+    } else {
+        max
+    };
     let mut fd_table = FILE_TABLE.lock();
     for fd in first..end {
         if fd < MAX_FDS {
@@ -10323,12 +10720,10 @@ fn sys_mknodat(dirfd: usize, path_ptr: usize, mode: usize) -> usize {
     let file_type = mode & S_IFMT;
 
     match file_type {
-        S_IFREG | 0 => {
-            match fs::f2fs::create_f2fs_file(parent, name) {
-                Ok(_) => 0,
-                Err(e) => vfs_errno(e),
-            }
-        }
+        S_IFREG | 0 => match fs::f2fs::create_f2fs_file(parent, name) {
+            Ok(_) => 0,
+            Err(e) => vfs_errno(e),
+        },
         _ => errno(ENOSYS),
     }
 }
@@ -10356,15 +10751,25 @@ fn sys_timerfd_create(clockid: usize, _flags: usize) -> usize {
     if fd >= MAX_FDS {
         return errno(EMFILE);
     }
-    TIMERFD_TABLE.lock().insert(id, TimerFdState {
-        interval_ns: 0, value_ns: 0, active: false,
-    });
+    TIMERFD_TABLE.lock().insert(
+        id,
+        TimerFdState {
+            interval_ns: 0,
+            value_ns: 0,
+            active: false,
+        },
+    );
     let _ = id;
     fd
 }
 
 /// `timerfd_settime` — Timer'ı ayarlar.
-fn sys_timerfd_settime(fd: usize, _flags: usize, new_value_ptr: usize, old_value_ptr: usize) -> usize {
+fn sys_timerfd_settime(
+    fd: usize,
+    _flags: usize,
+    new_value_ptr: usize,
+    old_value_ptr: usize,
+) -> usize {
     if fd >= MAX_FDS {
         return errno(EBADF);
     }
@@ -10374,8 +10779,8 @@ fn sys_timerfd_settime(fd: usize, _flags: usize, new_value_ptr: usize, old_value
     let new_val: Itimerval = with_user_access(|| unsafe { *(new_value_ptr as *const Itimerval) });
     let interval_ns = (new_val.it_interval.tv_sec as u64) * 1_000_000_000
         + (new_val.it_interval.tv_usec as u64) * 1000;
-    let value_ns = (new_val.it_value.tv_sec as u64) * 1_000_000_000
-        + (new_val.it_value.tv_usec as u64) * 1000;
+    let value_ns =
+        (new_val.it_value.tv_sec as u64) * 1_000_000_000 + (new_val.it_value.tv_usec as u64) * 1000;
     if old_value_ptr != 0 {
         if let Err(err) = validate_user_range(old_value_ptr, core::mem::size_of::<Itimerval>()) {
             return err;
@@ -10384,7 +10789,9 @@ fn sys_timerfd_settime(fd: usize, _flags: usize, new_value_ptr: usize, old_value
     }
     let mut table = TIMERFD_TABLE.lock();
     let entry = table.entry(fd).or_insert(TimerFdState {
-        interval_ns: 0, value_ns: 0, active: false,
+        interval_ns: 0,
+        value_ns: 0,
+        active: false,
     });
     entry.interval_ns = interval_ns;
     entry.value_ns = value_ns;
@@ -10530,13 +10937,21 @@ fn sys_pivot_root(_new_root_ptr: usize, _put_old_ptr: usize) -> usize {
 /// `socketpair` — Eş soket çifti oluşturur (Unix domain sockets için).
 fn sys_socketpair(domain: usize, type_: usize, protocol: usize, fds_ptr: usize) -> usize {
     // Sadece AF_UNIX destekleniyor
-    if domain != AF_UNIX { return errno(EAFNOSUPPORT); }
-    if fds_ptr == 0 { return errno(EINVAL); }
-    if let Err(e) = validate_user_range(fds_ptr, 8) { return e; }
+    if domain != AF_UNIX {
+        return errno(EAFNOSUPPORT);
+    }
+    if fds_ptr == 0 {
+        return errno(EINVAL);
+    }
+    if let Err(e) = validate_user_range(fds_ptr, 8) {
+        return e;
+    }
 
     // İki fd alloke et
     let fd1 = allocate_fd(FdKind::Socket);
-    if fd1 >= MAX_FDS { return errno(EMFILE); }
+    if fd1 >= MAX_FDS {
+        return errno(EMFILE);
+    }
     let fd2 = allocate_fd(FdKind::Socket);
     if fd2 >= MAX_FDS {
         // fd1'i geri al
@@ -10561,20 +10976,32 @@ fn sys_socketpair(domain: usize, type_: usize, protocol: usize, fds_ptr: usize) 
             p
         };
 
-        sockets.insert(fd1, SocketState {
-            domain, sock_type: type_, protocol,
-            state: SocketConnState::Connected,
-            local_port: port1, remote_port: port2,
-            remote_addr: [127, 0, 0, 1],
-            tcp_id: 0,
-        });
-        sockets.insert(fd2, SocketState {
-            domain, sock_type: type_, protocol,
-            state: SocketConnState::Connected,
-            local_port: port2, remote_port: port1,
-            remote_addr: [127, 0, 0, 1],
-            tcp_id: 0,
-        });
+        sockets.insert(
+            fd1,
+            SocketState {
+                domain,
+                sock_type: type_,
+                protocol,
+                state: SocketConnState::Connected,
+                local_port: port1,
+                remote_port: port2,
+                remote_addr: [127, 0, 0, 1],
+                tcp_id: 0,
+            },
+        );
+        sockets.insert(
+            fd2,
+            SocketState {
+                domain,
+                sock_type: type_,
+                protocol,
+                state: SocketConnState::Connected,
+                local_port: port2,
+                remote_port: port1,
+                remote_addr: [127, 0, 0, 1],
+                tcp_id: 0,
+            },
+        );
     }
 
     // Kullanıcıya fd çiftini yaz
@@ -10586,19 +11013,33 @@ fn sys_socketpair(domain: usize, type_: usize, protocol: usize, fds_ptr: usize) 
 }
 
 /// `recvmmsg` — Çoklu mesaj alır.
-fn sys_recvmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_ptr: usize) -> usize {
+fn sys_recvmmsg(
+    fd: usize,
+    msg_ptr: usize,
+    vlen: usize,
+    flags: usize,
+    _timeout_ptr: usize,
+) -> usize {
     // mmsghdr: { struct msghdr msg_hdr; unsigned int msg_len; }
     // her bir mmsghdr 64 bytes (msghdr=56 + msg_len=4 + padding=4)
-    if vlen == 0 { return 0; }
-    if msg_ptr == 0 { return errno(EINVAL); }
+    if vlen == 0 {
+        return 0;
+    }
+    if msg_ptr == 0 {
+        return errno(EINVAL);
+    }
 
     let mut count: usize = 0;
     for i in 0..vlen {
         let entry_ptr = msg_ptr + i * 64;
-        if let Err(e) = validate_user_range(entry_ptr, 64) { break; }
+        if let Err(e) = validate_user_range(entry_ptr, 64) {
+            break;
+        }
 
         let result = sys_recvmsg(fd, entry_ptr, flags);
-        if result == 0 || result >= errno_base() { break; }
+        if result == 0 || result >= errno_base() {
+            break;
+        }
 
         // msg_len yaz
         with_user_access(|| unsafe {
@@ -10607,34 +11048,56 @@ fn sys_recvmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_p
         count += 1;
 
         // MSG_WAITALL yoksa hemen dön
-        if flags & 0x100 == 0 { break; }
+        if flags & 0x100 == 0 {
+            break;
+        }
     }
     count
 }
 
 /// `sendmmsg` — Çoklu mesaj gönderir.
-fn sys_sendmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_ptr: usize) -> usize {
+fn sys_sendmmsg(
+    fd: usize,
+    msg_ptr: usize,
+    vlen: usize,
+    flags: usize,
+    _timeout_ptr: usize,
+) -> usize {
     // mmsghdr: { struct msghdr msg_hdr; unsigned int msg_len; }
-    if vlen == 0 { return 0; }
-    if msg_ptr == 0 { return errno(EINVAL); }
+    if vlen == 0 {
+        return 0;
+    }
+    if msg_ptr == 0 {
+        return errno(EINVAL);
+    }
 
     let mut count: usize = 0;
     for i in 0..vlen {
         let entry_ptr = msg_ptr + i * 64;
-        if let Err(e) = validate_user_range(entry_ptr, 64) { break; }
+        if let Err(e) = validate_user_range(entry_ptr, 64) {
+            break;
+        }
 
         let msg_iov: usize = with_user_access(|| unsafe { *((entry_ptr + 16) as *const usize) });
         let msg_iovlen: usize = with_user_access(|| unsafe { *((entry_ptr + 24) as *const usize) });
 
-        if msg_iov == 0 || msg_iovlen == 0 { break; }
+        if msg_iov == 0 || msg_iovlen == 0 {
+            break;
+        }
 
         // Tüm iovec'leri topla
         let mut total_data = alloc::vec::Vec::new();
         for j in 0..msg_iovlen {
-            let iov_base: usize = with_user_access(|| unsafe { *((msg_iov + j * 16) as *const usize) });
-            let iov_len: usize = with_user_access(|| unsafe { *((msg_iov + j * 16 + 8) as *const usize) });
-            if iov_len == 0 { continue; }
-            if let Err(_) = validate_user_range(iov_base, iov_len) { break; }
+            let iov_base: usize =
+                with_user_access(|| unsafe { *((msg_iov + j * 16) as *const usize) });
+            let iov_len: usize =
+                with_user_access(|| unsafe { *((msg_iov + j * 16 + 8) as *const usize) });
+            if iov_len == 0 {
+                continue;
+            }
+            if let Err(_) = validate_user_range(iov_base, iov_len) {
+                break;
+            }
             let mut chunk = alloc::vec![0u8; iov_len];
             with_user_access(|| unsafe {
                 core::ptr::copy_nonoverlapping(iov_base as *const u8, chunk.as_mut_ptr(), iov_len);
@@ -10642,17 +11105,30 @@ fn sys_sendmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_p
             total_data.extend_from_slice(&chunk);
         }
 
-        if total_data.is_empty() { break; }
+        if total_data.is_empty() {
+            break;
+        }
 
-        let sent = sys_sendto(fd, total_data.as_ptr() as usize, total_data.len(), flags, 0, 0);
-        if sent >= errno_base() { break; }
+        let sent = sys_sendto(
+            fd,
+            total_data.as_ptr() as usize,
+            total_data.len(),
+            flags,
+            0,
+            0,
+        );
+        if sent >= errno_base() {
+            break;
+        }
 
         with_user_access(|| unsafe {
             *((entry_ptr + 56) as *mut u32) = sent as u32;
         });
         count += 1;
 
-        if flags & 0x8000 == 0 { break; } // MSG_NOSIGNAL以外
+        if flags & 0x8000 == 0 {
+            break;
+        } // MSG_NOSIGNAL以外
     }
     count
 }
@@ -10662,7 +11138,14 @@ fn sys_sendmmsg(fd: usize, msg_ptr: usize, vlen: usize, flags: usize, _timeout_p
 // ---------------------------------------------------------------------------
 
 /// `pselect6` — select() benzeri ama timespec ile timeout.
-fn sys_pselect6(nfds: usize, readfds_ptr: usize, writefds_ptr: usize, exceptfds_ptr: usize, _timeout_ptr: usize, _sigmask_ptr: usize) -> usize {
+fn sys_pselect6(
+    nfds: usize,
+    readfds_ptr: usize,
+    writefds_ptr: usize,
+    exceptfds_ptr: usize,
+    _timeout_ptr: usize,
+    _sigmask_ptr: usize,
+) -> usize {
     sys_select(nfds, readfds_ptr, writefds_ptr, exceptfds_ptr, 0)
 }
 
@@ -10707,7 +11190,9 @@ fn sys_userfaultfd(flags: usize) -> usize {
 
     // FD oluştur
     let fd = allocate_fd(FdKind::File);
-    if fd >= MAX_FDS { return errno(EMFILE); }
+    if fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
 
     // userfaultfd, sayfa hatalarını user-space'e yönlendirir
     // echOS'ta henüz userfaultfd altyapısı yok — EINVAL dön
@@ -10775,7 +11260,10 @@ fn sys_sched_rr_get_interval(_pid: usize, interval_ptr: usize) -> usize {
         if let Err(err) = validate_user_range(interval_ptr, core::mem::size_of::<Timespec>()) {
             return err;
         }
-        let ts = Timespec { tv_sec: 0, tv_nsec: 10_000_000 }; // 10ms
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 10_000_000,
+        }; // 10ms
         let _ = write_user(interval_ptr, ts);
     }
     0
@@ -10840,11 +11328,22 @@ fn sys_semtimedop(semid: usize, sops: usize, nsops: usize, timeout_ptr: usize) -
 // ---------------------------------------------------------------------------
 
 /// `process_vm_readv` — Başka sürecin belleğini okur.
-fn sys_process_vm_readv(pid: usize, local_iov_ptr: usize, liovcnt: usize, remote_iov_ptr: usize, riovcnt: usize, _flags: usize) -> usize {
+fn sys_process_vm_readv(
+    pid: usize,
+    local_iov_ptr: usize,
+    liovcnt: usize,
+    remote_iov_ptr: usize,
+    riovcnt: usize,
+    _flags: usize,
+) -> usize {
     // process_vm_readv, hedef sürecin sanal belleğinden okuma yapar
     // struct iovec { void *iov_base; size_t iov_len; }
-    if local_iov_ptr == 0 || remote_iov_ptr == 0 { return errno(EINVAL); }
-    if liovcnt == 0 || riovcnt == 0 { return 0; }
+    if local_iov_ptr == 0 || remote_iov_ptr == 0 {
+        return errno(EINVAL);
+    }
+    if liovcnt == 0 || riovcnt == 0 {
+        return 0;
+    }
 
     if !tasking::task_exists(pid) {
         return errno(ESRCH);
@@ -10855,9 +11354,20 @@ fn sys_process_vm_readv(pid: usize, local_iov_ptr: usize, liovcnt: usize, remote
 }
 
 /// `process_vm_writev` — Başka sürecin belleğine yazar.
-fn sys_process_vm_writev(pid: usize, local_iov_ptr: usize, liovcnt: usize, remote_iov_ptr: usize, riovcnt: usize, _flags: usize) -> usize {
-    if local_iov_ptr == 0 || remote_iov_ptr == 0 { return errno(EINVAL); }
-    if liovcnt == 0 || riovcnt == 0 { return 0; }
+fn sys_process_vm_writev(
+    pid: usize,
+    local_iov_ptr: usize,
+    liovcnt: usize,
+    remote_iov_ptr: usize,
+    riovcnt: usize,
+    _flags: usize,
+) -> usize {
+    if local_iov_ptr == 0 || remote_iov_ptr == 0 {
+        return errno(EINVAL);
+    }
+    if liovcnt == 0 || riovcnt == 0 {
+        return 0;
+    }
 
     if !tasking::task_exists(pid) {
         return errno(ESRCH);
@@ -10894,7 +11404,9 @@ fn sys_syslog(type_: usize, bufp_ptr: usize, len: usize) -> usize {
             // read — kernel log'dan oku
             // echOS'ta ring buffer log henüz yok — boş buffer
             if bufp_ptr != 0 && len > 0 {
-                if let Err(e) = validate_user_range(bufp_ptr, len) { return e; }
+                if let Err(e) = validate_user_range(bufp_ptr, len) {
+                    return e;
+                }
                 with_user_access(|| unsafe {
                     core::ptr::write_bytes(bufp_ptr as *mut u8, 0, len);
                 });
@@ -10955,15 +11467,23 @@ fn sys_reboot(_cmd: usize) -> usize {
 fn sys_landlock_create_ruleset(attr_ptr: usize, size: usize, flags: usize) -> usize {
     // Landlock: unprivileged filesystem sandboxing
     // struct landlock_ruleset_attr { __u64 handled_access_fs; __u64 handled_access_net; }
-    if size < 16 { return errno(EINVAL); }
-    if attr_ptr == 0 { return errno(EFAULT); }
-    if let Err(e) = validate_user_range(attr_ptr, size) { return e; }
+    if size < 16 {
+        return errno(EINVAL);
+    }
+    if attr_ptr == 0 {
+        return errno(EFAULT);
+    }
+    if let Err(e) = validate_user_range(attr_ptr, size) {
+        return e;
+    }
 
     let _handled_access_fs: u64 = with_user_access(|| unsafe { *(attr_ptr as *const u64) });
 
     // Landlock ruleset fd oluştur
     let fd = allocate_fd(FdKind::File);
-    if fd >= MAX_FDS { return errno(EMFILE); }
+    if fd >= MAX_FDS {
+        return errno(EMFILE);
+    }
 
     // Basit: ruleset'i kaydet (boş kurallar seti)
     // Gerçek implementasyon: landlock_ruleset struct'ı oluşturup fd'ye bağlar
@@ -10971,23 +11491,39 @@ fn sys_landlock_create_ruleset(attr_ptr: usize, size: usize, flags: usize) -> us
 }
 
 /// `landlock_add_rule` — Landlock kuralı ekler.
-fn sys_landlock_add_rule(ruleset_fd: usize, rule_type: usize, rule_attr_ptr: usize, flags: usize) -> usize {
+fn sys_landlock_add_rule(
+    ruleset_fd: usize,
+    rule_type: usize,
+    rule_attr_ptr: usize,
+    flags: usize,
+) -> usize {
     // rule_type: LANDLOCK_RULE_PATH_BENEATH (1), LANDLOCK_RULE_NET_PORT (2)
-    if rule_attr_ptr == 0 { return errno(EFAULT); }
+    if rule_attr_ptr == 0 {
+        return errno(EFAULT);
+    }
 
     match rule_type {
-        1 => { // LANDLOCK_RULE_PATH_BENEATH
+        1 => {
+            // LANDLOCK_RULE_PATH_BENEATH
             // struct landlock_path_beneath_attr { __u64 allowed_access; __s32 parent_fd; __u32 __reserved; }
-            if let Err(e) = validate_user_range(rule_attr_ptr, 16) { return e; }
-            let _allowed_access: u64 = with_user_access(|| unsafe { *(rule_attr_ptr as *const u64) });
-            let _parent_fd: i32 = with_user_access(|| unsafe { *((rule_attr_ptr + 8) as *const i32) });
+            if let Err(e) = validate_user_range(rule_attr_ptr, 16) {
+                return e;
+            }
+            let _allowed_access: u64 =
+                with_user_access(|| unsafe { *(rule_attr_ptr as *const u64) });
+            let _parent_fd: i32 =
+                with_user_access(|| unsafe { *((rule_attr_ptr + 8) as *const i32) });
             // Kuralı ruleset'e ekle — şimdilik no-op
             0
         }
-        2 => { // LANDLOCK_RULE_NET_PORT
+        2 => {
+            // LANDLOCK_RULE_NET_PORT
             // struct landlock_net_port_attr { __u64 allowed_access; __u64 port; }
-            if let Err(e) = validate_user_range(rule_attr_ptr, 16) { return e; }
-            let _allowed_access: u64 = with_user_access(|| unsafe { *(rule_attr_ptr as *const u64) });
+            if let Err(e) = validate_user_range(rule_attr_ptr, 16) {
+                return e;
+            }
+            let _allowed_access: u64 =
+                with_user_access(|| unsafe { *(rule_attr_ptr as *const u64) });
             let _port: u64 = with_user_access(|| unsafe { *((rule_attr_ptr + 8) as *const u64) });
             0
         }
@@ -11022,13 +11558,21 @@ fn sys_inotify_add_watch(fd: usize, path_ptr: usize, mask: usize) -> usize {
         Err(e) => return e,
     };
     let ret = crate::fs::inotify::sys_inotify_add_watch(fd as i32, &path, mask as u32);
-    if ret < 0 { (-ret) as usize } else { ret as usize }
+    if ret < 0 {
+        (-ret) as usize
+    } else {
+        ret as usize
+    }
 }
 
 /// `inotify_rm_watch` — İzlemeyi kaldırır.
 fn sys_inotify_rm_watch(fd: usize, wd: usize) -> usize {
     let ret = crate::fs::inotify::sys_inotify_rm_watch(fd as i32, wd as i32);
-    if ret < 0 { (-ret) as usize } else { ret as usize }
+    if ret < 0 {
+        (-ret) as usize
+    } else {
+        ret as usize
+    }
 }
 
 /// `signalfd4` — Sinyal fd'si oluşturur.
@@ -11036,9 +11580,15 @@ fn sys_signalfd4(fd: usize, mask_ptr: usize, sizemask: usize, flags: usize) -> u
     const SFD_CLOEXEC: usize = 02000000;
     const SFD_NONBLOCK: usize = 04000;
 
-    if sizemask != 8 { return errno(EINVAL); }
-    if mask_ptr == 0 { return errno(EFAULT); }
-    if let Err(e) = validate_user_range(mask_ptr, 8) { return e; }
+    if sizemask != 8 {
+        return errno(EINVAL);
+    }
+    if mask_ptr == 0 {
+        return errno(EFAULT);
+    }
+    if let Err(e) = validate_user_range(mask_ptr, 8) {
+        return e;
+    }
 
     let signal_mask: u64 = with_user_access(|| unsafe { *(mask_ptr as *const u64) });
 
@@ -11046,7 +11596,9 @@ fn sys_signalfd4(fd: usize, mask_ptr: usize, sizemask: usize, flags: usize) -> u
     let actual_fd = if fd == -1_isize as usize {
         // Yeni fd oluştur
         let new_fd = allocate_fd(FdKind::File);
-        if new_fd >= MAX_FDS { return errno(EMFILE); }
+        if new_fd >= MAX_FDS {
+            return errno(EMFILE);
+        }
         new_fd
     } else {
         // Mevcut fd'yi kullan
@@ -11102,11 +11654,12 @@ fn sys_arch_prctl(code: usize, addr: usize, _unused: usize) -> usize {
             if let Err(err) = validate_user_range(addr, core::mem::size_of::<u64>()) {
                 return err;
             }
-            let fs_base = if let Some(ref current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_ref() } {
-                current.cold.fs_base
-            } else {
-                0
-            };
+            let fs_base =
+                if let Some(ref current) = unsafe { PER_CPU_CURRENT_TASK[cpu_id].as_ref() } {
+                    current.cold.fs_base
+                } else {
+                    0
+                };
             let _ = write_user(addr, fs_base);
             0
         }
@@ -11364,13 +11917,19 @@ fn sys_pwritev(fd: usize, iov_ptr: usize, iovcnt: usize, pos_low: usize) -> usiz
 
 /// `rt_tgsigqueueinfo` — Belirli bir süreç grubuna sinyal + veri gönderir.
 fn sys_rt_tgsigqueueinfo(tgid: usize, sig: usize, info_ptr: usize) -> usize {
-    if sig == 0 || sig > 64 { return errno(EINVAL); }
+    if sig == 0 || sig > 64 {
+        return errno(EINVAL);
+    }
 
     // siginfo_t oku
     if info_ptr != 0 {
-        if let Err(e) = validate_user_range(info_ptr, 128) { return e; } // sizeof(siginfo_t)
+        if let Err(e) = validate_user_range(info_ptr, 128) {
+            return e;
+        } // sizeof(siginfo_t)
         let si_signo: i32 = with_user_access(|| unsafe { *(info_ptr as *const i32) });
-        if si_signo != sig as i32 { return errno(EINVAL); }
+        if si_signo != sig as i32 {
+            return errno(EINVAL);
+        }
     }
 
     // Sadece process group liderine gönder
@@ -11414,8 +11973,11 @@ fn sys_fanotify_init(flags: usize, event_f_flags: usize) -> usize {
 /// `fanotify_mark` — Dosya erişim bildirimi izleme ekler.
 /// fanotify_init'den dönen fd üzerinden dosya izleme ekler.
 fn sys_fanotify_mark(
-    fanotify_fd: usize, flags: usize, mask: usize,
-    dfd: usize, pathname_ptr: usize,
+    fanotify_fd: usize,
+    flags: usize,
+    mask: usize,
+    dfd: usize,
+    pathname_ptr: usize,
 ) -> usize {
     // fanotify_mark = inotify_add_watch benzeri
     // FAN_MARK_ADD = 0x1, FAN_MARK_REMOVE = 0x2
@@ -11443,17 +12005,24 @@ fn sys_fanotify_mark(
     let inotify_mask = mask as u32;
     match flags & 0x3F {
         FAN_MARK_ADD => {
-            let ret = crate::fs::inotify::sys_inotify_add_watch(
-                fanotify_fd as i32, &path, inotify_mask,
-            );
-            if ret < 0 { (-ret) as usize } else { 0 }
+            let ret =
+                crate::fs::inotify::sys_inotify_add_watch(fanotify_fd as i32, &path, inotify_mask);
+            if ret < 0 {
+                (-ret) as usize
+            } else {
+                0
+            }
         }
         FAN_MARK_REMOVE => {
             // fanotify'da watch descriptor PATH ile değil, inotify ile aynı şekilde
             // wd üzerinden kaldırılır — burada pathname'den wd bulmamız gerekir
             // Basit implementasyon: inotify_rm_watch çağır
             let ret = crate::fs::inotify::sys_inotify_rm_watch(fanotify_fd as i32, 0);
-            if ret < 0 { (-ret) as usize } else { 0 }
+            if ret < 0 {
+                (-ret) as usize
+            } else {
+                0
+            }
         }
         _ => errno(EINVAL),
     }
@@ -11464,7 +12033,12 @@ fn sys_fanotify_mark(
 /// nr_segments: kernel segment sayısı
 /// segments_ptr: kexec_segment array
 /// flags: KEXEC_ON_CRASH (0x1), KEXEC_PRESERVE_CONTEXT (0x2)
-fn sys_kexec_load(_entry: usize, _nr_segments: usize, _segments_ptr: usize, _flags: usize) -> usize {
+fn sys_kexec_load(
+    _entry: usize,
+    _nr_segments: usize,
+    _segments_ptr: usize,
+    _flags: usize,
+) -> usize {
     // kexec_load, çalışırken sistemi yeniden başlatmak için kullanılır
     // echOS'ta henüz kexec desteği yok — gerçek kernel yükleme altyapısı gerekir
     // Bu syscall'ı çağırmak tehlikeli olabilir, EPERM ile reddet
@@ -11496,8 +12070,12 @@ fn sys_membarrier(cmd: usize, _flags: usize, _unused: usize) -> usize {
 /// maxnode: maksimum NUMA node numarası
 /// flags: MPOL_MF_STRICT, MPOL_MF_MOVE, ...
 fn sys_mbind(
-    _start: usize, _len: usize, _mode: usize,
-    _nmask_ptr: usize, _maxnode: usize, _flags: usize,
+    _start: usize,
+    _len: usize,
+    _mode: usize,
+    _nmask_ptr: usize,
+    _maxnode: usize,
+    _flags: usize,
 ) -> usize {
     // echOS'ta NUMA desteklenmiyor — tek NUMA node varsayımı
     // Gerçek NUMA implementasyonu için: NUMA topology, node-aware allocator gerekir
@@ -11515,8 +12093,11 @@ fn sys_set_mempolicy(_mode: usize, _nmask_ptr: usize, _maxnode: usize) -> usize 
 
 /// `get_mempolicy` — Sürecin NUMA bellek politikasını okur.
 fn sys_get_mempolicy(
-    _mode_ptr: usize, _nmask_ptr: usize, _maxnode: usize,
-    _addr: usize, _flags: usize,
+    _mode_ptr: usize,
+    _nmask_ptr: usize,
+    _maxnode: usize,
+    _addr: usize,
+    _flags: usize,
 ) -> usize {
     // echOS'ta NUMA desteklenmiyor — varsayılan politika: MPOL_DEFAULT
     if _mode_ptr != 0 {
@@ -11540,8 +12121,11 @@ fn sys_migrate_pages(pid: usize, maxnode: usize, _old_nmask_ptr: usize) -> usize
 
 /// `add_key` — Anahtar yönetimi (keyring) anahtarı ekler.
 fn sys_add_key(
-    type_ptr: usize, description_ptr: usize,
-    payload_ptr: usize, plen: usize, _keyring_serial: usize,
+    type_ptr: usize,
+    description_ptr: usize,
+    payload_ptr: usize,
+    plen: usize,
+    _keyring_serial: usize,
 ) -> usize {
     // echoOS'ta keyring/anahtar yönetimi henüz desteklenmiyor
     // Linux keyring: /proc/keys, /proc/key-users, request_key()
@@ -11550,19 +12134,28 @@ fn sys_add_key(
 
 /// `request_key` — Anahtar yönetimi (keyring) anahtarı talep eder.
 fn sys_request_key(
-    _type_ptr: usize, _description_ptr: usize,
-    _callout_info_ptr: usize, _dest_keyring: usize,
+    _type_ptr: usize,
+    _description_ptr: usize,
+    _callout_info_ptr: usize,
+    _dest_keyring: usize,
 ) -> usize {
     errno(ENOSYS)
 }
 
 /// `process_madvise` — Başka bir süreç için bellek tavsiyesi uygular.
 fn sys_process_madvise(
-    pidfd: usize, iov_ptr: usize, vlen: usize,
-    advice: usize, _flags: usize,
+    pidfd: usize,
+    iov_ptr: usize,
+    vlen: usize,
+    advice: usize,
+    _flags: usize,
 ) -> usize {
-    if iov_ptr == 0 || vlen == 0 { return errno(EINVAL); }
-    if vlen > 256 { return errno(EINVAL); } // UIO_MAXIOV
+    if iov_ptr == 0 || vlen == 0 {
+        return errno(EINVAL);
+    }
+    if vlen > 256 {
+        return errno(EINVAL);
+    } // UIO_MAXIOV
 
     // Hedef sürecin PID'ini al (pidfd → PID dönüşümü)
     let target_pid = pidfd; // Basit: pidfd = pid
@@ -11571,16 +12164,22 @@ fn sys_process_madvise(
     let mut total_advised: usize = 0;
     for i in 0..vlen {
         let entry_ptr = iov_ptr + i * 16;
-        if let Err(e) = validate_user_range(entry_ptr, 16) { break; }
+        if let Err(e) = validate_user_range(entry_ptr, 16) {
+            break;
+        }
 
         let iov_base: usize = with_user_access(|| unsafe { *(entry_ptr as *const usize) });
         let iov_len: usize = with_user_access(|| unsafe { *((entry_ptr + 8) as *const usize) });
 
-        if iov_len == 0 { continue; }
+        if iov_len == 0 {
+            continue;
+        }
 
         // madvise tavsiyesini uygula
         let result = sys_madvise(iov_base, iov_len, advice);
-        if result >= errno_base() { break; }
+        if result >= errno_base() {
+            break;
+        }
         total_advised += iov_len;
     }
 
@@ -11599,8 +12198,11 @@ fn sys_process_mrelease(pidfd: usize, flags: usize) -> usize {
 
 /// `mount_setattr` — Mount özniteliklerini ayarlar.
 fn sys_mount_setattr(
-    _dfd: usize, pathname_ptr: usize, _flags: usize,
-    attr_ptr: usize, size: usize,
+    _dfd: usize,
+    pathname_ptr: usize,
+    _flags: usize,
+    attr_ptr: usize,
+    size: usize,
 ) -> usize {
     if size < core::mem::size_of::<u64>() * 4 {
         return errno(EINVAL);
@@ -11647,23 +12249,34 @@ fn sys_memfd_secret(_flags: usize) -> usize {
 
 /// `io_pgetevents` — Asenkron I/O olaylarını bekler (sinyal ile bildirim).
 fn sys_io_pgetevents(
-    ctx_id: usize, min_nr: usize, nr: usize,
-    events_ptr: usize, timeout_ptr: usize,
+    ctx_id: usize,
+    min_nr: usize,
+    nr: usize,
+    events_ptr: usize,
+    timeout_ptr: usize,
 ) -> usize {
     // io_pgetevents, Linux AIO context'inden olayları okur
     // echoOS'ta Linux AIO henüz tam desteklenmiyor
     // io_setup/io_destroy/io_submit/io_getevents basit stub olarak var
 
-    if nr == 0 { return 0; }
-    if events_ptr == 0 { return errno(EFAULT); }
+    if nr == 0 {
+        return 0;
+    }
+    if events_ptr == 0 {
+        return errno(EFAULT);
+    }
 
     // io_event yapısı: { long long data; long long obj; long long res; long long res2; }
     let event_size = core::mem::size_of::<u64>() * 4; // 32 bytes
-    if let Err(e) = validate_user_range(events_ptr, nr * event_size) { return e; }
+    if let Err(e) = validate_user_range(events_ptr, nr * event_size) {
+        return e;
+    }
 
     // Timeout oku (varsa)
     if timeout_ptr != 0 {
-        if let Err(e) = validate_user_range(timeout_ptr, 16) { return e; }
+        if let Err(e) = validate_user_range(timeout_ptr, 16) {
+            return e;
+        }
         let tv_sec: i64 = with_user_access(|| unsafe { *(timeout_ptr as *const i64) });
         let _tv_nsec: i64 = with_user_access(|| unsafe { *((timeout_ptr + 8) as *const i64) });
 
@@ -11687,11 +12300,13 @@ fn clock_gettime_impl(clock_id: usize, ts: &mut Timespec) -> usize {
     let ticks = BOOT_TICKS.fetch_add(1, Ordering::Relaxed);
     let total_ns = ticks * TICK_NS;
     match clock_id {
-        0 => { // CLOCK_REALTIME — yaklaşık Unix zamanı
+        0 => {
+            // CLOCK_REALTIME — yaklaşık Unix zamanı
             ts.tv_sec = (total_ns / 1_000_000_000) as i64 + 1_700_000_000; // 2023-11-14 approx
             ts.tv_nsec = (total_ns % 1_000_000_000) as i64;
         }
-        1 => { // CLOCK_MONOTONIC
+        1 => {
+            // CLOCK_MONOTONIC
             ts.tv_sec = (total_ns / 1_000_000_000) as i64;
             ts.tv_nsec = (total_ns % 1_000_000_000) as i64;
         }

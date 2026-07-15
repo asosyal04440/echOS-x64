@@ -1775,6 +1775,21 @@ impl BtrfsFilesystem {
         self.load_chunk_tree(storage)?;
         self.load_root_tree(storage)?;
         self.load_default_fs_tree(storage)?;
+        self.validate_mount_contract()?;
+        Ok(())
+    }
+
+    fn validate_mount_contract(&self) -> Result<(), &'static str> {
+        for extents in self.file_extents.values() {
+            for record in extents {
+                if record.extent.compression != 0 {
+                    return Err("btrfs: compressed extents are not supported");
+                }
+                if record.extent.encryption != 0 {
+                    return Err("btrfs: encrypted extents are not supported");
+                }
+            }
+        }
         Ok(())
     }
 

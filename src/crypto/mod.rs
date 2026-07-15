@@ -28,6 +28,7 @@
 //! ```
 
 pub mod argon2;
+pub mod blake2s;
 pub mod blake3;
 pub mod chacha20;
 pub mod ecdsa;
@@ -38,6 +39,7 @@ pub mod sha3;
 pub mod signature;
 
 pub use argon2::{Argon2, Argon2Config, Argon2Variant, Argon2Version, PasswordHash};
+pub use blake2s::{blake2s, blake2s_keyed, hmac_blake2s, Blake2s, HkdfBlake2s};
 pub use blake3::{blake3_hash, blake3_mac, Blake3};
 pub use chacha20::{ChaCha20, ChaCha20Poly1305, XChaCha20Poly1305};
 pub use ed25519::{

@@ -1648,6 +1648,10 @@ mod tests {
                 Err(())
             }
         }
+
+        fn supports_flush(&self) -> bool {
+            true
+        }
     }
 
     fn checked_superblock_block(block_size: usize, sequence: u32, start: u32) -> Vec<u8> {

@@ -1507,9 +1507,7 @@ impl EchShell {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_SHELL: Arc<EchShell> = Arc::new(EchShell::new());
-}
+static ECH_SHELL: spin::Lazy<Arc<EchShell>> = spin::Lazy::new(|| Arc::new(EchShell::new()));
 
 pub fn init() {
     ECH_SHELL.start();

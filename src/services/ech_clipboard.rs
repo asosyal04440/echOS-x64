@@ -149,9 +149,7 @@ impl EchClipboard {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_CLIPBOARD: Arc<EchClipboard> = Arc::new(EchClipboard::new());
-}
+static ECH_CLIPBOARD: spin::Lazy<Arc<EchClipboard>> = spin::Lazy::new(|| Arc::new(EchClipboard::new()));
 
 pub fn init() {
     ECH_CLIPBOARD.start();

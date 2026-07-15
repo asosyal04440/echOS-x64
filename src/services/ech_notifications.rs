@@ -166,9 +166,7 @@ impl EchNotifications {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref ECH_NOTIFICATIONS: Arc<EchNotifications> = Arc::new(EchNotifications::new());
-}
+static ECH_NOTIFICATIONS: spin::Lazy<Arc<EchNotifications>> = spin::Lazy::new(|| Arc::new(EchNotifications::new()));
 
 pub fn init() {
     ECH_NOTIFICATIONS.start();

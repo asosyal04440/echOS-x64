@@ -1,11 +1,11 @@
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::format;
-use alloc::collections::BTreeMap;
-use spin::Mutex;
+use crate::executor;
 use crate::shell_syscall as sc;
 use crate::ShellState;
-use crate::executor;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use spin::Mutex;
 
 pub struct ScriptState {
     pub errexit: bool,
@@ -20,9 +20,13 @@ pub struct ScriptState {
 impl ScriptState {
     pub const fn new() -> Self {
         Self {
-            errexit: false, xtrace: false, nounset: false,
-            local_vars: BTreeMap::new(), functions: BTreeMap::new(),
-            break_flag: false, continue_flag: false,
+            errexit: false,
+            xtrace: false,
+            nounset: false,
+            local_vars: BTreeMap::new(),
+            functions: BTreeMap::new(),
+            break_flag: false,
+            continue_flag: false,
         }
     }
 }
@@ -33,9 +37,13 @@ pub fn run_script(state: &mut ShellState, script: &str) -> i32 {
     let mut last_exit = 0;
     for line in script.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') { continue; }
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
         last_exit = execute_script_line(state, line);
-        if SCRIPT_STATE.lock().errexit && last_exit != 0 { break; }
+        if SCRIPT_STATE.lock().errexit && last_exit != 0 {
+            break;
+        }
     }
     last_exit
 }
@@ -51,11 +59,11 @@ fn execute_script_line(state: &mut ShellState, line: &str) -> i32 {
     let trimmed = expanded.trim();
 
     if trimmed.starts_with("[[ ") && trimmed.ends_with(" ]]") {
-        let expr = &trimmed[3..trimmed.len()-3];
+        let expr = &trimmed[3..trimmed.len() - 3];
         return eval_extended_test(state, expr);
     }
     if trimmed.starts_with("((") && trimmed.ends_with(r"))") {
-        let expr = &trimmed[2..trimmed.len()-2];
+        let expr = &trimmed[2..trimmed.len() - 2];
         let result = eval_arithmetic(expr);
         state.exit_code = if result == 0 { 1 } else { 0 };
         return state.exit_code;
@@ -64,7 +72,8 @@ fn execute_script_line(state: &mut ShellState, line: &str) -> i32 {
         if trimmed.ends_with(')') {
             let var_name = &trimmed[..eq_pos];
             let inner = &trimmed[eq_pos + 2..trimmed.len() - 1];
-            let items: Vec<String> = inner.split_whitespace()
+            let items: Vec<String> = inner
+                .split_whitespace()
                 .map(|s| state.env.expand(s))
                 .collect();
             state.env.set_array(var_name, items);
@@ -86,7 +95,8 @@ fn execute_script_line(state: &mut ShellState, line: &str) -> i32 {
     if expanded.starts_with("case ") {
         return exec_case(state, &expanded);
     }
-    if expanded.starts_with("function ") || expanded.contains("() {") || expanded.contains("()\n{") {
+    if expanded.starts_with("function ") || expanded.contains("() {") || expanded.contains("()\n{")
+    {
         return exec_function_def(&expanded);
     }
     if expanded.starts_with("local ") {
@@ -151,7 +161,9 @@ fn execute_script_line(state: &mut ShellState, line: &str) -> i32 {
     if expanded.starts_with("shift") {
         let n: usize = if expanded.len() > 6 && expanded.as_bytes()[6] == b' ' {
             expanded[7..].trim().parse().unwrap_or(1)
-        } else { 1 };
+        } else {
+            1
+        };
         for _ in 0..n {
             for i in 1..=99 {
                 let key = format!("{}", i);
@@ -172,7 +184,9 @@ fn execute_script_line(state: &mut ShellState, line: &str) -> i32 {
 fn exec_if(state: &mut ShellState, line: &str) -> i32 {
     let rest = &line[3..].trim();
     let cond_end = find_keyword(rest, "then");
-    if cond_end == 0 { return 1; }
+    if cond_end == 0 {
+        return 1;
+    }
     let condition = rest[..cond_end].trim();
     let body_start = rest[cond_end + 4..].trim();
     let (body, elif_parts, else_body) = parse_if_blocks(body_start);
@@ -181,8 +195,12 @@ fn exec_if(state: &mut ShellState, line: &str) -> i32 {
     if cond_result == 0 {
         for line in body.lines() {
             let l = line.trim();
-            if !l.is_empty() { execute_script_line(state, l); }
-            if SCRIPT_STATE.lock().break_flag || SCRIPT_STATE.lock().continue_flag { break; }
+            if !l.is_empty() {
+                execute_script_line(state, l);
+            }
+            if SCRIPT_STATE.lock().break_flag || SCRIPT_STATE.lock().continue_flag {
+                break;
+            }
         }
         return state.exit_code;
     }
@@ -192,8 +210,12 @@ fn exec_if(state: &mut ShellState, line: &str) -> i32 {
         if elif_result == 0 {
             for line in elif_body.lines() {
                 let l = line.trim();
-                if !l.is_empty() { execute_script_line(state, l); }
-                if SCRIPT_STATE.lock().break_flag || SCRIPT_STATE.lock().continue_flag { break; }
+                if !l.is_empty() {
+                    execute_script_line(state, l);
+                }
+                if SCRIPT_STATE.lock().break_flag || SCRIPT_STATE.lock().continue_flag {
+                    break;
+                }
             }
             return state.exit_code;
         }
@@ -202,8 +224,12 @@ fn exec_if(state: &mut ShellState, line: &str) -> i32 {
     if let Some(else_code) = else_body {
         for line in else_code.lines() {
             let l = line.trim();
-            if !l.is_empty() { execute_script_line(state, l); }
-            if SCRIPT_STATE.lock().break_flag || SCRIPT_STATE.lock().continue_flag { break; }
+            if !l.is_empty() {
+                execute_script_line(state, l);
+            }
+            if SCRIPT_STATE.lock().break_flag || SCRIPT_STATE.lock().continue_flag {
+                break;
+            }
         }
     }
     state.exit_code
@@ -211,16 +237,28 @@ fn exec_if(state: &mut ShellState, line: &str) -> i32 {
 
 fn eval_condition(state: &mut ShellState, cond: &str) -> i32 {
     let cond = cond.trim();
-    if cond == "true" { return 0; }
-    if cond == "false" { return 1; }
+    if cond == "true" {
+        return 0;
+    }
+    if cond == "false" {
+        return 1;
+    }
     if let Some(rest) = cond.strip_prefix("-f ") {
-        return if sc::sys_open(rest.trim(), 0).is_ok() { 0 } else { 1 };
+        return if sc::sys_open(rest.trim(), 0).is_ok() {
+            0
+        } else {
+            1
+        };
     }
     if let Some(_rest) = cond.strip_prefix("-d ") {
         return 1;
     }
     if let Some(rest) = cond.strip_prefix("-e ") {
-        return if sc::sys_open(rest.trim(), 0).is_ok() { 0 } else { 1 };
+        return if sc::sys_open(rest.trim(), 0).is_ok() {
+            0
+        } else {
+            1
+        };
     }
     if let Some(rest) = cond.strip_prefix("-z ") {
         let val = state.env.expand(rest.trim());
@@ -285,9 +323,15 @@ fn eval_condition(state: &mut ShellState, cond: &str) -> i32 {
 
 fn exec_loop(state: &mut ShellState, line: &str) -> i32 {
     let until = line.starts_with("until");
-    let rest = if until { &line[6..].trim() } else { &line[6..].trim() };
+    let rest = if until {
+        &line[6..].trim()
+    } else {
+        &line[6..].trim()
+    };
     let cond_end = find_keyword(rest, "do");
-    if cond_end == 0 { return 1; }
+    if cond_end == 0 {
+        return 1;
+    }
     let condition = rest[..cond_end].trim();
     let body_start = rest[cond_end + 2..].trim();
     let body = extract_block(body_start);
@@ -296,13 +340,27 @@ fn exec_loop(state: &mut ShellState, line: &str) -> i32 {
         SCRIPT_STATE.lock().break_flag = false;
         SCRIPT_STATE.lock().continue_flag = false;
         let cond_result = eval_condition(state, condition);
-        if until { if cond_result == 0 { break; } } else { if cond_result != 0 { break; } }
+        if until {
+            if cond_result == 0 {
+                break;
+            }
+        } else {
+            if cond_result != 0 {
+                break;
+            }
+        }
 
         for bline in body.lines() {
             let l = bline.trim();
-            if !l.is_empty() { execute_script_line(state, l); }
-            if SCRIPT_STATE.lock().break_flag { return state.exit_code; }
-            if SCRIPT_STATE.lock().continue_flag { break; }
+            if !l.is_empty() {
+                execute_script_line(state, l);
+            }
+            if SCRIPT_STATE.lock().break_flag {
+                return state.exit_code;
+            }
+            if SCRIPT_STATE.lock().continue_flag {
+                break;
+            }
         }
         if SCRIPT_STATE.lock().continue_flag {
             SCRIPT_STATE.lock().continue_flag = false;
@@ -321,11 +379,20 @@ fn exec_for_raw(state: &mut ShellState, line: &str) -> i32 {
         let var_name = rest[..pos].trim();
         let after_in = &rest[pos + 4..];
         let list_end = find_keyword(after_in, "do");
-        let items_str = if list_end > 0 { &after_in[..list_end] } else { after_in };
-        let body_start = if list_end > 0 { after_in[list_end + 2..].trim() } else { "" };
+        let items_str = if list_end > 0 {
+            &after_in[..list_end]
+        } else {
+            after_in
+        };
+        let body_start = if list_end > 0 {
+            after_in[list_end + 2..].trim()
+        } else {
+            ""
+        };
         let body = extract_block(body_start);
 
-        let items: Vec<String> = items_str.split_whitespace()
+        let items: Vec<String> = items_str
+            .split_whitespace()
             .map(|s| state.env.expand(s))
             .collect();
         for item in &items {
@@ -335,9 +402,15 @@ fn exec_for_raw(state: &mut ShellState, line: &str) -> i32 {
 
             for bline in body.lines() {
                 let l = bline.trim();
-                if !l.is_empty() { execute_script_line(state, l); }
-                if SCRIPT_STATE.lock().break_flag { return state.exit_code; }
-                if SCRIPT_STATE.lock().continue_flag { break; }
+                if !l.is_empty() {
+                    execute_script_line(state, l);
+                }
+                if SCRIPT_STATE.lock().break_flag {
+                    return state.exit_code;
+                }
+                if SCRIPT_STATE.lock().continue_flag {
+                    break;
+                }
             }
             if SCRIPT_STATE.lock().continue_flag {
                 SCRIPT_STATE.lock().continue_flag = false;
@@ -354,11 +427,20 @@ fn exec_for(state: &mut ShellState, line: &str) -> i32 {
         let var_name = &rest[..pos];
         let list_str = &rest[pos + 4..];
         let list_end = find_keyword(list_str, "do");
-        let items_str = if list_end > 0 { &list_str[..list_end] } else { list_str };
-        let body_start = if list_end > 0 { list_str[list_end + 2..].trim() } else { "" };
+        let items_str = if list_end > 0 {
+            &list_str[..list_end]
+        } else {
+            list_str
+        };
+        let body_start = if list_end > 0 {
+            list_str[list_end + 2..].trim()
+        } else {
+            ""
+        };
         let body = extract_block(body_start);
 
-        let items: Vec<String> = items_str.split_whitespace()
+        let items: Vec<String> = items_str
+            .split_whitespace()
             .map(|s| state.env.expand(s))
             .collect();
         for item in &items {
@@ -368,9 +450,15 @@ fn exec_for(state: &mut ShellState, line: &str) -> i32 {
 
             for bline in body.lines() {
                 let l = bline.trim();
-                if !l.is_empty() { execute_script_line(state, l); }
-                if SCRIPT_STATE.lock().break_flag { return state.exit_code; }
-                if SCRIPT_STATE.lock().continue_flag { break; }
+                if !l.is_empty() {
+                    execute_script_line(state, l);
+                }
+                if SCRIPT_STATE.lock().break_flag {
+                    return state.exit_code;
+                }
+                if SCRIPT_STATE.lock().continue_flag {
+                    break;
+                }
             }
             if SCRIPT_STATE.lock().continue_flag {
                 SCRIPT_STATE.lock().continue_flag = false;
@@ -382,8 +470,16 @@ fn exec_for(state: &mut ShellState, line: &str) -> i32 {
         let var_name = parts[0].trim();
         let seq_expr = parts[1].trim();
         let seq_end = find_keyword(seq_expr, "do");
-        let seq_str = if seq_end > 0 { &seq_expr[..seq_end] } else { seq_expr };
-        let body_start = if seq_end > 0 { seq_expr[seq_end + 2..].trim() } else { "" };
+        let seq_str = if seq_end > 0 {
+            &seq_expr[..seq_end]
+        } else {
+            seq_expr
+        };
+        let body_start = if seq_end > 0 {
+            seq_expr[seq_end + 2..].trim()
+        } else {
+            ""
+        };
         let body = extract_block(body_start);
 
         let items = eval_seq(seq_str);
@@ -394,9 +490,15 @@ fn exec_for(state: &mut ShellState, line: &str) -> i32 {
 
             for bline in body.lines() {
                 let l = bline.trim();
-                if !l.is_empty() { execute_script_line(state, l); }
-                if SCRIPT_STATE.lock().break_flag { return state.exit_code; }
-                if SCRIPT_STATE.lock().continue_flag { break; }
+                if !l.is_empty() {
+                    execute_script_line(state, l);
+                }
+                if SCRIPT_STATE.lock().break_flag {
+                    return state.exit_code;
+                }
+                if SCRIPT_STATE.lock().continue_flag {
+                    break;
+                }
             }
             if SCRIPT_STATE.lock().continue_flag {
                 SCRIPT_STATE.lock().continue_flag = false;
@@ -411,7 +513,9 @@ fn exec_cstyle_for(state: &mut ShellState, line: &str) -> i32 {
     let rest = &line[4..].trim();
     let inner = if let Some(s) = rest.strip_prefix("((") {
         s.strip_suffix("))").unwrap_or(s)
-    } else { rest };
+    } else {
+        rest
+    };
     let parts: Vec<&str> = inner.split(';').collect();
     let init_expr = parts.get(0).unwrap_or(&"").trim();
     let cond_expr = parts.get(1).unwrap_or(&"1").trim();
@@ -424,10 +528,16 @@ fn exec_cstyle_for(state: &mut ShellState, line: &str) -> i32 {
     let body_start_pos = line.find("do").unwrap_or(0);
     let body_start = if body_start_pos > 0 {
         let rest2 = &line[body_start_pos..];
-        if rest2.starts_with("do {") { &rest2[3..] }
-        else if rest2.starts_with("do") { &rest2[2..] }
-        else { rest2 }
-    } else { "" };
+        if rest2.starts_with("do {") {
+            &rest2[3..]
+        } else if rest2.starts_with("do") {
+            &rest2[2..]
+        } else {
+            rest2
+        }
+    } else {
+        ""
+    };
     let body = extract_block(body_start);
 
     loop {
@@ -435,13 +545,21 @@ fn exec_cstyle_for(state: &mut ShellState, line: &str) -> i32 {
         SCRIPT_STATE.lock().continue_flag = false;
 
         let cond_val = eval_cstyle_expr(state, cond_expr);
-        if cond_val == 0 { break; }
+        if cond_val == 0 {
+            break;
+        }
 
         for bline in body.lines() {
             let l = bline.trim();
-            if !l.is_empty() { execute_script_line(state, l); }
-            if SCRIPT_STATE.lock().break_flag { return state.exit_code; }
-            if SCRIPT_STATE.lock().continue_flag { break; }
+            if !l.is_empty() {
+                execute_script_line(state, l);
+            }
+            if SCRIPT_STATE.lock().break_flag {
+                return state.exit_code;
+            }
+            if SCRIPT_STATE.lock().continue_flag {
+                break;
+            }
         }
         if SCRIPT_STATE.lock().continue_flag {
             SCRIPT_STATE.lock().continue_flag = false;
@@ -468,20 +586,41 @@ fn eval_cstyle_expr(state: &mut ShellState, expr: &str) -> i64 {
         if part.is_empty() {
             continue;
         }
-        if part.ends_with("++") || part.ends_with("--") || part.starts_with("++") || part.starts_with("--") {
+        if part.ends_with("++")
+            || part.ends_with("--")
+            || part.starts_with("++")
+            || part.starts_with("--")
+        {
             result = eval_cstyle_arith(state, part);
             continue;
         }
         if let Some((var_name, op, val_str)) = parse_cstyle_assignment(part) {
-            let old: i64 = state.env.get(var_name).unwrap_or(String::from("0")).parse().unwrap_or(0);
+            let old: i64 = state
+                .env
+                .get(var_name)
+                .unwrap_or(String::from("0"))
+                .parse()
+                .unwrap_or(0);
             let rhs = eval_cstyle_arith(state, val_str);
             let new_val = match op {
                 "=" => rhs,
                 "+=" => old + rhs,
                 "-=" => old - rhs,
                 "*=" => old * rhs,
-                "/=" => if rhs != 0 { old / rhs } else { 0 },
-                "%=" => if rhs != 0 { old % rhs } else { 0 },
+                "/=" => {
+                    if rhs != 0 {
+                        old / rhs
+                    } else {
+                        0
+                    }
+                }
+                "%=" => {
+                    if rhs != 0 {
+                        old % rhs
+                    } else {
+                        0
+                    }
+                }
                 _ => rhs,
             };
             state.env.set(var_name, &format!("{}", new_val));
@@ -521,25 +660,45 @@ fn eval_cstyle_arith(state: &mut ShellState, expr: &str) -> i64 {
     let expr = expr.trim();
     if let Some(inner) = expr.strip_prefix("++").map(|s| s.trim()) {
         let var = inner.trim_start_matches('$');
-        let val: i64 = state.env.get(var).unwrap_or(String::from("0")).parse().unwrap_or(0);
+        let val: i64 = state
+            .env
+            .get(var)
+            .unwrap_or(String::from("0"))
+            .parse()
+            .unwrap_or(0);
         state.env.set(var, &format!("{}", val + 1));
         return val + 1;
     }
     if let Some(inner) = expr.strip_prefix("--").map(|s| s.trim()) {
         let var = inner.trim_start_matches('$');
-        let val: i64 = state.env.get(var).unwrap_or(String::from("0")).parse().unwrap_or(0);
+        let val: i64 = state
+            .env
+            .get(var)
+            .unwrap_or(String::from("0"))
+            .parse()
+            .unwrap_or(0);
         state.env.set(var, &format!("{}", val - 1));
         return val - 1;
     }
     if let Some(inner) = expr.strip_suffix("++").map(|s| s.trim()) {
         let var = inner.trim_start_matches('$');
-        let val: i64 = state.env.get(var).unwrap_or(String::from("0")).parse().unwrap_or(0);
+        let val: i64 = state
+            .env
+            .get(var)
+            .unwrap_or(String::from("0"))
+            .parse()
+            .unwrap_or(0);
         state.env.set(var, &format!("{}", val + 1));
         return val;
     }
     if let Some(inner) = expr.strip_suffix("--").map(|s| s.trim()) {
         let var = inner.trim_start_matches('$');
-        let val: i64 = state.env.get(var).unwrap_or(String::from("0")).parse().unwrap_or(0);
+        let val: i64 = state
+            .env
+            .get(var)
+            .unwrap_or(String::from("0"))
+            .parse()
+            .unwrap_or(0);
         state.env.set(var, &format!("{}", val - 1));
         return val;
     }
@@ -647,18 +806,31 @@ fn exec_select(state: &mut ShellState, line: &str) -> i32 {
     let items_str = if let Some(pos) = in_pos {
         let after_in = &rest[pos + 4..];
         let word_end = find_keyword(after_in, "do");
-        if word_end > 0 { &after_in[..word_end] } else { after_in }
-    } else { "" };
+        if word_end > 0 {
+            &after_in[..word_end]
+        } else {
+            after_in
+        }
+    } else {
+        ""
+    };
     let body_start_pos = line.find("do").unwrap_or(0);
     let body_start = if body_start_pos > 0 {
         let rest2 = &line[body_start_pos..];
-        if rest2.starts_with("do {") { &rest2[3..] }
-        else if rest2.starts_with("do") { &rest2[2..] }
-        else { rest2 }
-    } else { "" };
+        if rest2.starts_with("do {") {
+            &rest2[3..]
+        } else if rest2.starts_with("do") {
+            &rest2[2..]
+        } else {
+            rest2
+        }
+    } else {
+        ""
+    };
     let body = extract_block(body_start);
 
-    let items: Vec<String> = items_str.split_whitespace()
+    let items: Vec<String> = items_str
+        .split_whitespace()
         .map(|s| state.env.expand(s))
         .collect();
 
@@ -683,8 +855,12 @@ fn exec_select(state: &mut ShellState, line: &str) -> i32 {
             _ => break,
         };
 
-        if input.is_empty() { continue; }
-        if input == "EOF" { break; }
+        if input.is_empty() {
+            continue;
+        }
+        if input == "EOF" {
+            break;
+        }
         if let Ok(idx) = input.parse::<usize>() {
             if idx > 0 && idx <= items.len() {
                 state.env.set(var_name, &items[idx - 1]);
@@ -698,9 +874,15 @@ fn exec_select(state: &mut ShellState, line: &str) -> i32 {
 
         for bline in body.lines() {
             let l = bline.trim();
-            if !l.is_empty() { execute_script_line(state, l); }
-            if SCRIPT_STATE.lock().break_flag { return state.exit_code; }
-            if SCRIPT_STATE.lock().continue_flag { break; }
+            if !l.is_empty() {
+                execute_script_line(state, l);
+            }
+            if SCRIPT_STATE.lock().break_flag {
+                return state.exit_code;
+            }
+            if SCRIPT_STATE.lock().continue_flag {
+                break;
+            }
         }
         if SCRIPT_STATE.lock().continue_flag {
             SCRIPT_STATE.lock().continue_flag = false;
@@ -729,7 +911,9 @@ pub fn exec_trap(state: &mut ShellState, line: &str) -> i32 {
         if is_trap_condition(&action_or_cond) {
             let cond = normalize_trap_condition(&action_or_cond);
             if let Some(action) = state.env.get(&format!("_trap_{}", cond)) {
-                if !action.is_empty() { crate::println(&action); }
+                if !action.is_empty() {
+                    crate::println(&action);
+                }
             }
             return 0;
         }
@@ -769,9 +953,15 @@ pub fn exec_trap(state: &mut ShellState, line: &str) -> i32 {
 pub fn run_trap_action(state: &mut ShellState, condition: &str) {
     let cond = normalize_trap_condition(condition);
     let key = format!("_trap_{}", cond);
-    let Some(action) = state.env.get(&key) else { return; };
-    if action.is_empty() { return; }
-    if state.env.get("_in_trap").as_deref() == Some("1") { return; }
+    let Some(action) = state.env.get(&key) else {
+        return;
+    };
+    if action.is_empty() {
+        return;
+    }
+    if state.env.get("_in_trap").as_deref() == Some("1") {
+        return;
+    }
 
     state.env.set("_in_trap", "1");
     let saved_exit = state.exit_code;
@@ -788,7 +978,9 @@ pub fn run_trap_action(state: &mut ShellState, condition: &str) {
 
 fn parse_trap_operand(input: &str) -> (&str, &str) {
     let s = input.trim_start();
-    if s.is_empty() { return ("", ""); }
+    if s.is_empty() {
+        return ("", "");
+    }
     let bytes = s.as_bytes();
     if bytes[0] == b'\'' || bytes[0] == b'"' {
         let quote = bytes[0];
@@ -822,14 +1014,25 @@ fn strip_outer_quotes(input: &str) -> String {
 
 fn normalize_trap_condition(cond: &str) -> String {
     let mut c = cond.trim().to_uppercase();
-    if c.starts_with("SIG") { c = c[3..].to_string(); }
-    if c == "0" { c = "EXIT".to_string(); }
+    if c.starts_with("SIG") {
+        c = c[3..].to_string();
+    }
+    if c == "0" {
+        c = "EXIT".to_string();
+    }
     c
 }
 
 fn is_trap_condition(s: &str) -> bool {
     let c = normalize_trap_condition(s);
-    c == "EXIT" || c == "ERR" || c == "INT" || c == "TERM" || c == "QUIT" || c == "HUP" || c == "TSTP" || c.chars().all(|ch| ch.is_ascii_digit())
+    c == "EXIT"
+        || c == "ERR"
+        || c == "INT"
+        || c == "TERM"
+        || c == "QUIT"
+        || c == "HUP"
+        || c == "TSTP"
+        || c.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn exec_case(state: &mut ShellState, line: &str) -> i32 {
@@ -839,20 +1042,31 @@ fn exec_case(state: &mut ShellState, line: &str) -> i32 {
     let _bytes = rest.as_bytes();
 
     let body_start = rest.find("esac");
-    if body_start == None { return 1; }
+    if body_start == None {
+        return 1;
+    }
     let body = &rest[rest.find('\n').unwrap_or(0)..];
 
     for case_line in body.lines() {
         let case_line = case_line.trim();
-        if case_line == "esac" { break; }
+        if case_line == "esac" {
+            break;
+        }
         if case_line.starts_with('(') || case_line.ends_with(')') {
-            let pattern = case_line.trim_start_matches('(').trim_end_matches(')').trim();
+            let pattern = case_line
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
             if pattern == &var || pattern == "*" {
                 let in_case = true;
                 for cl in body.lines() {
                     let cl = cl.trim();
-                    if cl == "esac" { break; }
-                    if cl == ";;" { break; }
+                    if cl == "esac" {
+                        break;
+                    }
+                    if cl == ";;" {
+                        break;
+                    }
                     if in_case && !cl.is_empty() {
                         execute_script_line(state, cl);
                     }
@@ -885,7 +1099,10 @@ fn exec_local(line: &str) -> i32 {
     if let Some(pos) = rest.find('=') {
         let key = &rest[..pos];
         let val = &rest[pos + 1..];
-        SCRIPT_STATE.lock().local_vars.insert(key.to_string(), val.to_string());
+        SCRIPT_STATE
+            .lock()
+            .local_vars
+            .insert(key.to_string(), val.to_string());
     }
     0
 }
@@ -904,7 +1121,9 @@ fn eval_or_expr(state: &mut ShellState, expr: &str) -> i32 {
     let parts: Vec<&str> = split_top_level(expr, "||");
     if parts.len() > 1 {
         for part in &parts {
-            if eval_and_expr(state, part.trim()) == 0 { return 0; }
+            if eval_and_expr(state, part.trim()) == 0 {
+                return 0;
+            }
         }
         return 1;
     }
@@ -915,7 +1134,9 @@ fn eval_and_expr(state: &mut ShellState, expr: &str) -> i32 {
     let parts: Vec<&str> = split_top_level(expr, "&&");
     if parts.len() > 1 {
         for part in &parts {
-            if eval_and_expr(state, part.trim()) != 0 { return 1; }
+            if eval_and_expr(state, part.trim()) != 0 {
+                return 1;
+            }
         }
         return 0;
     }
@@ -926,7 +1147,11 @@ fn eval_not_expr(state: &mut ShellState, expr: &str) -> i32 {
     let expr = expr.trim();
     if let Some(rest) = expr.strip_prefix('!') {
         let rest = rest.trim();
-        if eval_not_expr(state, rest) == 0 { 1 } else { 0 }
+        if eval_not_expr(state, rest) == 0 {
+            1
+        } else {
+            0
+        }
     } else {
         eval_primary_test(state, expr)
     }
@@ -935,156 +1160,292 @@ fn eval_not_expr(state: &mut ShellState, expr: &str) -> i32 {
 fn eval_primary_test(state: &mut ShellState, expr: &str) -> i32 {
     let expr = expr.trim();
     if expr.starts_with('(') && expr.ends_with(')') {
-        let inner = &expr[1..expr.len()-1];
+        let inner = &expr[1..expr.len() - 1];
         return eval_or_expr(state, inner);
     }
     let args: Vec<&str> = expr.split_whitespace().collect();
-    if args.is_empty() { return 1; }
+    if args.is_empty() {
+        return 1;
+    }
     match args[0] {
         "-f" | "-e" => {
-            if args.len() < 2 { return 1; }
+            if args.len() < 2 {
+                return 1;
+            }
             let path = state.env.expand(args[1]);
-            if crate::shell_syscall::sys_open(&path, 0).is_ok() { 0 } else { 1 }
+            if crate::shell_syscall::sys_open(&path, 0).is_ok() {
+                0
+            } else {
+                1
+            }
         }
         "-d" => {
-            if args.len() < 2 { return 1; }
+            if args.len() < 2 {
+                return 1;
+            }
             let path = state.env.expand(args[1]);
             let mut buf = [0u8; 8192];
             if let Ok(fd) = crate::shell_syscall::sys_open(&path, 0) {
                 let result = if let Ok(n) = crate::shell_syscall::sys_getdents64(fd, &mut buf) {
                     n > 0
-                } else { false };
+                } else {
+                    false
+                };
                 let _ = crate::shell_syscall::sys_close(fd);
-                if result { 0 } else { 1 }
-            } else { 1 }
+                if result {
+                    0
+                } else {
+                    1
+                }
+            } else {
+                1
+            }
         }
         "-r" => {
-            if args.len() < 2 { return 1; }
+            if args.len() < 2 {
+                return 1;
+            }
             let path = state.env.expand(args[1]);
-            if crate::shell_syscall::sys_open(&path, 0).is_ok() { 0 } else { 1 }
+            if crate::shell_syscall::sys_open(&path, 0).is_ok() {
+                0
+            } else {
+                1
+            }
         }
-        "-w" => { 0 }
-        "-x" => { 0 }
+        "-w" => 0,
+        "-x" => 0,
         "-s" => {
-            if args.len() < 2 { return 1; }
+            if args.len() < 2 {
+                return 1;
+            }
             let path = state.env.expand(args[1]);
             match crate::shell_syscall::sys_open(&path, 0) {
                 Ok(fd) => {
                     let _ = crate::shell_syscall::sys_close(fd);
                     0
                 }
-                Err(_) => 1
+                Err(_) => 1,
             }
         }
         "-z" => {
-            let val = if args.len() > 1 { state.env.expand(args[1]) } else { String::new() };
-            if val.is_empty() { 0 } else { 1 }
+            let val = if args.len() > 1 {
+                state.env.expand(args[1])
+            } else {
+                String::new()
+            };
+            if val.is_empty() {
+                0
+            } else {
+                1
+            }
         }
         "-n" => {
-            let val = if args.len() > 1 { state.env.expand(args[1]) } else { String::new() };
-            if !val.is_empty() { 0 } else { 1 }
+            let val = if args.len() > 1 {
+                state.env.expand(args[1])
+            } else {
+                String::new()
+            };
+            if !val.is_empty() {
+                0
+            } else {
+                1
+            }
         }
-        "-L" => { 0 }
-        "-N" => { 0 }
-        "-O" => { 0 }
-        "-G" => { 0 }
-        "-t" => { 0 }
-        "-p" => { 0 }
-        "-c" => { 0 }
-        "-u" => { 0 }
-        "-g" => { 0 }
-        "-k" => { 0 }
-        "-S" => { 0 }
+        "-L" => 0,
+        "-N" => 0,
+        "-O" => 0,
+        "-G" => 0,
+        "-t" => 0,
+        "-p" => 0,
+        "-c" => 0,
+        "-u" => 0,
+        "-g" => 0,
+        "-k" => 0,
+        "-S" => 0,
         "=" | "==" | "-eq" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             let left = state.env.expand(args[0]);
             let right = state.env.expand(args[2]);
-            if left == right { 0 } else { 1 }
+            if left == right {
+                0
+            } else {
+                1
+            }
         }
         "!=" | "-ne" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             let left = state.env.expand(args[0]);
             let right = state.env.expand(args[2]);
-            if left != right { 0 } else { 1 }
+            if left != right {
+                0
+            } else {
+                1
+            }
         }
         "<" | "-lt" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             let left: i64 = state.env.expand(args[0]).parse().unwrap_or(0);
             let right: i64 = state.env.expand(args[2]).parse().unwrap_or(0);
-            if left < right { 0 } else { 1 }
+            if left < right {
+                0
+            } else {
+                1
+            }
         }
         ">" | "-gt" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             let left: i64 = state.env.expand(args[0]).parse().unwrap_or(0);
             let right: i64 = state.env.expand(args[2]).parse().unwrap_or(0);
-            if left > right { 0 } else { 1 }
+            if left > right {
+                0
+            } else {
+                1
+            }
         }
         "<=" | "-le" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             let left: i64 = state.env.expand(args[0]).parse().unwrap_or(0);
             let right: i64 = state.env.expand(args[2]).parse().unwrap_or(0);
-            if left <= right { 0 } else { 1 }
+            if left <= right {
+                0
+            } else {
+                1
+            }
         }
         ">=" | "-ge" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             let left: i64 = state.env.expand(args[0]).parse().unwrap_or(0);
             let right: i64 = state.env.expand(args[2]).parse().unwrap_or(0);
-            if left >= right { 0 } else { 1 }
+            if left >= right {
+                0
+            } else {
+                1
+            }
         }
         "-nt" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             0
         }
         "-ot" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             1
         }
         "-ef" => {
-            if args.len() < 3 { return 1; }
+            if args.len() < 3 {
+                return 1;
+            }
             0
         }
         _ => {
             if args.len() == 1 {
                 let val = state.env.expand(args[0]);
-                if !val.is_empty() && val != "0" && val != "false" { 0 } else { 1 }
+                if !val.is_empty() && val != "0" && val != "false" {
+                    0
+                } else {
+                    1
+                }
             } else if args.len() == 3 {
                 let left = state.env.expand(args[0]);
                 let op = args[1];
                 let right = state.env.expand(args[2]);
                 match op {
-                    "==" | "=" => if left == right { 0 } else { 1 },
-                    "!=" => if left != right { 0 } else { 1 },
-                    "<" => if left < right { 0 } else { 1 },
-                    ">" => if left > right { 0 } else { 1 },
+                    "==" | "=" => {
+                        if left == right {
+                            0
+                        } else {
+                            1
+                        }
+                    }
+                    "!=" => {
+                        if left != right {
+                            0
+                        } else {
+                            1
+                        }
+                    }
+                    "<" => {
+                        if left < right {
+                            0
+                        } else {
+                            1
+                        }
+                    }
+                    ">" => {
+                        if left > right {
+                            0
+                        } else {
+                            1
+                        }
+                    }
                     "-eq" => {
                         let l: i64 = left.parse().unwrap_or(0);
                         let r: i64 = right.parse().unwrap_or(0);
-                        if l == r { 0 } else { 1 }
+                        if l == r {
+                            0
+                        } else {
+                            1
+                        }
                     }
                     "-ne" => {
                         let l: i64 = left.parse().unwrap_or(0);
                         let r: i64 = right.parse().unwrap_or(0);
-                        if l != r { 0 } else { 1 }
+                        if l != r {
+                            0
+                        } else {
+                            1
+                        }
                     }
                     "-lt" => {
                         let l: i64 = left.parse().unwrap_or(0);
                         let r: i64 = right.parse().unwrap_or(0);
-                        if l < r { 0 } else { 1 }
+                        if l < r {
+                            0
+                        } else {
+                            1
+                        }
                     }
                     "-gt" => {
                         let l: i64 = left.parse().unwrap_or(0);
                         let r: i64 = right.parse().unwrap_or(0);
-                        if l > r { 0 } else { 1 }
+                        if l > r {
+                            0
+                        } else {
+                            1
+                        }
                     }
                     "-le" => {
                         let l: i64 = left.parse().unwrap_or(0);
                         let r: i64 = right.parse().unwrap_or(0);
-                        if l <= r { 0 } else { 1 }
+                        if l <= r {
+                            0
+                        } else {
+                            1
+                        }
                     }
                     "-ge" => {
                         let l: i64 = left.parse().unwrap_or(0);
                         let r: i64 = right.parse().unwrap_or(0);
-                        if l >= r { 0 } else { 1 }
+                        if l >= r {
+                            0
+                        } else {
+                            1
+                        }
                     }
                     "=~" => {
                         let pattern = right;
@@ -1096,9 +1457,11 @@ fn eval_primary_test(state: &mut ShellState, expr: &str) -> i32 {
                             1
                         }
                     }
-                    _ => 1
+                    _ => 1,
                 }
-            } else { 1 }
+            } else {
+                1
+            }
         }
     }
 }
@@ -1143,28 +1506,40 @@ fn regex_match_captures(text: &str, pattern: &str) -> Option<Vec<String>> {
 }
 
 fn regex_match_captures_recursive(
-    text: &[char], pat: &[char], ti: usize, pi: usize,
-    captures: *mut Option<(usize, usize)>, caps_len: usize,
+    text: &[char],
+    pat: &[char],
+    ti: usize,
+    pi: usize,
+    captures: *mut Option<(usize, usize)>,
+    caps_len: usize,
 ) -> bool {
-    if pi == pat.len() { return ti == text.len(); }
+    if pi == pat.len() {
+        return ti == text.len();
+    }
 
     if pi < pat.len() && pat[pi] == '(' {
         let group_idx = unsafe {
             let mut count = 0;
             for k in 0..pi {
-                if *pat.get_unchecked(k) == '(' { count += 1; }
+                if *pat.get_unchecked(k) == '(' {
+                    count += 1;
+                }
             }
             count
         };
         if group_idx < caps_len {
-            unsafe { *captures.add(group_idx) = Some((ti, 0)); }
+            unsafe {
+                *captures.add(group_idx) = Some((ti, 0));
+            }
         }
         let result = regex_match_captures_recursive(text, pat, ti, pi + 1, captures, caps_len);
         if result {
             return true;
         } else {
             if group_idx < caps_len {
-                unsafe { *captures.add(group_idx) = None; }
+                unsafe {
+                    *captures.add(group_idx) = None;
+                }
             }
             return false;
         }
@@ -1174,17 +1549,24 @@ fn regex_match_captures_recursive(
         let mut open_pos = None;
         let mut depth = 0;
         for k in (0..pi).rev() {
-            if pat[k] == ')' { depth += 1; }
-            else if pat[k] == '(' {
-                if depth == 0 { open_pos = Some(k); break; }
-                else { depth -= 1; }
+            if pat[k] == ')' {
+                depth += 1;
+            } else if pat[k] == '(' {
+                if depth == 0 {
+                    open_pos = Some(k);
+                    break;
+                } else {
+                    depth -= 1;
+                }
             }
         }
         if let Some(open_k) = open_pos {
             let group_idx = unsafe {
                 let mut count = 0;
                 for k in 0..open_k {
-                    if *pat.get_unchecked(k) == '(' { count += 1; }
+                    if *pat.get_unchecked(k) == '(' {
+                        count += 1;
+                    }
                 }
                 count
             };
@@ -1206,9 +1588,13 @@ fn regex_match_captures_recursive(
             if regex_match_captures_recursive(text, pat, j, pi + 2, captures, caps_len) {
                 return true;
             }
-            if j < text.len() && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi))) {
+            if j < text.len()
+                && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi)))
+            {
                 j += 1;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         return false;
     }
@@ -1220,22 +1606,33 @@ fn regex_match_captures_recursive(
             if regex_match_captures_recursive(text, pat, j, pi + 2, captures, caps_len) {
                 return true;
             }
-            if j < text.len() && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi))) {
+            if j < text.len()
+                && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi)))
+            {
                 j += 1;
                 matched = true;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         return matched && regex_match_captures_recursive(text, pat, j, pi + 2, captures, caps_len);
     }
     if pi + 1 < pat.len() && pat[pi + 1] == '?' {
         let c = pat[pi];
-        if ti < text.len() && (c == '.' || c == text[ti] || (c == '[' && char_class_match(text[ti], &pat, pi))) {
+        if ti < text.len()
+            && (c == '.' || c == text[ti] || (c == '[' && char_class_match(text[ti], &pat, pi)))
+        {
             return regex_match_captures_recursive(text, pat, ti + 1, pi + 2, captures, caps_len);
         }
         return regex_match_captures_recursive(text, pat, ti, pi + 2, captures, caps_len);
     }
-    if pat[pi] == '^' { return regex_match_captures_recursive(text, pat, ti, pi + 1, captures, caps_len); }
-    if pat[pi] == '$' { return ti == text.len() && regex_match_captures_recursive(text, pat, ti, pi + 1, captures, caps_len); }
+    if pat[pi] == '^' {
+        return regex_match_captures_recursive(text, pat, ti, pi + 1, captures, caps_len);
+    }
+    if pat[pi] == '$' {
+        return ti == text.len()
+            && regex_match_captures_recursive(text, pat, ti, pi + 1, captures, caps_len);
+    }
     if pat[pi] == '.' {
         if ti < text.len() {
             return regex_match_captures_recursive(text, pat, ti + 1, pi + 1, captures, caps_len);
@@ -1245,22 +1642,41 @@ fn regex_match_captures_recursive(
     if pat[pi] == '[' {
         let mut j = pi + 1;
         let mut negate = false;
-        if j < pat.len() && pat[j] == '^' { negate = true; j += 1; }
-        if j < pat.len() && pat[j] == ']' { j += 1; }
+        if j < pat.len() && pat[j] == '^' {
+            negate = true;
+            j += 1;
+        }
+        if j < pat.len() && pat[j] == ']' {
+            j += 1;
+        }
         let mut found = false;
         while j < pat.len() && pat[j] != ']' {
             if j + 2 < pat.len() && pat[j + 1] == '-' {
-                if ti < text.len() && text[ti] >= pat[j] && text[ti] <= pat[j + 2] { found = true; }
+                if ti < text.len() && text[ti] >= pat[j] && text[ti] <= pat[j + 2] {
+                    found = true;
+                }
                 j += 3;
             } else {
-                if ti < text.len() && text[ti] == pat[j] { found = true; }
+                if ti < text.len() && text[ti] == pat[j] {
+                    found = true;
+                }
                 j += 1;
             }
         }
         let mut end_class = j;
-        if end_class < pat.len() { end_class += 1; }
+        if end_class < pat.len() {
+            end_class += 1;
+        }
         if found == negate {
-            return ti < text.len() && regex_match_captures_recursive(text, pat, ti + 1, end_class, captures, caps_len);
+            return ti < text.len()
+                && regex_match_captures_recursive(
+                    text,
+                    pat,
+                    ti + 1,
+                    end_class,
+                    captures,
+                    caps_len,
+                );
         }
         return false;
     }
@@ -1271,15 +1687,23 @@ fn regex_match_captures_recursive(
 }
 
 fn regex_match_full(text: &[char], pat: &[char], ti: usize, pi: usize) -> bool {
-    if pi == pat.len() { return ti == text.len(); }
+    if pi == pat.len() {
+        return ti == text.len();
+    }
     if pi + 1 < pat.len() && pat[pi + 1] == '*' {
         let c = pat[pi];
         let mut j = ti;
         while j <= text.len() {
-            if regex_match_full(text, pat, j, pi + 2) { return true; }
-            if j < text.len() && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi))) {
+            if regex_match_full(text, pat, j, pi + 2) {
+                return true;
+            }
+            if j < text.len()
+                && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi)))
+            {
                 j += 1;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         return false;
     }
@@ -1288,23 +1712,35 @@ fn regex_match_full(text: &[char], pat: &[char], ti: usize, pi: usize) -> bool {
         let mut j = ti;
         let mut matched = false;
         while j <= text.len() {
-            if regex_match_full(text, pat, j, pi + 2) { return true; }
-            if j < text.len() && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi))) {
+            if regex_match_full(text, pat, j, pi + 2) {
+                return true;
+            }
+            if j < text.len()
+                && (c == '.' || c == text[j] || (c == '[' && char_class_match(text[j], &pat, pi)))
+            {
                 j += 1;
                 matched = true;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         return matched && regex_match_full(text, pat, j, pi + 2);
     }
     if pi + 1 < pat.len() && pat[pi + 1] == '?' {
         let c = pat[pi];
-        if ti < text.len() && (c == '.' || c == text[ti] || (c == '[' && char_class_match(text[ti], &pat, pi))) {
+        if ti < text.len()
+            && (c == '.' || c == text[ti] || (c == '[' && char_class_match(text[ti], &pat, pi)))
+        {
             return regex_match_full(text, pat, ti + 1, pi + 2);
         }
         return regex_match_full(text, pat, ti, pi + 2);
     }
-    if pat[pi] == '^' { return regex_match_full(text, pat, ti, pi + 1); }
-    if pat[pi] == '$' { return ti == text.len() && regex_match_full(text, pat, ti, pi + 1); }
+    if pat[pi] == '^' {
+        return regex_match_full(text, pat, ti, pi + 1);
+    }
+    if pat[pi] == '$' {
+        return ti == text.len() && regex_match_full(text, pat, ti, pi + 1);
+    }
     if pat[pi] == '.' {
         if ti < text.len() {
             return regex_match_full(text, pat, ti + 1, pi + 1);
@@ -1314,20 +1750,31 @@ fn regex_match_full(text: &[char], pat: &[char], ti: usize, pi: usize) -> bool {
     if pat[pi] == '[' {
         let mut j = pi + 1;
         let mut negate = false;
-        if j < pat.len() && pat[j] == '^' { negate = true; j += 1; }
-        if j < pat.len() && pat[j] == ']' { j += 1; }
+        if j < pat.len() && pat[j] == '^' {
+            negate = true;
+            j += 1;
+        }
+        if j < pat.len() && pat[j] == ']' {
+            j += 1;
+        }
         let mut found = false;
         while j < pat.len() && pat[j] != ']' {
             if j + 2 < pat.len() && pat[j + 1] == '-' {
-                if ti < text.len() && text[ti] >= pat[j] && text[ti] <= pat[j + 2] { found = true; }
+                if ti < text.len() && text[ti] >= pat[j] && text[ti] <= pat[j + 2] {
+                    found = true;
+                }
                 j += 3;
             } else {
-                if ti < text.len() && text[ti] == pat[j] { found = true; }
+                if ti < text.len() && text[ti] == pat[j] {
+                    found = true;
+                }
                 j += 1;
             }
         }
         let mut end_class = j;
-        if end_class < pat.len() { end_class += 1; }
+        if end_class < pat.len() {
+            end_class += 1;
+        }
         if found == negate {
             return ti < text.len() && regex_match_full(text, pat, ti + 1, end_class);
         }
@@ -1340,22 +1787,37 @@ fn regex_match_full(text: &[char], pat: &[char], ti: usize, pi: usize) -> bool {
 }
 
 fn char_class_match(c: char, pat: &[char], pi: usize) -> bool {
-    if pi >= pat.len() || pat[pi] != '[' { return false; }
+    if pi >= pat.len() || pat[pi] != '[' {
+        return false;
+    }
     let mut j = pi + 1;
     let mut negate = false;
-    if j < pat.len() && pat[j] == '^' { negate = true; j += 1; }
-    if j < pat.len() && pat[j] == ']' { j += 1; }
+    if j < pat.len() && pat[j] == '^' {
+        negate = true;
+        j += 1;
+    }
+    if j < pat.len() && pat[j] == ']' {
+        j += 1;
+    }
     let mut found = false;
     while j < pat.len() && pat[j] != ']' {
         if j + 2 < pat.len() && pat[j + 1] == '-' {
-            if c >= pat[j] && c <= pat[j + 2] { found = true; }
+            if c >= pat[j] && c <= pat[j + 2] {
+                found = true;
+            }
             j += 3;
         } else {
-            if c == pat[j] { found = true; }
+            if c == pat[j] {
+                found = true;
+            }
             j += 1;
         }
     }
-    if found == negate { false } else { true }
+    if found == negate {
+        false
+    } else {
+        true
+    }
 }
 
 fn split_top_level<'a>(expr: &'a str, op: &str) -> Vec<&'a str> {
@@ -1368,24 +1830,34 @@ fn split_top_level<'a>(expr: &'a str, op: &str) -> Vec<&'a str> {
     let op_len = op_chars.len();
     let mut i = 0;
     while i < len {
-        if chars[i] == '(' { depth += 1; }
-        else if chars[i] == ')' { if depth > 0 { depth -= 1; } }
-        else if depth == 0 && i + op_len <= len && &chars[i..i+op_len] == op_chars.as_slice() {
-            if i > last { parts.push(&expr[last..i]); }
+        if chars[i] == '(' {
+            depth += 1;
+        } else if chars[i] == ')' {
+            if depth > 0 {
+                depth -= 1;
+            }
+        } else if depth == 0 && i + op_len <= len && &chars[i..i + op_len] == op_chars.as_slice() {
+            if i > last {
+                parts.push(&expr[last..i]);
+            }
             last = i + op_len;
             i += op_len;
             continue;
         }
         i += 1;
     }
-    if last < len { parts.push(&expr[last..]); }
+    if last < len {
+        parts.push(&expr[last..]);
+    }
     parts
 }
 
 fn exec_declare(state: &mut ShellState, args: &str) -> i32 {
     let args: Vec<&str> = args.split_whitespace().collect();
     if args.is_empty() {
-        for (k, v) in state.env.list() { crate::println(&format!("declare -- {}=\"{}\"", k, v)); }
+        for (k, v) in state.env.list() {
+            crate::println(&format!("declare -- {}=\"{}\"", k, v));
+        }
         return 0;
     }
     let mut i = 0;
@@ -1396,8 +1868,9 @@ fn exec_declare(state: &mut ShellState, args: &str) -> i32 {
                 let name_val = args[i];
                 if let Some(pos) = name_val.find('=') {
                     let name = &name_val[..pos];
-                    let val_str = &name_val[pos+1..];
-                    let values: Vec<String> = val_str.split_whitespace().map(|s| s.to_string()).collect();
+                    let val_str = &name_val[pos + 1..];
+                    let values: Vec<String> =
+                        val_str.split_whitespace().map(|s| s.to_string()).collect();
                     state.env.set_array(name, values);
                 }
             }
@@ -1407,7 +1880,7 @@ fn exec_declare(state: &mut ShellState, args: &str) -> i32 {
             let parts: Vec<&str> = args[i].splitn(2, '=').collect();
             let val = if parts.len() > 1 { parts[1] } else { "" };
             if val.starts_with('(') && val.ends_with(')') {
-                let inner = &val[1..val.len()-1];
+                let inner = &val[1..val.len() - 1];
                 let values: Vec<String> = inner.split_whitespace().map(|s| s.to_string()).collect();
                 state.env.set_array(parts[0], values);
             } else {
@@ -1424,7 +1897,9 @@ fn exec_declare(state: &mut ShellState, args: &str) -> i32 {
 fn exec_readonly(state: &mut ShellState, args: &str) -> i32 {
     let args: Vec<&str> = args.split_whitespace().collect();
     if args.is_empty() {
-        for (k, v) in state.env.list() { crate::println(&format!("readonly {}=\"{}\"", k, v)); }
+        for (k, v) in state.env.list() {
+            crate::println(&format!("readonly {}=\"{}\"", k, v));
+        }
         return 0;
     }
     let mut i = 0;
@@ -1443,12 +1918,24 @@ fn exec_readonly(state: &mut ShellState, args: &str) -> i32 {
 fn exec_set(line: &str) -> i32 {
     let flag = line.trim();
     match flag {
-        "-e" => { SCRIPT_STATE.lock().errexit = true; }
-        "+e" => { SCRIPT_STATE.lock().errexit = false; }
-        "-x" => { SCRIPT_STATE.lock().xtrace = true; }
-        "+x" => { SCRIPT_STATE.lock().xtrace = false; }
-        "-u" => { SCRIPT_STATE.lock().nounset = true; }
-        "+u" => { SCRIPT_STATE.lock().nounset = false; }
+        "-e" => {
+            SCRIPT_STATE.lock().errexit = true;
+        }
+        "+e" => {
+            SCRIPT_STATE.lock().errexit = false;
+        }
+        "-x" => {
+            SCRIPT_STATE.lock().xtrace = true;
+        }
+        "+x" => {
+            SCRIPT_STATE.lock().xtrace = false;
+        }
+        "-u" => {
+            SCRIPT_STATE.lock().nounset = true;
+        }
+        "+u" => {
+            SCRIPT_STATE.lock().nounset = false;
+        }
         _ => {}
     }
     0
@@ -1461,12 +1948,20 @@ pub fn eval_arithmetic(expr: &str) -> i64 {
 
     let parts: Vec<&str> = expr.split_whitespace().collect();
     if parts.len() == 1 {
-        if let Ok(v) = parts[0].parse::<i64>() { return v; }
-        if let Some(val) = eval_infix(parts[0]) { return val; }
+        if let Ok(v) = parts[0].parse::<i64>() {
+            return v;
+        }
+        if let Some(val) = eval_infix(parts[0]) {
+            return val;
+        }
         if let Some(state) = try_lock_script_state() {
             if let Some(val) = state.local_vars.get(parts[0]) {
-                if let Ok(v) = val.parse::<i64>() { return v; }
-                if let Some(v) = eval_infix(val) { return v; }
+                if let Ok(v) = val.parse::<i64>() {
+                    return v;
+                }
+                if let Some(v) = eval_infix(val) {
+                    return v;
+                }
                 return 0;
             }
         }
@@ -1479,8 +1974,20 @@ pub fn eval_arithmetic(expr: &str) -> i64 {
             "+" => left + right,
             "-" | "\u{2212}" => left - right,
             "*" => left * right,
-            "/" => if right != 0 { left / right } else { 0 },
-            "%" => if right != 0 { left % right } else { 0 },
+            "/" => {
+                if right != 0 {
+                    left / right
+                } else {
+                    0
+                }
+            }
+            "%" => {
+                if right != 0 {
+                    left % right
+                } else {
+                    0
+                }
+            }
             "==" | "=" => (left == right) as i64,
             "!=" => (left != right) as i64,
             "-lt" | "<" => (left < right) as i64,
@@ -1526,9 +2033,14 @@ fn eval_seq(expr: &str) -> Vec<String> {
     }
     if parts.len() == 3 && parts[1] == ".." {
         if let (Ok(start), Ok(end)) = (parts[0].parse::<i64>(), parts[2].parse::<i64>()) {
-            if start <= end { (start..=end).map(|i| format!("{}", i)).collect() }
-            else { (end..=start).rev().map(|i| format!("{}", i)).collect() }
-        } else { Vec::new() }
+            if start <= end {
+                (start..=end).map(|i| format!("{}", i)).collect()
+            } else {
+                (end..=start).rev().map(|i| format!("{}", i)).collect()
+            }
+        } else {
+            Vec::new()
+        }
     } else {
         parts.iter().map(|s| s.to_string()).collect()
     }
@@ -1538,15 +2050,24 @@ fn find_keyword(text: &str, keyword: &str) -> usize {
     let words = text.split_whitespace();
     let mut offset = 0;
     for word in words {
-        let word_start = text[offset..].find(word).map(|p| p + offset).unwrap_or(offset);
-        if word == keyword { return word_start; }
+        let word_start = text[offset..]
+            .find(word)
+            .map(|p| p + offset)
+            .unwrap_or(offset);
+        if word == keyword {
+            return word_start;
+        }
         offset = word_start + word.len();
     }
     0
 }
 
 fn extract_block(text: &str) -> &str {
-    text.trim().trim_end_matches("done").trim_end_matches("fi").trim_end_matches("esac").trim()
+    text.trim()
+        .trim_end_matches("done")
+        .trim_end_matches("fi")
+        .trim_end_matches("esac")
+        .trim()
 }
 
 /// eval için komutları ayır — noktalı virgül ile ayrılmış, tırnak içindeki noktalı virgülleri koruyarak
@@ -1561,10 +2082,20 @@ fn split_eval_commands(input: &str) -> Vec<&str> {
     let mut i = 0;
     while i < len {
         match bytes[i] {
-            b'\'' if !in_double_quote => { in_single_quote = !in_single_quote; }
-            b'"' if !in_single_quote => { in_double_quote = !in_double_quote; }
-            b'(' if !in_single_quote && !in_double_quote => { depth += 1; }
-            b')' if !in_single_quote && !in_double_quote => { if depth > 0 { depth -= 1; } }
+            b'\'' if !in_double_quote => {
+                in_single_quote = !in_single_quote;
+            }
+            b'"' if !in_single_quote => {
+                in_double_quote = !in_double_quote;
+            }
+            b'(' if !in_single_quote && !in_double_quote => {
+                depth += 1;
+            }
+            b')' if !in_single_quote && !in_double_quote => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
             b';' if !in_single_quote && !in_double_quote && depth == 0 => {
                 if i > last {
                     commands.push(&input[last..i]);
@@ -1594,7 +2125,9 @@ fn parse_if_blocks(text: &str) -> (&str, Vec<(&str, &str)>, Option<String>) {
 
     while i < lines.len() {
         let line = lines[i].trim();
-        if line.starts_with("if ") { depth += 1; }
+        if line.starts_with("if ") {
+            depth += 1;
+        }
         if line == "fi" {
             if depth == 0 {
                 body_end = text.find(lines[i]).unwrap_or(text.len());

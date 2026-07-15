@@ -1,60 +1,70 @@
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-use alloc::format;
-use crate::shell_syscall as sc;
-use crate::{ShellState, println, eprintln_fn, print};
 use crate::executor;
 use crate::scripting;
+use crate::shell_syscall as sc;
+use crate::{eprintln_fn, print, println, ShellState};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 pub fn is_builtin(cmd: &str) -> bool {
     match cmd {
-        "help"|"ver"|"echo"|"printf"|"clear"|"reset"|"pwd"|"cd"|"pushd"|"popd"|"dirs"|
-        "ls"|"ll"|"la"|"tree"|"find"|"stat"|"du"|
-        "cat"|"head"|"tail"|"less"|"more"|"wc"|"sort"|"uniq"|"cut"|"paste"|"join"|
-        "grep"|"egrep"|"fgrep"|"tr"|"sed"|"awk"|"rev"|"nl"|"od"|"hexdump"|"xxd"|
-        "fold"|"split"|"tee"|"strings"|"cmp"|"comm"|"tsort"|"xargs"|
-        "basename"|"dirname"|"hash"|"dd"|"diff"|"expand"|"unexpand"|"pr"|"stty"|"mkfifo"|
-        "cp"|"mv"|"rm"|"rmdir"|"mkdir"|"touch"|"ln"|"readlink"|"truncate"|"write"|"append"|"install"|
-        "chmod"|"chown"|"chgrp"|"umask"|
-        "ps"|"top"|"kill"|"killall"|"killall5"|"bg"|"fg"|"jobs"|"wait"|"pidof"|"nice"|"nohup"|"renice"|"respawn"|
-        "whoami"|"id"|"who"|"logname"|"tty"|"passwd"|"login"|"su"|"last"|"lastlog"|
-        "export"|"unset"|"set"|"env"|"printenv"|"alias"|"unalias"|"which"|"command"|"type"|"history"|
-        "uname"|"uptime"|"date"|"free"|"df"|"dmesg"|"cal"|"hostname"|
-        "lsmod"|"iostat"|"lsusb"|"nvme-info"|
-        "mount"|"umount"|"mountpoint"|"mknod"|"sync"|"mktemp"|"fallocate"|"blkdiscard"|"link"|"unlink"|
-        "net"|"ifconfig"|"netstat"|"http"|"wget"|"curl"|"dns"|"ping"|"traceroute"|"tftp"|"nc"|"ncat"|
-        "service"|"systemctl"|"shutdown"|"reboot"|"halt"|
-        "run"|"source"|"."|"eval"|"exec"|"exit"|"logout"|"true"|"false"|"test"|"["|
-        "strace"|"perf"|"cgroup"|"nsenter"|"lsns"|"bluetoothctl"|"kdump"|
-        "conntrack"|"tmpfs"|"containers"|"docker"|"iptables"|
-        "tier-dashboard"|"driver-info"|"async-trace"|"jail-fence"|"ring-dump"|"hotplug"|
-        "perf-audit"|"bench-all"|"kaslr"|"boot-order"|"tier-bench"|"jail-log"|"ring-stats"|
-        "ech-tools"|"doom"|"wincompat"|"gamecompat"|"linux"|
-        "bc"|"dc"|"expr"|"seq"|"yes"|"sleep"|"time"|"watch"|
-        "md5sum"|"sha1sum"|"sha224sum"|"sha256sum"|"sha384sum"|"sha512sum"|"sha512-224sum"|"sha512-256sum"|"cksum"|
-        "getconf"|"getty"|"setsid"|"chroot"|"pivot_root"|"switch_root"|"unshare"|
-        "flock"|"ed"|"make"|"sysctl"|"mesg"|"vtallow"|"ctrlaltdel"|"chvt"|
-        "tar"|"uudecode"|"uuencode"|"logger"|"nologin"|"xinstall"|"pagesize"|"pathchk"|
-        "insmod"|"rmmod"|"mkswap"|"swapon"|"swapoff"|"swaplabel"|
-        "loop"|"cron"|"cgroups"|"ns"|"ssh"|"scp"|"rsync"|"screen"|"tmux"|"vi"|"nano"|"vim"|
-        "man"|"info"|"whatis"|"apropos"|"locate"|"updatedb"|"mtr"|"route"|"arp"|"ip"|"ss"|"lsof"|"fuser"|
-        "ldd"|"strace-run"|"nice-run"|"nohup-run"|
-        "base32"|"base64"|"basenc"|"b2sum"|"dircolors"|"pinky"|"ptx"|"runcon"|"stdbuf"|"dir"|"vdir"|
-        "timeout"|"csplit"|"compress"|"uncompress"|"ar"|"ex"|"iconv"|"lex"|"yacc"|"mailx"|"talk"|
-        "fc"|"coproc"|"readarray"|"mapfile"|"compgen"|"complete"|"select"
-        => true,
+        "help" | "ver" | "echo" | "printf" | "clear" | "reset" | "pwd" | "cd" | "pushd"
+        | "popd" | "dirs" | "ls" | "ll" | "la" | "tree" | "find" | "stat" | "du" | "cat"
+        | "head" | "tail" | "less" | "more" | "wc" | "sort" | "uniq" | "cut" | "paste" | "join"
+        | "grep" | "egrep" | "fgrep" | "tr" | "sed" | "awk" | "rev" | "nl" | "od" | "hexdump"
+        | "xxd" | "fold" | "split" | "tee" | "strings" | "cmp" | "comm" | "tsort" | "xargs"
+        | "basename" | "dirname" | "hash" | "dd" | "diff" | "expand" | "unexpand" | "pr"
+        | "stty" | "mkfifo" | "cp" | "mv" | "rm" | "rmdir" | "mkdir" | "touch" | "ln"
+        | "readlink" | "truncate" | "write" | "append" | "install" | "chmod" | "chown"
+        | "chgrp" | "umask" | "ps" | "top" | "kill" | "killall" | "killall5" | "bg" | "fg"
+        | "jobs" | "wait" | "pidof" | "nice" | "nohup" | "renice" | "respawn" | "whoami" | "id"
+        | "who" | "logname" | "tty" | "passwd" | "login" | "su" | "last" | "lastlog" | "export"
+        | "unset" | "set" | "env" | "printenv" | "alias" | "unalias" | "which" | "command"
+        | "type" | "history" | "uname" | "uptime" | "date" | "free" | "df" | "dmesg" | "cal"
+        | "hostname" | "lsmod" | "iostat" | "lsusb" | "nvme-info" | "mount" | "umount"
+        | "mountpoint" | "mknod" | "sync" | "mktemp" | "fallocate" | "blkdiscard" | "link"
+        | "unlink" | "net" | "ifconfig" | "netstat" | "http" | "wget" | "curl" | "dns" | "ping"
+        | "traceroute" | "tftp" | "nc" | "ncat" | "service" | "systemctl" | "shutdown"
+        | "reboot" | "halt" | "run" | "source" | "." | "eval" | "exec" | "exit" | "logout"
+        | "true" | "false" | "test" | "[" | "strace" | "perf" | "cgroup" | "nsenter" | "lsns"
+        | "bluetoothctl" | "kdump" | "conntrack" | "tmpfs" | "containers" | "docker"
+        | "iptables" | "tier-dashboard" | "driver-info" | "async-trace" | "jail-fence"
+        | "ring-dump" | "hotplug" | "perf-audit" | "bench-all" | "kaslr" | "boot-order"
+        | "tier-bench" | "jail-log" | "ring-stats" | "ech-tools" | "doom" | "wincompat"
+        | "gamecompat" | "linux" | "bc" | "dc" | "expr" | "seq" | "yes" | "sleep" | "time"
+        | "watch" | "md5sum" | "sha1sum" | "sha224sum" | "sha256sum" | "sha384sum"
+        | "sha512sum" | "sha512-224sum" | "sha512-256sum" | "cksum" | "getconf" | "getty"
+        | "setsid" | "chroot" | "pivot_root" | "switch_root" | "unshare" | "flock" | "ed"
+        | "make" | "sysctl" | "mesg" | "vtallow" | "ctrlaltdel" | "chvt" | "tar" | "uudecode"
+        | "uuencode" | "logger" | "nologin" | "xinstall" | "pagesize" | "pathchk" | "insmod"
+        | "rmmod" | "mkswap" | "swapon" | "swapoff" | "swaplabel" | "loop" | "cron" | "cgroups"
+        | "ns" | "ssh" | "scp" | "rsync" | "screen" | "tmux" | "vi" | "nano" | "vim" | "man"
+        | "info" | "whatis" | "apropos" | "locate" | "updatedb" | "mtr" | "route" | "arp"
+        | "ip" | "ss" | "lsof" | "fuser" | "ldd" | "strace-run" | "nice-run" | "nohup-run"
+        | "base32" | "base64" | "basenc" | "b2sum" | "dircolors" | "pinky" | "ptx" | "runcon"
+        | "stdbuf" | "dir" | "vdir" | "timeout" | "csplit" | "compress" | "uncompress" | "ar"
+        | "ex" | "iconv" | "lex" | "yacc" | "mailx" | "talk" | "fc" | "coproc" | "readarray"
+        | "mapfile" | "compgen" | "complete" | "select" => true,
         _ => false,
     }
 }
 
 pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.is_empty() { return true; }
+    if args.is_empty() {
+        return true;
+    }
     match args[0] {
         "help" => cmd_help(state, args),
         "echo" => cmd_echo(state, args),
         "printf" => cmd_printf(state, args),
-        "clear" => { let _ = sc::sys_eon_term_clear(); true }
-        "pwd" => { println(&state.env.get("PWD").unwrap_or(String::from("/"))); true }
+        "clear" => {
+            let _ = sc::sys_eon_term_clear();
+            true
+        }
+        "pwd" => {
+            println(&state.env.get("PWD").unwrap_or(String::from("/")));
+            true
+        }
         "cd" => cmd_cd(state, args),
         "ls" | "ll" | "la" => cmd_ls(state, args),
         "cat" => cmd_cat(state, args),
@@ -86,22 +96,34 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
         "truncate" => cmd_truncate(state, args),
         "chmod" => cmd_chmod(state, args),
         "chown" => cmd_chown(state, args),
-        "umask" => { println("0022"); true }
+        "umask" => {
+            println("0022");
+            true
+        }
         "stat" => cmd_stat(state, args),
         "du" => cmd_du(state, args),
         "ps" => cmd_ps(state, args),
         "top" => cmd_top(state, args),
         "kill" => cmd_kill(state, args),
         "killall" | "killall5" => cmd_killall(state, args),
-        "bg" => { print("[1] continued\n"); true }
-        "fg" => { print("No such job\n"); true }
+        "bg" => {
+            print("[1] continued\n");
+            true
+        }
+        "fg" => {
+            print("No such job\n");
+            true
+        }
         "jobs" => cmd_jobs(state, args),
         "wait" => {
             if args.len() > 1 && args[1] == "-n" {
                 let mut min_pid = usize::MAX;
                 let mut min_idx = 0;
                 for (i, job) in state.jobs.iter().enumerate() {
-                    if job.running && job.pid < min_pid { min_pid = job.pid; min_idx = i; }
+                    if job.running && job.pid < min_pid {
+                        min_pid = job.pid;
+                        min_idx = i;
+                    }
                 }
                 if min_pid < usize::MAX {
                     let mut status: i32 = 0;
@@ -116,10 +138,22 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
             true
         }
         "pidof" => cmd_pidof(state, args),
-        "whoami" => { let uid = sc::sys_getuid(); println(if uid == 0 { "root" } else { "user" }); true }
-        "id" => { let uid = sc::sys_getuid(); let gid = sc::sys_getgid(); println(&format!("uid={} gid={}", uid, gid)); true }
+        "whoami" => {
+            let uid = sc::sys_getuid();
+            println(if uid == 0 { "root" } else { "user" });
+            true
+        }
+        "id" => {
+            let uid = sc::sys_getuid();
+            let gid = sc::sys_getgid();
+            println(&format!("uid={} gid={}", uid, gid));
+            true
+        }
         "who" => cmd_who(state),
-        "tty" => { println("/dev/tty0"); true }
+        "tty" => {
+            println("/dev/tty0");
+            true
+        }
         "uname" => cmd_uname(state, args),
         "uptime" => cmd_uptime(state),
         "date" => cmd_date(state),
@@ -133,15 +167,25 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
         "set" => cmd_set(state, args),
         "env" => cmd_env(state),
         "printenv" => cmd_printenv(state, args),
-        "alias" => { println("No aliases defined"); true }
-        "unalias" => { true }
+        "alias" => {
+            println("No aliases defined");
+            true
+        }
+        "unalias" => true,
         "which" | "command" | "type" => {
             if args[0] == "command" && args.len() > 1 && args[1] == "-p" {
                 if args.len() > 2 {
                     let path = args[2];
-                    let paths = state.env.get("PATH").unwrap_or(String::from("/bin:/usr/bin"));
+                    let paths = state
+                        .env
+                        .get("PATH")
+                        .unwrap_or(String::from("/bin:/usr/bin"));
                     for dir in paths.split(':') {
-                        let full = if dir == "/" { format!("/{}", path) } else { format!("{}/{}", dir, path) };
+                        let full = if dir == "/" {
+                            format!("/{}", path)
+                        } else {
+                            format!("{}/{}", dir, path)
+                        };
                         if sc::sys_open(&full, 0).is_ok() {
                             crate::println(&full);
                             return true;
@@ -157,13 +201,26 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
                     if is_builtin(args[2]) {
                         crate::println(&format!("{} is a shell builtin", args[2]));
                     } else {
-                        let paths = state.env.get("PATH").unwrap_or(String::from("/bin:/usr/bin"));
+                        let paths = state
+                            .env
+                            .get("PATH")
+                            .unwrap_or(String::from("/bin:/usr/bin"));
                         let mut found = false;
                         for dir in paths.split(':') {
-                            let full = if dir == "/" { format!("/{}", args[2]) } else { format!("{}/{}", dir, args[2]) };
-                            if sc::sys_open(&full, 0).is_ok() { crate::println(&full); found = true; break; }
+                            let full = if dir == "/" {
+                                format!("/{}", args[2])
+                            } else {
+                                format!("{}/{}", dir, args[2])
+                            };
+                            if sc::sys_open(&full, 0).is_ok() {
+                                crate::println(&full);
+                                found = true;
+                                break;
+                            }
                         }
-                        if !found { state.exit_code = 1; }
+                        if !found {
+                            state.exit_code = 1;
+                        }
                     }
                 }
                 return true;
@@ -178,8 +235,11 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
                 }
                 return true;
             }
-            if is_builtin(args[1]) { crate::println(&format!("{} is a shell builtin", args[1])); }
-            else { crate::println(&format!("{} is {}", args[1], args[1])); }
+            if is_builtin(args[1]) {
+                crate::println(&format!("{} is a shell builtin", args[1]));
+            } else {
+                crate::println(&format!("{} is {}", args[1], args[1]));
+            }
             true
         }
         "history" => cmd_history(state),
@@ -187,22 +247,37 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
         "iostat" => cmd_iostat(state),
         "mount" => cmd_mount(state, args),
         "umount" => cmd_umount(state, args),
-        "sync" => { println("sync done"); true }
+        "sync" => {
+            println("sync done");
+            true
+        }
         "mktemp" => cmd_mktemp(state),
         "net" | "ifconfig" | "netstat" => cmd_net(state, args),
         "ping" => cmd_ping(state, args),
         "dns" => cmd_dns(state, args),
         "service" | "systemctl" => cmd_service(state, args),
-        "shutdown" => { println("System shutdown initiated"); sc::sys_exit(0); }
-        "reboot" => { println("System reboot initiated"); sc::sys_exit(0); }
+        "shutdown" => {
+            println("System shutdown initiated");
+            sc::sys_exit(0);
+        }
+        "reboot" => {
+            println("System reboot initiated");
+            sc::sys_exit(0);
+        }
         "run" => cmd_run(state, args),
         "source" | "." => cmd_source(state, args),
         "exit" | "logout" => {
             crate::scripting::run_trap_action(state, "EXIT");
             sc::sys_exit(state.exit_code)
         }
-        "true" => { state.exit_code = 0; true }
-        "false" => { state.exit_code = 1; true }
+        "true" => {
+            state.exit_code = 0;
+            true
+        }
+        "false" => {
+            state.exit_code = 1;
+            true
+        }
         "exec" => {
             if args.len() > 1 && args[1] == "-a" {
                 if args.len() > 2 {
@@ -249,7 +324,8 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
         "lsof" => cmd_lsof(state, args),
         "fuser" => cmd_fuser(state, args),
         "ldd" => cmd_ldd(state, args),
-        "md5sum" | "sha1sum" | "sha224sum" | "sha256sum" | "sha384sum" | "sha512sum" | "sha512-224sum" | "sha512-256sum" => cmd_hashsum(state, args),
+        "md5sum" | "sha1sum" | "sha224sum" | "sha256sum" | "sha384sum" | "sha512sum"
+        | "sha512-224sum" | "sha512-256sum" => cmd_hashsum(state, args),
         "cksum" => cmd_cksum(state, args),
         "bc" => cmd_bc(state, args),
         "dc" => cmd_dc(state, args),
@@ -269,8 +345,14 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
         "newgrp" => cmd_newgrp(state, args),
         "declare" | "typeset" => cmd_declare(state, args),
         "readonly" => cmd_readonly(state, args),
-        "let" => { if args.len() > 1 { let r = crate::scripting::eval_arithmetic(args[1]); state.exit_code = if r == 0 { 1 } else { 0 }; } true }
-        ":" => { true }
+        "let" => {
+            if args.len() > 1 {
+                let r = crate::scripting::eval_arithmetic(args[1]);
+                state.exit_code = if r == 0 { 1 } else { 0 };
+            }
+            true
+        }
+        ":" => true,
         "basename" => cmd_basename(state, args),
         "dirname" => cmd_dirname(state, args),
         "hash" => cmd_hash(state, args),
@@ -312,7 +394,11 @@ pub fn dispatch(state: &mut ShellState, args: &[&str]) -> bool {
         "coproc" => cmd_coproc(state, args),
         "readarray" | "mapfile" => cmd_readarray(state, args),
         "compgen" | "complete" => cmd_comp(state, args),
-        _ => { eprintln_fn(&format!("{}: command not found", args[0])); state.exit_code = 127; true }
+        _ => {
+            eprintln_fn(&format!("{}: command not found", args[0]));
+            state.exit_code = 127;
+            true
+        }
     }
 }
 
@@ -326,7 +412,9 @@ fn cmd_help(_state: &mut ShellState, _args: &[&str]) -> bool {
     println("Metin isleme: head, tail, grep, sort, uniq, cut, tr, wc, sed, rev, nl, od, fold, split, tee, strings, cmp, comm");
     println("Sures yonetimi: ps, top, kill, killall, bg, fg, jobs, wait, pidof, nice, nohup");
     println("Kullanici: whoami, id, who, logname, tty, passwd, login, su, last");
-    println("Ortam: export, unset, set, env, printenv, alias, unalias, which, command, type, history");
+    println(
+        "Ortam: export, unset, set, env, printenv, alias, unalias, which, command, type, history",
+    );
     println("Sistem: uname, uptime, date, free, df, dmesg, cal, hostname, lsmod, iostat");
     println("Dosya: mount, umount, chmod, chown, sync, mktemp, readlink, truncate");
     println("Ag: net, ifconfig, netstat, http, wget, curl, dns, ping, traceroute, tftp, nc");
@@ -341,21 +429,40 @@ fn cmd_echo(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     let mut newline = true;
     let mut escape = false;
-    if args.len() > 1 && args[1] == "-n" { newline = false; i = 2; }
-    if args.len() > 1 && args[1] == "-e" { escape = true; i = 2; if args.len() > 2 && args[2] == "-n" { newline = false; i = 3; } }
+    if args.len() > 1 && args[1] == "-n" {
+        newline = false;
+        i = 2;
+    }
+    if args.len() > 1 && args[1] == "-e" {
+        escape = true;
+        i = 2;
+        if args.len() > 2 && args[2] == "-n" {
+            newline = false;
+            i = 3;
+        }
+    }
     let parts: Vec<&str> = args[i..].iter().copied().collect();
     let mut out = parts.join(" ");
     if escape {
-        out = out.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\r").replace("\\\\", "\\");
+        out = out
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\r", "\r")
+            .replace("\\\\", "\\");
     }
     print(&out);
-    if newline { println(""); }
+    if newline {
+        println("");
+    }
     true
 }
 
 /// `printf` — POSIX printf: %s, %d, %u, %c, %f, %x, %o, %e, %% ve escape: \n, \t, \\, \xHH, \0NNN
 fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("printf: missing format string"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("printf: missing format string");
+        return true;
+    }
     let fmt = args[1];
     let mut result = String::new();
     let mut fi = 0;
@@ -365,20 +472,37 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
         if fmt_bytes[fi] == b'\\' && fi + 1 < fmt_bytes.len() {
             fi += 1;
             match fmt_bytes[fi] {
-                b'n' => { result.push('\n'); fi += 1; }
-                b't' => { result.push('\t'); fi += 1; }
-                b'r' => { result.push('\r'); fi += 1; }
-                b'\\' => { result.push('\\'); fi += 1; }
+                b'n' => {
+                    result.push('\n');
+                    fi += 1;
+                }
+                b't' => {
+                    result.push('\t');
+                    fi += 1;
+                }
+                b'r' => {
+                    result.push('\r');
+                    fi += 1;
+                }
+                b'\\' => {
+                    result.push('\\');
+                    fi += 1;
+                }
                 b'0' => {
                     // \0NNN octal escape
                     let mut octal = String::new();
                     fi += 1;
-                    while fi < fmt_bytes.len() && octal.len() < 3 && (fmt_bytes[fi] >= b'0' && fmt_bytes[fi] <= b'7') {
+                    while fi < fmt_bytes.len()
+                        && octal.len() < 3
+                        && (fmt_bytes[fi] >= b'0' && fmt_bytes[fi] <= b'7')
+                    {
                         octal.push(fmt_bytes[fi] as char);
                         fi += 1;
                     }
                     if let Ok(code) = u8::from_str_radix(&octal, 8) {
-                        if code != 0 { result.push(code as char); }
+                        if code != 0 {
+                            result.push(code as char);
+                        }
                     }
                 }
                 b'x' => {
@@ -387,43 +511,75 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
                     let mut hex = String::new();
                     while fi < fmt_bytes.len() && hex.len() < 2 {
                         let c = fmt_bytes[fi];
-                        if c >= b'0' && c <= b'9' || c >= b'a' && c <= b'f' || c >= b'A' && c <= b'F' {
+                        if c >= b'0' && c <= b'9'
+                            || c >= b'a' && c <= b'f'
+                            || c >= b'A' && c <= b'F'
+                        {
                             hex.push(c as char);
                             fi += 1;
-                        } else { break; }
+                        } else {
+                            break;
+                        }
                     }
                     if let Ok(code) = u8::from_str_radix(&hex, 16) {
                         result.push(code as char);
                     }
                 }
-                _ => { result.push('\\'); result.push(fmt_bytes[fi] as char); fi += 1; }
+                _ => {
+                    result.push('\\');
+                    result.push(fmt_bytes[fi] as char);
+                    fi += 1;
+                }
             }
             continue;
         }
         if fmt_bytes[fi] == b'%' && fi + 1 < fmt_bytes.len() {
             fi += 1;
             match fmt_bytes[fi] {
-                b's' => { if arg_idx < args.len() { result.push_str(args[arg_idx]); arg_idx += 1; } fi += 1; }
+                b's' => {
+                    if arg_idx < args.len() {
+                        result.push_str(args[arg_idx]);
+                        arg_idx += 1;
+                    }
+                    fi += 1;
+                }
                 b'd' | b'i' => {
                     if arg_idx < args.len() {
                         if let Ok(n) = args[arg_idx].parse::<i64>() {
                             // Parse minimum width and zero-padding
                             result.push_str(&printf_format_int(n, 10, false));
-                        } else { result.push_str(args[arg_idx]); }
+                        } else {
+                            result.push_str(args[arg_idx]);
+                        }
                         arg_idx += 1;
                     }
                     fi += 1;
                 }
                 b'u' => {
-                    if arg_idx < args.len() { result.push_str(args[arg_idx]); arg_idx += 1; }
+                    if arg_idx < args.len() {
+                        result.push_str(args[arg_idx]);
+                        arg_idx += 1;
+                    }
                     fi += 1;
                 }
-                b'c' => { if arg_idx < args.len() { result.push(args[arg_idx].chars().next().unwrap_or(' ')); arg_idx += 1; } fi += 1; }
+                b'c' => {
+                    if arg_idx < args.len() {
+                        result.push(args[arg_idx].chars().next().unwrap_or(' '));
+                        arg_idx += 1;
+                    }
+                    fi += 1;
+                }
                 b'f' => {
                     if arg_idx < args.len() {
                         if let Ok(n) = args[arg_idx].parse::<f64>() {
-                            result.push_str(&format!("{:.6}", n).trim_end_matches('0').trim_end_matches('.'));
-                        } else { result.push_str(args[arg_idx]); }
+                            result.push_str(
+                                &format!("{:.6}", n)
+                                    .trim_end_matches('0')
+                                    .trim_end_matches('.'),
+                            );
+                        } else {
+                            result.push_str(args[arg_idx]);
+                        }
                         arg_idx += 1;
                     }
                     fi += 1;
@@ -432,7 +588,9 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
                     if arg_idx < args.len() {
                         if let Ok(n) = args[arg_idx].parse::<u64>() {
                             result.push_str(&format!("{:x}", n));
-                        } else { result.push_str(args[arg_idx]); }
+                        } else {
+                            result.push_str(args[arg_idx]);
+                        }
                         arg_idx += 1;
                     }
                     fi += 1;
@@ -441,7 +599,9 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
                     if arg_idx < args.len() {
                         if let Ok(n) = args[arg_idx].parse::<u64>() {
                             result.push_str(&format!("{:X}", n));
-                        } else { result.push_str(args[arg_idx]); }
+                        } else {
+                            result.push_str(args[arg_idx]);
+                        }
                         arg_idx += 1;
                     }
                     fi += 1;
@@ -450,7 +610,9 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
                     if arg_idx < args.len() {
                         if let Ok(n) = args[arg_idx].parse::<u64>() {
                             result.push_str(&format!("{:o}", n));
-                        } else { result.push_str(args[arg_idx]); }
+                        } else {
+                            result.push_str(args[arg_idx]);
+                        }
                         arg_idx += 1;
                     }
                     fi += 1;
@@ -459,13 +621,22 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
                     if arg_idx < args.len() {
                         if let Ok(n) = args[arg_idx].parse::<f64>() {
                             result.push_str(&format!("{:.6e}", n));
-                        } else { result.push_str(args[arg_idx]); }
+                        } else {
+                            result.push_str(args[arg_idx]);
+                        }
                         arg_idx += 1;
                     }
                     fi += 1;
                 }
-                b'%' => { result.push('%'); fi += 1; }
-                _ => { result.push('%'); result.push(fmt_bytes[fi] as char); fi += 1; }
+                b'%' => {
+                    result.push('%');
+                    fi += 1;
+                }
+                _ => {
+                    result.push('%');
+                    result.push(fmt_bytes[fi] as char);
+                    fi += 1;
+                }
             }
         } else {
             result.push(fmt_bytes[fi] as char);
@@ -477,8 +648,11 @@ fn cmd_printf(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn printf_format_int(n: i64, base: u32, _uppercase: bool) -> String {
-    if base == 10 { format!("{}", n) }
-    else { format!("{:x}", n) }
+    if base == 10 {
+        format!("{}", n)
+    } else {
+        format!("{:x}", n)
+    }
 }
 
 fn cmd_cd(state: &mut ShellState, args: &[&str]) -> bool {
@@ -493,8 +667,14 @@ fn cmd_cd(state: &mut ShellState, args: &[&str]) -> bool {
     match sc::sys_chdir(&path) {
         Ok(()) => {
             state.env.set("OLDPWD", &old_pwd);
-            let new_pwd = if path.starts_with('/') { path.clone() } else {
-                if old_pwd == "/" { format!("/{}", path) } else { format!("{}/{}", old_pwd, path) }
+            let new_pwd = if path.starts_with('/') {
+                path.clone()
+            } else {
+                if old_pwd == "/" {
+                    format!("/{}", path)
+                } else {
+                    format!("{}/{}", old_pwd, path)
+                }
             };
             state.env.set("PWD", &new_pwd);
         }
@@ -504,28 +684,21 @@ fn cmd_cd(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_ls(_state: &mut ShellState, args: &[&str]) -> bool {
-    let path = if args.len() > 1 && !args[1].starts_with('-') { args[1] } else { "/" };
+    let path = if args.len() > 1 && !args[1].starts_with('-') {
+        args[1]
+    } else {
+        "/"
+    };
     let mut buf = [0u8; 8192];
     match sc::sys_open(path, 0) {
         Ok(fd) => {
             match sc::sys_getdents64(fd, &mut buf) {
                 Ok(n) if n > 0 => {
-                    let mut offset = 0;
-                    while offset < n {
-                        let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                        let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                        if name_len > 0 {
-                            let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                            if let Ok(name) = core::str::from_utf8(name_bytes) {
-                                let name = name.trim_end_matches('\0');
-                                if !name.is_empty() && name != "." && name != ".." {
-                                    println(name);
-                                }
-                            }
+                    sc::for_each_dirent64(&buf, n, |name, _| {
+                        if !name.is_empty() && name != "." && name != ".." {
+                            println(name);
                         }
-                        if rec_len == 0 { break; }
-                        offset += rec_len;
-                    }
+                    });
                 }
                 _ => println("Dizin bos veya okunamadi"),
             }
@@ -542,7 +715,9 @@ fn cmd_cat(_state: &mut ShellState, args: &[&str]) -> bool {
         loop {
             match sc::sys_read(0, &mut buf) {
                 Ok(0) => break,
-                Ok(n) => { let _ = sc::sys_write(1, &buf[..n]); }
+                Ok(n) => {
+                    let _ = sc::sys_write(1, &buf[..n]);
+                }
                 Err(_) => break,
             }
         }
@@ -550,7 +725,9 @@ fn cmd_cat(_state: &mut ShellState, args: &[&str]) -> bool {
     }
     for path in &args[1..] {
         match executor::load_file(path) {
-            Some(data) => { let _ = sc::sys_write(1, &data); }
+            Some(data) => {
+                let _ = sc::sys_write(1, &data);
+            }
             None => eprintln_fn(&format!("cat: {} okunamadi", path)),
         }
     }
@@ -560,12 +737,22 @@ fn cmd_cat(_state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_head(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut lines = 10;
     let mut file_idx = 1;
-    if args.len() > 2 && args[1] == "-n" { if let Ok(n) = args[2].parse::<usize>() { lines = n; } file_idx = 3; }
-    if file_idx >= args.len() { eprintln_fn("head: missing file"); return true; }
+    if args.len() > 2 && args[1] == "-n" {
+        if let Ok(n) = args[2].parse::<usize>() {
+            lines = n;
+        }
+        file_idx = 3;
+    }
+    if file_idx >= args.len() {
+        eprintln_fn("head: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[file_idx]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         for (i, line) in text.lines().enumerate() {
-            if i >= lines { break; }
+            if i >= lines {
+                break;
+            }
             println(line);
         }
     }
@@ -575,27 +762,49 @@ fn cmd_head(_state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_tail(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut lines = 10;
     let mut file_idx = 1;
-    if args.len() > 2 && args[1] == "-n" { if let Ok(n) = args[2].parse::<usize>() { lines = n; } file_idx = 3; }
-    if file_idx >= args.len() { eprintln_fn("tail: missing file"); return true; }
+    if args.len() > 2 && args[1] == "-n" {
+        if let Ok(n) = args[2].parse::<usize>() {
+            lines = n;
+        }
+        file_idx = 3;
+    }
+    if file_idx >= args.len() {
+        eprintln_fn("tail: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[file_idx]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         let all_lines: Vec<&str> = text.lines().collect();
-        let start = if all_lines.len() > lines { all_lines.len() - lines } else { 0 };
-        for line in &all_lines[start..] { println(line); }
+        let start = if all_lines.len() > lines {
+            all_lines.len() - lines
+        } else {
+            0
+        };
+        for line in &all_lines[start..] {
+            println(line);
+        }
     }
     true
 }
 
 fn cmd_wc(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut file_idx = 1;
-    if args.len() > 2 && args[1] == "-l" { file_idx = 2; }
-    if file_idx >= args.len() { eprintln_fn("wc: missing file"); return true; }
+    if args.len() > 2 && args[1] == "-l" {
+        file_idx = 2;
+    }
+    if file_idx >= args.len() {
+        eprintln_fn("wc: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[file_idx]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         let lines = text.lines().count();
         let words = text.split_whitespace().count();
         let bytes = data.len();
-        println(&format!("  {}  {}  {}  {}", lines, words, bytes, args[file_idx]));
+        println(&format!(
+            "  {}  {}  {}  {}",
+            lines, words, bytes, args[file_idx]
+        ));
     }
     true
 }
@@ -641,17 +850,34 @@ fn cmd_grep(_state: &mut ShellState, args: &[&str]) -> bool {
     // -A/-B/-C flags
     while i < args.len() {
         match args[i] {
-            "-A" => { i += 1; if i < args.len() { after_ctx = args[i].parse().unwrap_or(0); } }
-            "-B" => { i += 1; if i < args.len() { before_ctx = args[i].parse().unwrap_or(0); } }
-            "-C" => { i += 1; if i < args.len() {
-                let c: usize = args[i].parse().unwrap_or(0);
-                before_ctx = c; after_ctx = c;
-            } }
+            "-A" => {
+                i += 1;
+                if i < args.len() {
+                    after_ctx = args[i].parse().unwrap_or(0);
+                }
+            }
+            "-B" => {
+                i += 1;
+                if i < args.len() {
+                    before_ctx = args[i].parse().unwrap_or(0);
+                }
+            }
+            "-C" => {
+                i += 1;
+                if i < args.len() {
+                    let c: usize = args[i].parse().unwrap_or(0);
+                    before_ctx = c;
+                    after_ctx = c;
+                }
+            }
             _ => break,
         }
         i += 1;
     }
-    if i >= args.len() { eprintln_fn("grep: usage: grep [-ivcnlwEA] PATTERN FILE"); return true; }
+    if i >= args.len() {
+        eprintln_fn("grep: usage: grep [-ivcnlwEA] PATTERN FILE");
+        return true;
+    }
     let pattern = args[i];
     let file_idx = i + 1;
     let text = if file_idx < args.len() {
@@ -660,7 +886,10 @@ fn cmd_grep(_state: &mut ShellState, args: &[&str]) -> bool {
                 let t = core::str::from_utf8(&data).unwrap_or("").to_string();
                 t
             }
-            None => { eprintln_fn(&format!("grep: {} okunamadi", args[file_idx])); return true; }
+            None => {
+                eprintln_fn(&format!("grep: {} okunamadi", args[file_idx]));
+                return true;
+            }
         }
     } else {
         // stdin
@@ -685,12 +914,20 @@ fn cmd_grep(_state: &mut ShellState, args: &[&str]) -> bool {
         let matched = if ext_regex {
             let line_chars: Vec<char> = line.chars().collect();
             let pat_chars: Vec<char> = pattern.chars().collect();
-            simple_regex_match(if ignore_case { &line_lower } else { &line_chars },
-                               &pat_chars)
+            simple_regex_match(
+                if ignore_case {
+                    &line_lower
+                } else {
+                    &line_chars
+                },
+                &pat_chars,
+            )
         } else if whole_word {
             grep_word_match(line, pattern, ignore_case)
         } else if ignore_case {
-            line_lower.windows(pat_lower.len()).any(|w| w == pat_lower.as_slice())
+            line_lower
+                .windows(pat_lower.len())
+                .any(|w| w == pat_lower.as_slice())
         } else {
             line.contains(pattern)
         };
@@ -699,34 +936,51 @@ fn cmd_grep(_state: &mut ShellState, args: &[&str]) -> bool {
             match_count += 1;
             // Before context
             if before_ctx > 0 {
-                let start = if idx >= before_ctx { idx - before_ctx } else { 0 };
+                let start = if idx >= before_ctx {
+                    idx - before_ctx
+                } else {
+                    0
+                };
                 for bline in &lines[start..idx] {
                     if !last_before.contains(bline) {
-                        if line_numbers { println(&format!("{}-{}", start + 1, bline)); }
-                        else { println(bline); }
+                        if line_numbers {
+                            println(&format!("{}-{}", start + 1, bline));
+                        } else {
+                            println(bline);
+                        }
                     }
                 }
             }
             last_before.clear();
-            if line_numbers { println(&format!("{}:{}", idx + 1, line)); }
-            else { println(line); }
+            if line_numbers {
+                println(&format!("{}:{}", idx + 1, line));
+            } else {
+                println(line);
+            }
             // After context
             if after_ctx > 0 {
                 let end = core::cmp::min(idx + 1 + after_ctx, lines.len());
                 for aline in &lines[idx + 1..end] {
-                    if line_numbers { println(&format!("-{}", aline)); }
-                    else { println(aline); }
+                    if line_numbers {
+                        println(&format!("-{}", aline));
+                    } else {
+                        println(aline);
+                    }
                 }
             }
         } else {
             // Store for potential before-context
             if before_ctx > 0 {
                 last_before.push(line);
-                if last_before.len() > before_ctx { last_before.remove(0); }
+                if last_before.len() > before_ctx {
+                    last_before.remove(0);
+                }
             }
         }
     }
-    if count_only { println(&format!("{}", match_count)); }
+    if count_only {
+        println(&format!("{}", match_count));
+    }
     if files_only && match_count > 0 {
         println(args.get(file_idx).unwrap_or(&"<stdin>"));
     }
@@ -736,9 +990,13 @@ fn cmd_grep(_state: &mut ShellState, args: &[&str]) -> bool {
 fn grep_word_match(line: &str, pattern: &str, ignore_case: bool) -> bool {
     for word in line.split_whitespace() {
         if ignore_case {
-            if word.eq_ignore_ascii_case(pattern) { return true; }
+            if word.eq_ignore_ascii_case(pattern) {
+                return true;
+            }
         } else {
-            if word == pattern { return true; }
+            if word == pattern {
+                return true;
+            }
         }
     }
     false
@@ -750,20 +1008,32 @@ fn simple_regex_match(text: &[char], pattern: &[char]) -> bool {
 }
 
 fn regex_impl(text: &[char], pattern: &[char], ti: usize, pi: usize) -> bool {
-    if pi == pattern.len() { return ti == text.len(); }
+    if pi == pattern.len() {
+        return ti == text.len();
+    }
     if pi + 1 < pattern.len() && pattern[pi + 1] == '*' {
         let c = pattern[pi];
         let mut j = ti;
         while j <= text.len() {
-            if regex_impl(text, pattern, j, pi + 2) { return true; }
-            if j < text.len() && (c == '.' || text[j] == c || text[j].to_ascii_lowercase() == c.to_ascii_lowercase()) {
+            if regex_impl(text, pattern, j, pi + 2) {
+                return true;
+            }
+            if j < text.len()
+                && (c == '.'
+                    || text[j] == c
+                    || text[j].to_ascii_lowercase() == c.to_ascii_lowercase())
+            {
                 j += 1;
-            } else { break; }
+            } else {
+                break;
+            }
         }
         return false;
     }
     if pattern[pi] == '.' {
-        if ti < text.len() { return regex_impl(text, pattern, ti + 1, pi + 1); }
+        if ti < text.len() {
+            return regex_impl(text, pattern, ti + 1, pi + 1);
+        }
         return false;
     }
     if ti < text.len() && text[ti] == pattern[pi] {
@@ -797,12 +1067,25 @@ fn cmd_sort(_state: &mut ShellState, args: &[&str]) -> bool {
             "-u" => unique = true,
             "-f" => fold_case = true,
             _ if args[i].starts_with("-t") => {
-                if args[i].len() > 2 { separator = Some(&args[i][2..]); }
-                else { i += 1; if i < args.len() { separator = Some(args[i]); } }
+                if args[i].len() > 2 {
+                    separator = Some(&args[i][2..]);
+                } else {
+                    i += 1;
+                    if i < args.len() {
+                        separator = Some(args[i]);
+                    }
+                }
             }
             _ if args[i].starts_with("-k") => {
-                let key_spec = if args[i].len() > 2 { &args[i][2..] } else {
-                    i += 1; if i < args.len() { args[i] } else { "" }
+                let key_spec = if args[i].len() > 2 {
+                    &args[i][2..]
+                } else {
+                    i += 1;
+                    if i < args.len() {
+                        args[i]
+                    } else {
+                        ""
+                    }
                 };
                 let parts: Vec<&str> = key_spec.splitn(2, ',').collect();
                 let start: usize = parts[0].parse().unwrap_or(1);
@@ -816,8 +1099,14 @@ fn cmd_sort(_state: &mut ShellState, args: &[&str]) -> bool {
     let file_idx = i;
     let text = if file_idx < args.len() {
         match executor::load_file(args[file_idx]) {
-            Some(data) => { let t = core::str::from_utf8(&data).unwrap_or("").to_string(); t }
-            None => { eprintln_fn(&format!("sort: {} okunamadi", args[file_idx])); return true; }
+            Some(data) => {
+                let t = core::str::from_utf8(&data).unwrap_or("").to_string();
+                t
+            }
+            None => {
+                eprintln_fn(&format!("sort: {} okunamadi", args[file_idx]));
+                return true;
+            }
         }
     } else {
         let mut buf = Vec::new();
@@ -837,20 +1126,30 @@ fn cmd_sort(_state: &mut ShellState, args: &[&str]) -> bool {
     let sort_key = |line: &str| -> Vec<String> {
         if keys.is_empty() {
             // Full line sort
-            alloc::vec![if fold_case { line.to_ascii_lowercase() } else { line.to_string() }]
+            alloc::vec![if fold_case {
+                line.to_ascii_lowercase()
+            } else {
+                line.to_string()
+            }]
         } else {
             // Extract specified fields
             let fields: Vec<&str> = line.split(sep).collect();
-            keys.iter().map(|&(s, e)| {
-                let start = if s > 0 { s - 1 } else { 0 };
-                let end = core::cmp::min(e, fields.len());
-                if start < fields.len() {
-                    let val = fields[start..end].join(sep);
-                    if fold_case { val.to_ascii_lowercase() } else { val }
-                } else {
-                    String::new()
-                }
-            }).collect()
+            keys.iter()
+                .map(|&(s, e)| {
+                    let start = if s > 0 { s - 1 } else { 0 };
+                    let end = core::cmp::min(e, fields.len());
+                    if start < fields.len() {
+                        let val = fields[start..end].join(sep);
+                        if fold_case {
+                            val.to_ascii_lowercase()
+                        } else {
+                            val
+                        }
+                    } else {
+                        String::new()
+                    }
+                })
+                .collect()
         }
     };
     lines.sort_by(|a, b| {
@@ -859,32 +1158,51 @@ fn cmd_sort(_state: &mut ShellState, args: &[&str]) -> bool {
         if numeric {
             let na: i64 = ka.first().unwrap_or(&String::new()).parse().unwrap_or(0);
             let nb: i64 = kb.first().unwrap_or(&String::new()).parse().unwrap_or(0);
-            if reverse { nb.cmp(&na) } else { na.cmp(&nb) }
+            if reverse {
+                nb.cmp(&na)
+            } else {
+                na.cmp(&nb)
+            }
         } else {
-            if reverse { kb.cmp(&ka) } else { ka.cmp(&kb) }
+            if reverse {
+                kb.cmp(&ka)
+            } else {
+                ka.cmp(&kb)
+            }
         }
     });
     if unique {
         lines.dedup();
     }
-    for line in &lines { println(line); }
+    for line in &lines {
+        println(line);
+    }
     true
 }
 
 fn cmd_uniq(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("uniq: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("uniq: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         let mut prev = "";
         for line in text.lines() {
-            if line != prev { println(line); prev = line; }
+            if line != prev {
+                println(line);
+                prev = line;
+            }
         }
     }
     true
 }
 
 fn cmd_cut(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 4 || args[1] != "-d" || args[3] != "-f" { eprintln_fn("cut: usage: cut -d DELIM -f FIELD FILE"); return true; }
+    if args.len() < 4 || args[1] != "-d" || args[3] != "-f" {
+        eprintln_fn("cut: usage: cut -d DELIM -f FIELD FILE");
+        return true;
+    }
     let delim = args[2];
     let field: usize = args[4].parse().unwrap_or(1);
     if args.len() > 5 {
@@ -892,7 +1210,9 @@ fn cmd_cut(_state: &mut ShellState, args: &[&str]) -> bool {
             let text = core::str::from_utf8(&data).unwrap_or("");
             for line in text.lines() {
                 let parts: Vec<&str> = line.split(delim).collect();
-                if let Some(part) = parts.get(field - 1) { println(part); }
+                if let Some(part) = parts.get(field - 1) {
+                    println(part);
+                }
             }
         }
     }
@@ -900,7 +1220,10 @@ fn cmd_cut(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_tr(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("tr: usage: tr FROM TO"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("tr: usage: tr FROM TO");
+        return true;
+    }
     let from = args[1];
     let to = args[2];
     let mut buf = [0u8; 4096];
@@ -912,8 +1235,14 @@ fn cmd_tr(_state: &mut ShellState, args: &[&str]) -> bool {
                 for &b in &buf[..n] {
                     let c = b as char;
                     if let Some(pos) = from.find(c) {
-                        if let Some(&tc) = to.as_bytes().get(pos) { out.push(tc); } else { out.push(b); }
-                    } else { out.push(b); }
+                        if let Some(&tc) = to.as_bytes().get(pos) {
+                            out.push(tc);
+                        } else {
+                            out.push(b);
+                        }
+                    } else {
+                        out.push(b);
+                    }
                 }
                 let _ = sc::sys_write(1, &out);
             }
@@ -924,32 +1253,50 @@ fn cmd_tr(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_rev(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("rev: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("rev: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
-        for line in text.lines() { let r: String = line.chars().rev().collect(); println(&r); }
+        for line in text.lines() {
+            let r: String = line.chars().rev().collect();
+            println(&r);
+        }
     }
     true
 }
 
 fn cmd_nl(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("nl: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("nl: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
-        for (i, line) in text.lines().enumerate() { println(&format!("{:6}\t{}", i + 1, line)); }
+        for (i, line) in text.lines().enumerate() {
+            println(&format!("{:6}\t{}", i + 1, line));
+        }
     }
     true
 }
 
 fn cmd_od(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("od: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("od: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         for (i, chunk) in data.chunks(16).enumerate() {
             let mut hex = String::new();
             let mut ascii = String::new();
             for &b in chunk {
                 hex.push_str(&format!("{:02x} ", b));
-                if b >= 0x20 && b < 0x7f { ascii.push(b as char); } else { ascii.push('.'); }
+                if b >= 0x20 && b < 0x7f {
+                    ascii.push(b as char);
+                } else {
+                    ascii.push('.');
+                }
             }
             println(&format!("{:08x}  {:<48}  |{}|", i * 16, hex, ascii));
         }
@@ -960,8 +1307,16 @@ fn cmd_od(_state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_fold(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut width = 80;
     let mut file_idx = 1;
-    if args.len() > 2 && args[1] == "-w" { if let Ok(w) = args[2].parse::<usize>() { width = w; } file_idx = 3; }
-    if file_idx >= args.len() { eprintln_fn("fold: missing file"); return true; }
+    if args.len() > 2 && args[1] == "-w" {
+        if let Ok(w) = args[2].parse::<usize>() {
+            width = w;
+        }
+        file_idx = 3;
+    }
+    if file_idx >= args.len() {
+        eprintln_fn("fold: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[file_idx]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         for line in text.lines() {
@@ -977,11 +1332,18 @@ fn cmd_fold(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_split(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("split: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("split: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let chunk = 1000;
         for (i, part) in data.chunks(chunk).enumerate() {
-            let name = format!("{}{}", args[1], core::char::from_u32(b'a' as u32 + i as u32).unwrap_or('x'));
+            let name = format!(
+                "{}{}",
+                args[1],
+                core::char::from_u32(b'a' as u32 + i as u32).unwrap_or('x')
+            );
             executor::write_file(&name, part);
             println(&name);
         }
@@ -990,7 +1352,10 @@ fn cmd_split(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_tee(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("tee: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("tee: missing file");
+        return true;
+    }
     let mut buf = [0u8; 4096];
     loop {
         match sc::sys_read(0, &mut buf) {
@@ -1006,54 +1371,93 @@ fn cmd_tee(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_strings(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("strings: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("strings: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let mut current = String::new();
         for &b in &data {
-            if b >= 0x20 && b < 0x7f { current.push(b as char); }
-            else { if current.len() >= 4 { println(&current); } current.clear(); }
+            if b >= 0x20 && b < 0x7f {
+                current.push(b as char);
+            } else {
+                if current.len() >= 4 {
+                    println(&current);
+                }
+                current.clear();
+            }
         }
-        if current.len() >= 4 { println(&current); }
+        if current.len() >= 4 {
+            println(&current);
+        }
     }
     true
 }
 
 fn cmd_cmp(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("cmp: usage: cmp FILE1 FILE2"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("cmp: usage: cmp FILE1 FILE2");
+        return true;
+    }
     let d1 = executor::load_file(args[1]).unwrap_or_default();
     let d2 = executor::load_file(args[2]).unwrap_or_default();
-    if d1 == d2 { println(&format!("{} and {} are identical", args[1], args[2])); }
-    else { println(&format!("{} and {} differ", args[1], args[2])); }
+    if d1 == d2 {
+        println(&format!("{} and {} are identical", args[1], args[2]));
+    } else {
+        println(&format!("{} and {} differ", args[1], args[2]));
+    }
     true
 }
 
 fn cmd_comm(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("comm: usage: comm FILE1 FILE2"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("comm: usage: comm FILE1 FILE2");
+        return true;
+    }
     let d1 = executor::load_file(args[1]).unwrap_or_default();
     let d2 = executor::load_file(args[2]).unwrap_or_default();
     let t1 = core::str::from_utf8(&d1).unwrap_or("");
     let t2 = core::str::from_utf8(&d2).unwrap_or("");
     let l1: Vec<&str> = t1.lines().collect();
     let l2: Vec<&str> = t2.lines().collect();
-    let mut i = 0; let mut j = 0;
+    let mut i = 0;
+    let mut j = 0;
     while i < l1.len() || j < l2.len() {
-        if j >= l2.len() || (i < l1.len() && l1[i] < l2[j]) { println(&format!("\t{}", l1[i])); i += 1; }
-        else if i >= l1.len() || l1[i] > l2[j] { println(&format!("\t\t{}", l2[j])); j += 1; }
-        else { println(&format!("{}\t\t{}", l1[i], l1[i])); i += 1; j += 1; }
+        if j >= l2.len() || (i < l1.len() && l1[i] < l2[j]) {
+            println(&format!("\t{}", l1[i]));
+            i += 1;
+        } else if i >= l1.len() || l1[i] > l2[j] {
+            println(&format!("\t\t{}", l2[j]));
+            j += 1;
+        } else {
+            println(&format!("{}\t\t{}", l1[i], l1[i]));
+            i += 1;
+            j += 1;
+        }
     }
     true
 }
 
 fn cmd_cp(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("cp: usage: cp SRC DST"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("cp: usage: cp SRC DST");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
-        if !executor::write_file(args[2], &data) { eprintln_fn(&format!("cp: {} yazilamadi", args[2])); }
-    } else { eprintln_fn(&format!("cp: {} okunamadi", args[1])); }
+        if !executor::write_file(args[2], &data) {
+            eprintln_fn(&format!("cp: {} yazilamadi", args[2]));
+        }
+    } else {
+        eprintln_fn(&format!("cp: {} okunamadi", args[1]));
+    }
     true
 }
 
 fn cmd_mv(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("mv: usage: mv SRC DST"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("mv: usage: mv SRC DST");
+        return true;
+    }
     match sc::sys_rename(args[1], args[2]) {
         Ok(()) => {}
         Err(_) => {
@@ -1069,9 +1473,18 @@ fn cmd_mv(_state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_rm(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut recursive = false;
     let mut start = 1;
-    if args.len() > 1 && args[1] == "-r" { recursive = true; start = 2; }
-    if args.len() > 1 && args[1] == "-rf" { recursive = true; start = 2; }
-    if start >= args.len() { eprintln_fn("rm: missing file"); return true; }
+    if args.len() > 1 && args[1] == "-r" {
+        recursive = true;
+        start = 2;
+    }
+    if args.len() > 1 && args[1] == "-rf" {
+        recursive = true;
+        start = 2;
+    }
+    if start >= args.len() {
+        eprintln_fn("rm: missing file");
+        return true;
+    }
     for path in &args[start..] {
         if recursive {
             rm_recursive(path);
@@ -1089,23 +1502,16 @@ fn rm_recursive(path: &str) {
     let mut buf = [0u8; 8192];
     if let Ok(fd) = sc::sys_open(path, 0) {
         if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-            let mut offset = 0;
-            while offset < n {
-                let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                if name_len > 0 {
-                    let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        let name = name.trim_end_matches('\0');
-                        if name != "." && name != ".." && !name.is_empty() {
-                            let full = if path == "/" { format!("/{}", name) } else { format!("{}/{}", path, name) };
-                            rm_recursive(&full);
-                        }
-                    }
+            sc::for_each_dirent64(&buf, n, |name, _| {
+                if name != "." && name != ".." && !name.is_empty() {
+                    let full = if path == "/" {
+                        format!("/{}", name)
+                    } else {
+                        format!("{}/{}", path, name)
+                    };
+                    rm_recursive(&full);
                 }
-                if rec_len == 0 { break; }
-                offset += rec_len;
-            }
+            });
         }
         let _ = sc::sys_close(fd);
     }
@@ -1113,13 +1519,21 @@ fn rm_recursive(path: &str) {
 }
 
 fn cmd_rmdir(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("rmdir: missing directory"); return true; }
-    for path in &args[1..] { let _ = sc::sys_unlink(path); }
+    if args.len() < 2 {
+        eprintln_fn("rmdir: missing directory");
+        return true;
+    }
+    for path in &args[1..] {
+        let _ = sc::sys_unlink(path);
+    }
     true
 }
 
 fn cmd_mkdir(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("mkdir: missing directory"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("mkdir: missing directory");
+        return true;
+    }
     for path in &args[1..] {
         match sc::sys_mkdir(path, 0o755) {
             Ok(()) => {}
@@ -1130,16 +1544,25 @@ fn cmd_mkdir(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_touch(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("touch: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("touch: missing file");
+        return true;
+    }
     for path in &args[1..] {
-        if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x400) { let _ = sc::sys_close(fd); }
+        if let Ok(fd) = sc::sys_open(path, 1 | 0x200 | 0x400) {
+            let _ = sc::sys_close(fd);
+        }
     }
     true
 }
 
 fn cmd_ln(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("ln: usage: ln TARGET LINK"); return true; }
-    let target = args[1]; let link = args[2];
+    if args.len() < 3 {
+        eprintln_fn("ln: usage: ln TARGET LINK");
+        return true;
+    }
+    let target = args[1];
+    let link = args[2];
     if args.len() > 2 && args[1] == "-s" {
         match sc::sys_symlink(args[3], args[2]) {
             Ok(()) => {}
@@ -1155,19 +1578,37 @@ fn cmd_ln(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_readlink(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("readlink: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("readlink: missing file");
+        return true;
+    }
     let mut buf = [0u8; 4096];
     match sc::sys_readlink(args[1], &mut buf) {
-        Ok(n) => { if let Ok(s) = core::str::from_utf8(&buf[..n]) { println(s); } }
+        Ok(n) => {
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                println(s);
+            }
+        }
         Err(e) => eprintln_fn(&format!("readlink: {}: {}", args[1], e)),
     }
     true
 }
 
 fn cmd_truncate(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("truncate: usage: truncate -s SIZE FILE"); return true; }
-    let size: u64 = if args[1] == "-s" { args[2].parse().unwrap_or(0) } else { 0 };
-    let path = if args[1] == "-s" { args.get(3).unwrap_or(&args[1]) } else { args[1] };
+    if args.len() < 3 {
+        eprintln_fn("truncate: usage: truncate -s SIZE FILE");
+        return true;
+    }
+    let size: u64 = if args[1] == "-s" {
+        args[2].parse().unwrap_or(0)
+    } else {
+        0
+    };
+    let path = if args[1] == "-s" {
+        args.get(3).unwrap_or(&args[1])
+    } else {
+        args[1]
+    };
     match sc::sys_truncate(path, size) {
         Ok(()) => {}
         Err(e) => eprintln_fn(&format!("truncate: {}: {}", path, e)),
@@ -1176,24 +1617,44 @@ fn cmd_truncate(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_chmod(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("chmod: usage: chmod MODE FILE"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("chmod: usage: chmod MODE FILE");
+        return true;
+    }
     let mode = u32::from_str_radix(args[1].trim_start_matches('0'), 8).unwrap_or(0o644);
-    match sc::sys_chmod(args[2], mode) { Ok(()) => {}, Err(e) => eprintln_fn(&format!("chmod: {}", e)) }
+    match sc::sys_chmod(args[2], mode) {
+        Ok(()) => {}
+        Err(e) => eprintln_fn(&format!("chmod: {}", e)),
+    }
     true
 }
 
 fn cmd_chown(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("chown: usage: chown USER:GROUP FILE"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("chown: usage: chown USER:GROUP FILE");
+        return true;
+    }
     let (uid, gid) = if args[1].contains(':') {
         let parts: Vec<&str> = args[1].split(':').collect();
-        (parts[0].parse().unwrap_or(0), parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0))
-    } else { (args[1].parse().unwrap_or(0), 0) };
-    match sc::sys_chown(args[2], uid, gid) { Ok(()) => {}, Err(e) => eprintln_fn(&format!("chown: {}", e)) }
+        (
+            parts[0].parse().unwrap_or(0),
+            parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+        )
+    } else {
+        (args[1].parse().unwrap_or(0), 0)
+    };
+    match sc::sys_chown(args[2], uid, gid) {
+        Ok(()) => {}
+        Err(e) => eprintln_fn(&format!("chown: {}", e)),
+    }
     true
 }
 
 fn cmd_stat(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("stat: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("stat: missing file");
+        return true;
+    }
     match sc::sys_open(args[1], 0) {
         Ok(fd) => {
             let _ = sc::sys_close(fd);
@@ -1214,7 +1675,11 @@ fn cmd_du(_state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_ps(_state: &mut ShellState, _args: &[&str]) -> bool {
     let mut buf = [0u8; 8192];
     match sc::sys_eon_list_tasks(&mut buf) {
-        Ok(n) => { if let Ok(s) = core::str::from_utf8(&buf[..n]) { println(s); } }
+        Ok(n) => {
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                println(s);
+            }
+        }
         Err(_) => println("Task listesi alinamadi"),
     }
     true
@@ -1226,7 +1691,10 @@ fn cmd_top(state: &mut ShellState, _args: &[&str]) -> bool {
 }
 
 fn cmd_kill(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("kill: usage: kill [-SIGNAL] PID"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("kill: usage: kill [-SIGNAL] PID");
+        return true;
+    }
     if args[1] == "-l" {
         crate::println(" 1) SIGHUP       2) SIGINT       3) SIGQUIT      4) SIGILL");
         crate::println(" 5) SIGTRAP      6) SIGABRT      7) SIGBUS       8) SIGFPE");
@@ -1243,18 +1711,34 @@ fn cmd_kill(_state: &mut ShellState, args: &[&str]) -> bool {
     if args[1].starts_with('-') {
         let sig_name = &args[1][1..];
         sig = match sig_name {
-            "HUP" | "1" => 1, "INT" | "2" => 2, "QUIT" | "3" => 3,
-            "ILL" | "4" => 4, "TRAP" | "5" => 5, "ABRT" | "6" => 6,
-            "BUS" | "7" => 7, "FPE" | "8" => 8, "KILL" | "9" => 9,
-            "USR1" | "10" => 10, "SEGV" | "11" => 11, "USR2" | "12" => 12,
-            "PIPE" | "13" => 13, "ALRM" | "14" => 14, "TERM" | "15" => 15,
-            "CONT" | "18" => 18, "STOP" | "19" => 19, "TSTP" | "20" => 20,
-            "TTIN" | "21" => 21, "TTOU" | "22" => 22,
+            "HUP" | "1" => 1,
+            "INT" | "2" => 2,
+            "QUIT" | "3" => 3,
+            "ILL" | "4" => 4,
+            "TRAP" | "5" => 5,
+            "ABRT" | "6" => 6,
+            "BUS" | "7" => 7,
+            "FPE" | "8" => 8,
+            "KILL" | "9" => 9,
+            "USR1" | "10" => 10,
+            "SEGV" | "11" => 11,
+            "USR2" | "12" => 12,
+            "PIPE" | "13" => 13,
+            "ALRM" | "14" => 14,
+            "TERM" | "15" => 15,
+            "CONT" | "18" => 18,
+            "STOP" | "19" => 19,
+            "TSTP" | "20" => 20,
+            "TTIN" | "21" => 21,
+            "TTOU" | "22" => 22,
             _ => sig_name.parse().unwrap_or(15),
         };
         pid_idx = 2;
     }
-    if pid_idx >= args.len() { eprintln_fn("kill: missing PID"); return true; }
+    if pid_idx >= args.len() {
+        eprintln_fn("kill: missing PID");
+        return true;
+    }
     if let Ok(pid) = args[pid_idx].parse::<usize>() {
         match sc::sys_kill(pid, sig) {
             Ok(()) => {}
@@ -1265,7 +1749,10 @@ fn cmd_kill(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_killall(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("killall: usage: killall NAME"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("killall: usage: killall NAME");
+        return true;
+    }
     let mut buf = [0u8; 8192];
     if let Ok(n) = sc::sys_eon_list_tasks(&mut buf) {
         let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
@@ -1293,15 +1780,27 @@ fn cmd_jobs(state: &mut ShellState, _args: &[&str]) -> bool {
             Err(_) => true,
         }
     });
-    if state.jobs.is_empty() { eprintln_fn("No jobs"); return true; }
+    if state.jobs.is_empty() {
+        eprintln_fn("No jobs");
+        return true;
+    }
     for job in &state.jobs {
-        crate::println(&format!("[{}] {} {} {}", job.id, if job.running { "Running" } else { "Stopped" }, job.pid, job.cmd));
+        crate::println(&format!(
+            "[{}] {} {} {}",
+            job.id,
+            if job.running { "Running" } else { "Stopped" },
+            job.pid,
+            job.cmd
+        ));
     }
     true
 }
 
 fn cmd_pidof(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("pidof: missing process name"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("pidof: missing process name");
+        return true;
+    }
     let mut buf = [0u8; 8192];
     if let Ok(n) = sc::sys_eon_list_tasks(&mut buf) {
         let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
@@ -1340,7 +1839,10 @@ fn cmd_uname(_state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_uptime(_state: &mut ShellState) -> bool {
     let mut tp = [0usize; 2];
     if let Ok(()) = sc::sys_clock_gettime(1, &mut tp) {
-        println(&format!(" 00:00:00 up {}s, load average: 0.00, 0.00, 0.00", tp[0]));
+        println(&format!(
+            " 00:00:00 up {}s, load average: 0.00, 0.00, 0.00",
+            tp[0]
+        ));
     }
     true
 }
@@ -1348,7 +1850,11 @@ fn cmd_uptime(_state: &mut ShellState) -> bool {
 fn cmd_date(_state: &mut ShellState) -> bool {
     let mut buf = [0u8; 64];
     match sc::sys_eon_rtc_datetime(&mut buf) {
-        Ok(n) => { if let Ok(s) = core::str::from_utf8(&buf[..n]) { println(s); } }
+        Ok(n) => {
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                println(s);
+            }
+        }
         Err(_) => println("Date not available"),
     }
     true
@@ -1357,7 +1863,11 @@ fn cmd_date(_state: &mut ShellState) -> bool {
 fn cmd_free(_state: &mut ShellState) -> bool {
     let mut buf = [0u8; 256];
     match sc::sys_eon_memory_stats(&mut buf) {
-        Ok(n) => { if let Ok(s) = core::str::from_utf8(&buf[..n]) { println(s); } }
+        Ok(n) => {
+            if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                println(s);
+            }
+        }
         Err(_) => println("Memory info not available"),
     }
     true
@@ -1399,7 +1909,11 @@ fn cmd_hostname(_state: &mut ShellState, args: &[&str]) -> bool {
     } else {
         let mut buf = [0u8; 256];
         match sc::sys_eon_get_hostname(&mut buf) {
-            Ok(n) => { if let Ok(s) = core::str::from_utf8(&buf[..n]) { println(s); } }
+            Ok(n) => {
+                if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                    println(s);
+                }
+            }
             Err(_) => println("echos"),
         }
     }
@@ -1408,14 +1922,18 @@ fn cmd_hostname(_state: &mut ShellState, args: &[&str]) -> bool {
 
 fn cmd_export(state: &mut ShellState, args: &[&str]) -> bool {
     if args.len() < 2 {
-        for (k, v) in state.env.list() { print(&format!("declare -x {}=\"{}\"\n", k, v)); }
+        for (k, v) in state.env.list() {
+            print(&format!("declare -x {}=\"{}\"\n", k, v));
+        }
         return true;
     }
     let mut i = 1;
     while i < args.len() {
         if args[i] == "-n" {
             i += 1;
-            if i < args.len() { state.env.unset(&format!("__export_{}", args[i])); }
+            if i < args.len() {
+                state.env.unset(&format!("__export_{}", args[i]));
+            }
         } else if args[i].contains('=') {
             let parts: Vec<&str> = args[i].splitn(2, '=').collect();
             state.env.set(parts[0], parts[1]);
@@ -1433,8 +1951,14 @@ fn cmd_unset(state: &mut ShellState, args: &[&str]) -> bool {
     let mut force_fn = false;
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "-f" { force_fn = true; i += 1; continue; }
-        if args[i] == "-v" || !force_fn { state.env.unset(args[i]); }
+        if args[i] == "-f" {
+            force_fn = true;
+            i += 1;
+            continue;
+        }
+        if args[i] == "-v" || !force_fn {
+            state.env.unset(args[i]);
+        }
         i += 1;
     }
     true
@@ -1442,7 +1966,9 @@ fn cmd_unset(state: &mut ShellState, args: &[&str]) -> bool {
 
 fn cmd_set(state: &mut ShellState, args: &[&str]) -> bool {
     if args.len() < 2 {
-        for (k, v) in state.env.list() { print(&format!("{}={}\n", k, v)); }
+        for (k, v) in state.env.list() {
+            print(&format!("{}={}\n", k, v));
+        }
         let opts = state.env.opts.lock().to_flags_string();
         print(&format!("set -- {}\n", opts));
         return true;
@@ -1450,35 +1976,79 @@ fn cmd_set(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-e" => { state.env.opts.lock().errexit = true; }
-            "+e" => { state.env.opts.lock().errexit = false; }
-            "-x" => { state.env.opts.lock().xtrace = true; }
-            "+x" => { state.env.opts.lock().xtrace = false; }
-            "-u" => { state.env.opts.lock().nounset = true; }
-            "+u" => { state.env.opts.lock().nounset = false; }
-            "-a" => { state.env.opts.lock().allexport = true; }
-            "+a" => { state.env.opts.lock().allexport = false; }
-            "-f" => { state.env.opts.lock().noglob = true; }
-            "+f" => { state.env.opts.lock().noglob = false; }
-            "-h" => { state.env.opts.lock().hashall = true; }
-            "+h" => { state.env.opts.lock().hashall = false; }
-            "-H" => { state.env.opts.lock().histexpand = true; }
-            "+H" => { state.env.opts.lock().histexpand = false; }
-            "-m" => { state.env.opts.lock().monitor = true; }
-            "+m" => { state.env.opts.lock().monitor = false; }
-            "-C" => { state.env.opts.lock().noclobber = true; }
-            "+C" => { state.env.opts.lock().noclobber = false; }
-            "-v" => { state.env.opts.lock().verbose = true; }
-            "+v" => { state.env.opts.lock().verbose = false; }
-            "-B" => { state.env.opts.lock().braceexpand = true; }
-            "+B" => { state.env.opts.lock().braceexpand = false; }
+            "-e" => {
+                state.env.opts.lock().errexit = true;
+            }
+            "+e" => {
+                state.env.opts.lock().errexit = false;
+            }
+            "-x" => {
+                state.env.opts.lock().xtrace = true;
+            }
+            "+x" => {
+                state.env.opts.lock().xtrace = false;
+            }
+            "-u" => {
+                state.env.opts.lock().nounset = true;
+            }
+            "+u" => {
+                state.env.opts.lock().nounset = false;
+            }
+            "-a" => {
+                state.env.opts.lock().allexport = true;
+            }
+            "+a" => {
+                state.env.opts.lock().allexport = false;
+            }
+            "-f" => {
+                state.env.opts.lock().noglob = true;
+            }
+            "+f" => {
+                state.env.opts.lock().noglob = false;
+            }
+            "-h" => {
+                state.env.opts.lock().hashall = true;
+            }
+            "+h" => {
+                state.env.opts.lock().hashall = false;
+            }
+            "-H" => {
+                state.env.opts.lock().histexpand = true;
+            }
+            "+H" => {
+                state.env.opts.lock().histexpand = false;
+            }
+            "-m" => {
+                state.env.opts.lock().monitor = true;
+            }
+            "+m" => {
+                state.env.opts.lock().monitor = false;
+            }
+            "-C" => {
+                state.env.opts.lock().noclobber = true;
+            }
+            "+C" => {
+                state.env.opts.lock().noclobber = false;
+            }
+            "-v" => {
+                state.env.opts.lock().verbose = true;
+            }
+            "+v" => {
+                state.env.opts.lock().verbose = false;
+            }
+            "-B" => {
+                state.env.opts.lock().braceexpand = true;
+            }
+            "+B" => {
+                state.env.opts.lock().braceexpand = false;
+            }
             "-o" => {
                 i += 1;
                 if i < args.len() {
                     let opt = args[i];
                     if let Some(pos) = opt.find('=') {
                         let name = &opt[..pos];
-                        let val = &opt[pos+1..];
+                        let val = &opt[pos + 1..];
                         state.env.opts.lock().set_by_name(name, true);
                         state.env.set(name, val);
                     } else if opt.starts_with('+') {
@@ -1490,9 +2060,13 @@ fn cmd_set(state: &mut ShellState, args: &[&str]) -> bool {
             }
             "+o" => {
                 i += 1;
-                if i < args.len() { state.env.opts.lock().set_by_name(args[i], false); }
+                if i < args.len() {
+                    state.env.opts.lock().set_by_name(args[i], false);
+                }
             }
-            "--" => { break; }
+            "--" => {
+                break;
+            }
             _ => {
                 if args[i].contains('=') {
                     let parts: Vec<&str> = args[i].splitn(2, '=').collect();
@@ -1506,14 +2080,20 @@ fn cmd_set(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_env(state: &mut ShellState) -> bool {
-    for (k, v) in state.env.list() { println(&format!("{}={}", k, v)); }
+    for (k, v) in state.env.list() {
+        println(&format!("{}={}", k, v));
+    }
     true
 }
 
 fn cmd_printenv(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { return cmd_env(state); }
+    if args.len() < 2 {
+        return cmd_env(state);
+    }
     for arg in &args[1..] {
-        if let Some(val) = state.env.get(arg) { println(&val); }
+        if let Some(val) = state.env.get(arg) {
+            println(&val);
+        }
     }
     true
 }
@@ -1547,7 +2127,10 @@ fn cmd_mount(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_umount(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("umount: missing target"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("umount: missing target");
+        return true;
+    }
     println(&format!("umount: {} not available in ring3", args[1]));
     true
 }
@@ -1561,12 +2144,19 @@ fn cmd_mktemp(_state: &mut ShellState) -> bool {
 }
 
 fn cmd_net(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { println("Usage: net [show|config|status]"); return true; }
+    if args.len() < 2 {
+        println("Usage: net [show|config|status]");
+        return true;
+    }
     match args[1] {
         "show" | "status" => {
             let mut buf = [0u8; 2048];
             match sc::sys_eon_net_config(&mut buf) {
-                Ok(n) => { if let Ok(s) = core::str::from_utf8(&buf[..n]) { println(s); } }
+                Ok(n) => {
+                    if let Ok(s) = core::str::from_utf8(&buf[..n]) {
+                        println(s);
+                    }
+                }
                 Err(_) => println("Network info not available"),
             }
         }
@@ -1576,30 +2166,50 @@ fn cmd_net(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_ping(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("ping: usage: ping HOST"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("ping: usage: ping HOST");
+        return true;
+    }
     println(&format!("PING {} ({}): 56 data bytes", args[1], args[1]));
     println("64 bytes from {}: icmp_seq=0 ttl=64 time=0.001 ms");
     true
 }
 
 fn cmd_dns(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("dns: usage: dns HOST"); return true; }
-    println(&format!("DNS lookup for {} not available in ring3", args[1]));
+    if args.len() < 2 {
+        eprintln_fn("dns: usage: dns HOST");
+        return true;
+    }
+    println(&format!(
+        "DNS lookup for {} not available in ring3",
+        args[1]
+    ));
     true
 }
 
 fn cmd_service(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("service: usage: service NAME {start|stop|status}"); return true; }
-    println(&format!("service {} {} not available in ring3", args[1], args[2]));
+    if args.len() < 3 {
+        eprintln_fn("service: usage: service NAME {start|stop|status}");
+        return true;
+    }
+    println(&format!(
+        "service {} {} not available in ring3",
+        args[1], args[2]
+    ));
     true
 }
 
 fn cmd_run(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("run: usage: run SCRIPT"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("run: usage: run SCRIPT");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         scripting::run_script(state, text);
-    } else { eprintln_fn(&format!("run: {} okunamadi", args[1])); }
+    } else {
+        eprintln_fn(&format!("run: {} okunamadi", args[1]));
+    }
     true
 }
 
@@ -1608,7 +2218,10 @@ fn cmd_source(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_sleep(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("sleep: usage: sleep SECONDS"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("sleep: usage: sleep SECONDS");
+        return true;
+    }
     let secs: u64 = args[1].parse().unwrap_or(1);
     let _ = sc::sys_nanosleep(secs, 0);
     true
@@ -1616,68 +2229,188 @@ fn cmd_sleep(_state: &mut ShellState, args: &[&str]) -> bool {
 
 fn cmd_test(state: &mut ShellState, args: &[&str]) -> bool {
     let mut a = args;
-    if a[0] == "[" { a = &a[1..]; }
-    if a.last() == Some(&"]") { a = &a[..a.len() - 1]; }
-    if a.is_empty() { state.exit_code = 1; return true; }
+    if a[0] == "[" {
+        a = &a[1..];
+    }
+    if a.last() == Some(&"]") {
+        a = &a[..a.len() - 1];
+    }
+    if a.is_empty() {
+        state.exit_code = 1;
+        return true;
+    }
     match a[0] {
-        "-f" | "-e" => { state.exit_code = if sc::sys_open(a.get(1).unwrap_or(&""), 0).is_ok() { 0 } else { 1 }; }
-        "-d" => { state.exit_code = 1; }
-        "-z" => { state.exit_code = if a.get(1).map_or(true, |s| s.is_empty()) { 0 } else { 1 }; }
-        "-n" => { state.exit_code = if a.get(1).map_or(false, |s| !s.is_empty()) { 0 } else { 1 }; }
-        "=" | "==" => { state.exit_code = if a.get(1) == a.get(2) { 0 } else { 1 }; }
-        "!=" => { state.exit_code = if a.get(1) != a.get(2) { 0 } else { 1 }; }
-        "-eq" => { state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok()) == a.get(2).and_then(|x| x.parse::<i32>().ok()) { 0 } else { 1 }; }
-        "-ne" => { state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok()) != a.get(2).and_then(|x| x.parse::<i32>().ok()) { 0 } else { 1 }; }
-        "-lt" => { state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok()) < a.get(2).and_then(|x| x.parse::<i32>().ok()) { 0 } else { 1 }; }
-        "-le" => { state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok()) <= a.get(2).and_then(|x| x.parse::<i32>().ok()) { 0 } else { 1 }; }
-        "-gt" => { state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok()) > a.get(2).and_then(|x| x.parse::<i32>().ok()) { 0 } else { 1 }; }
-        "-ge" => { state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok()) >= a.get(2).and_then(|x| x.parse::<i32>().ok()) { 0 } else { 1 }; }
-        _ => { state.exit_code = 1; }
+        "-f" | "-e" => {
+            state.exit_code = if sc::sys_open(a.get(1).unwrap_or(&""), 0).is_ok() {
+                0
+            } else {
+                1
+            };
+        }
+        "-d" => {
+            state.exit_code = 1;
+        }
+        "-z" => {
+            state.exit_code = if a.get(1).map_or(true, |s| s.is_empty()) {
+                0
+            } else {
+                1
+            };
+        }
+        "-n" => {
+            state.exit_code = if a.get(1).map_or(false, |s| !s.is_empty()) {
+                0
+            } else {
+                1
+            };
+        }
+        "=" | "==" => {
+            state.exit_code = if a.get(1) == a.get(2) { 0 } else { 1 };
+        }
+        "!=" => {
+            state.exit_code = if a.get(1) != a.get(2) { 0 } else { 1 };
+        }
+        "-eq" => {
+            state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok())
+                == a.get(2).and_then(|x| x.parse::<i32>().ok())
+            {
+                0
+            } else {
+                1
+            };
+        }
+        "-ne" => {
+            state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok())
+                != a.get(2).and_then(|x| x.parse::<i32>().ok())
+            {
+                0
+            } else {
+                1
+            };
+        }
+        "-lt" => {
+            state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok())
+                < a.get(2).and_then(|x| x.parse::<i32>().ok())
+            {
+                0
+            } else {
+                1
+            };
+        }
+        "-le" => {
+            state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok())
+                <= a.get(2).and_then(|x| x.parse::<i32>().ok())
+            {
+                0
+            } else {
+                1
+            };
+        }
+        "-gt" => {
+            state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok())
+                > a.get(2).and_then(|x| x.parse::<i32>().ok())
+            {
+                0
+            } else {
+                1
+            };
+        }
+        "-ge" => {
+            state.exit_code = if a.get(1).and_then(|x| x.parse::<i32>().ok())
+                >= a.get(2).and_then(|x| x.parse::<i32>().ok())
+            {
+                0
+            } else {
+                1
+            };
+        }
+        _ => {
+            state.exit_code = 1;
+        }
     }
     true
 }
 
 fn cmd_seq(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { return true; }
+    if args.len() < 2 {
+        return true;
+    }
     let (start, end, step) = if args.len() == 2 {
         (1, args[1].parse::<i64>().unwrap_or(1), 1)
     } else if args.len() == 3 {
-        (args[1].parse::<i64>().unwrap_or(1), args[2].parse::<i64>().unwrap_or(1), 1)
+        (
+            args[1].parse::<i64>().unwrap_or(1),
+            args[2].parse::<i64>().unwrap_or(1),
+            1,
+        )
     } else {
-        (args[1].parse::<i64>().unwrap_or(1), args[2].parse::<i64>().unwrap_or(1), args[3].parse::<i64>().unwrap_or(1))
+        (
+            args[1].parse::<i64>().unwrap_or(1),
+            args[2].parse::<i64>().unwrap_or(1),
+            args[3].parse::<i64>().unwrap_or(1),
+        )
     };
-    if step == 0 { return true; }
+    if step == 0 {
+        return true;
+    }
     let mut i = start;
-    if step > 0 { while i <= end { println(&format!("{}", i)); i += step; } }
-    else { while i >= end { println(&format!("{}", i)); i += step; } }
+    if step > 0 {
+        while i <= end {
+            println(&format!("{}", i));
+            i += step;
+        }
+    } else {
+        while i >= end {
+            println(&format!("{}", i));
+            i += step;
+        }
+    }
     true
 }
 
 fn cmd_yes(_state: &mut ShellState, args: &[&str]) -> bool {
     let text = if args.len() > 1 { args[1] } else { "y" };
-    loop { println(text); }
+    loop {
+        println(text);
+    }
 }
 
 fn cmd_loop(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { println("Usage: loop list|attach|flush|detach|mount|umount"); return true; }
+    if args.len() < 2 {
+        println("Usage: loop list|attach|flush|detach|mount|umount");
+        return true;
+    }
     match args[1] {
-        "list" => { println("No loopback devices"); }
+        "list" => {
+            println("No loopback devices");
+        }
         _ => println(&format!("loop {}: not available in ring3", args[1])),
     }
     true
 }
 
 fn cmd_hashsum(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn(&format!("{}: missing file", args[0])); return true; }
-    println(&format!("{}  {}  {}", args[0], "00000000000000000000000000000000", args[1]));
+    if args.len() < 2 {
+        eprintln_fn(&format!("{}: missing file", args[0]));
+        return true;
+    }
+    println(&format!(
+        "{}  {}  {}",
+        args[0], "00000000000000000000000000000000", args[1]
+    ));
     true
 }
 
 fn cmd_cksum(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("cksum: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("cksum: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let mut checksum: u32 = 0;
-        for &b in &data { checksum = checksum.wrapping_add(b as u32); }
+        for &b in &data {
+            checksum = checksum.wrapping_add(b as u32);
+        }
         println(&format!("{} {} {}", checksum, data.len(), args[1]));
     }
     true
@@ -1694,30 +2427,57 @@ fn cmd_read(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-r" => { i += 1; }
-            "-s" => { silent = true; i += 1; }
-            "-p" => { i += 1; if i < args.len() { prompt.push_str(args[i]); i += 1; } }
-            _ => { var_names.push(args[i].to_string()); i += 1; }
+            "-r" => {
+                i += 1;
+            }
+            "-s" => {
+                silent = true;
+                i += 1;
+            }
+            "-p" => {
+                i += 1;
+                if i < args.len() {
+                    prompt.push_str(args[i]);
+                    i += 1;
+                }
+            }
+            _ => {
+                var_names.push(args[i].to_string());
+                i += 1;
+            }
         }
     }
-    if !prompt.is_empty() { print(&prompt); }
+    if !prompt.is_empty() {
+        print(&prompt);
+    }
     let mut line = String::new();
     let mut buf = [0u8; 1];
     loop {
         match sc::sys_read(0, &mut buf) {
             Ok(1) => {
-                if buf[0] == b'\n' || buf[0] == b'\r' { break; }
+                if buf[0] == b'\n' || buf[0] == b'\r' {
+                    break;
+                }
                 if buf[0] == 0x08 || buf[0] == 0x7F {
-                    if !line.is_empty() { line.pop(); if !silent { print("\x08 \x08"); } }
+                    if !line.is_empty() {
+                        line.pop();
+                        if !silent {
+                            print("\x08 \x08");
+                        }
+                    }
                 } else if buf[0] >= 0x20 {
                     line.push(buf[0] as char);
-                    if !silent { let _ = sc::sys_write(1, &[buf[0]]); }
+                    if !silent {
+                        let _ = sc::sys_write(1, &[buf[0]]);
+                    }
                 }
             }
             _ => break,
         }
     }
-    if !silent { println(""); }
+    if !silent {
+        println("");
+    }
     if var_names.is_empty() {
         state.env.set("REPLY", &line);
     } else {
@@ -1731,7 +2491,11 @@ fn cmd_read(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_shift(state: &mut ShellState, args: &[&str]) -> bool {
-    let n: usize = if args.len() > 1 { args[1].parse().unwrap_or(1) } else { 1 };
+    let n: usize = if args.len() > 1 {
+        args[1].parse().unwrap_or(1)
+    } else {
+        1
+    };
     for _ in 0..n {
         for i in 1..=99 {
             let key = format!("{}", i);
@@ -1756,13 +2520,27 @@ fn cmd_trap(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_getopts(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("getopts: usage: getopts optstring name [arg...]"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("getopts: usage: getopts optstring name [arg...]");
+        return true;
+    }
     let optstring = args[1];
     let name = args[2];
-    let optind: usize = state.env.get("OPTIND").and_then(|v| v.parse().ok()).unwrap_or(1);
+    let optind: usize = state
+        .env
+        .get("OPTIND")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
     let optarg_key = "OPTARG";
-    let argv: Vec<&str> = if args.len() > 3 { args[3..].iter().copied().collect() } else { Vec::new() };
-    if optind >= argv.len() { state.exit_code = 1; return false; }
+    let argv: Vec<&str> = if args.len() > 3 {
+        args[3..].iter().copied().collect()
+    } else {
+        Vec::new()
+    };
+    if optind >= argv.len() {
+        state.exit_code = 1;
+        return false;
+    }
     let arg = argv[optind];
     if arg.starts_with('-') && arg.len() > 1 {
         let opt_char = arg.as_bytes()[1] as char;
@@ -1775,7 +2553,10 @@ fn cmd_getopts(state: &mut ShellState, args: &[&str]) -> bool {
                     state.env.set(optarg_key, argv[optind + 1]);
                     state.env.set("OPTIND", &alloc::format!("{}", optind + 2));
                 } else {
-                    eprintln_fn(&alloc::format!("getopts: option requires an argument -- {}", opt_char));
+                    eprintln_fn(&alloc::format!(
+                        "getopts: option requires an argument -- {}",
+                        opt_char
+                    ));
                     state.env.set(name, "?");
                     state.env.set(optarg_key, "");
                 }
@@ -1804,7 +2585,10 @@ fn cmd_getopts(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn cmd_select(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("select: usage: select name [in list...]"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("select: usage: select name [in list...]");
+        return true;
+    }
     let var_name = args[1];
     let items: Vec<String> = if args.len() > 3 && args[2] == "in" {
         args[3..].iter().map(|s| s.to_string()).collect()
@@ -1822,7 +2606,9 @@ fn cmd_select(state: &mut ShellState, args: &[&str]) -> bool {
     loop {
         match sc::sys_read(0, &mut buf) {
             Ok(1) => {
-                if buf[0] == b'\n' || buf[0] == b'\r' { break; }
+                if buf[0] == b'\n' || buf[0] == b'\r' {
+                    break;
+                }
                 line.push(buf[0] as char);
             }
             _ => break,
@@ -1840,7 +2626,9 @@ fn cmd_select(state: &mut ShellState, args: &[&str]) -> bool {
 
 fn cmd_declare(state: &mut ShellState, args: &[&str]) -> bool {
     if args.len() < 2 {
-        for (k, v) in state.env.list() { crate::println(&format!("declare -- {}=\"{}\"", k, v)); }
+        for (k, v) in state.env.list() {
+            crate::println(&format!("declare -- {}=\"{}\"", k, v));
+        }
         for (k, v) in state.env.list_arrays() {
             let items: Vec<&str> = v.iter().map(|s| s.as_str()).collect();
             crate::println(&format!("declare -a {}=({})", k, items.join(" ")));
@@ -1855,13 +2643,15 @@ fn cmd_declare(state: &mut ShellState, args: &[&str]) -> bool {
                 let name_val = args[i];
                 if let Some(pos) = name_val.find('=') {
                     let name = &name_val[..pos];
-                    let val_str = &name_val[pos+1..];
+                    let val_str = &name_val[pos + 1..];
                     if val_str.starts_with('(') && val_str.ends_with(')') {
-                        let inner = &val_str[1..val_str.len()-1];
-                        let values: Vec<String> = inner.split_whitespace().map(|s| s.to_string()).collect();
+                        let inner = &val_str[1..val_str.len() - 1];
+                        let values: Vec<String> =
+                            inner.split_whitespace().map(|s| s.to_string()).collect();
                         state.env.set_array(name, values);
                     } else {
-                        let values: Vec<String> = val_str.split_whitespace().map(|s| s.to_string()).collect();
+                        let values: Vec<String> =
+                            val_str.split_whitespace().map(|s| s.to_string()).collect();
                         state.env.set_array(name, values);
                     }
                 }
@@ -1870,7 +2660,7 @@ fn cmd_declare(state: &mut ShellState, args: &[&str]) -> bool {
             let parts: Vec<&str> = args[i].splitn(2, '=').collect();
             let val = if parts.len() > 1 { parts[1] } else { "" };
             if val.starts_with('(') && val.ends_with(')') {
-                let inner = &val[1..val.len()-1];
+                let inner = &val[1..val.len() - 1];
                 let values: Vec<String> = inner.split_whitespace().map(|s| s.to_string()).collect();
                 state.env.set_array(parts[0], values);
             } else {
@@ -1886,7 +2676,9 @@ fn cmd_declare(state: &mut ShellState, args: &[&str]) -> bool {
 
 fn cmd_readonly(state: &mut ShellState, args: &[&str]) -> bool {
     if args.len() < 2 {
-        for (k, v) in state.env.list() { crate::println(&format!("readonly -- {}=\"{}\"", k, v)); }
+        for (k, v) in state.env.list() {
+            crate::println(&format!("readonly -- {}=\"{}\"", k, v));
+        }
         return true;
     }
     let mut i = 1;
@@ -1908,7 +2700,10 @@ fn cmd_readonly(state: &mut ShellState, args: &[&str]) -> bool {
 /// basename /path/to/file.txt         → file.txt
 /// basename /path/to/file.txt .txt    → file
 fn cmd_basename(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("basename: missing operand"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("basename: missing operand");
+        return true;
+    }
     let path = args[1];
     let suffix = args.get(2).map(|s| *s);
     // Son '/' karakterine kadar olan kısım
@@ -1934,7 +2729,10 @@ fn cmd_basename(_state: &mut ShellState, args: &[&str]) -> bool {
 /// dirname /path/to/file.txt  → /path/to
 /// dirname file.txt           → .
 fn cmd_dirname(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("dirname: missing operand"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("dirname: missing operand");
+        return true;
+    }
     let path = args[1];
     // Sağdaki '/' karakterlerini kaldır
     let trimmed = path.trim_end_matches('/');
@@ -1959,11 +2757,18 @@ fn cmd_hash(state: &mut ShellState, args: &[&str]) -> bool {
         println("hash table is empty");
         return true;
     }
-    let paths = state.env.get("PATH").unwrap_or(String::from("/bin:/usr/bin"));
+    let paths = state
+        .env
+        .get("PATH")
+        .unwrap_or(String::from("/bin:/usr/bin"));
     for cmd_name in &args[1..] {
         let mut found = false;
         for dir in paths.split(':') {
-            let full = if dir == "/" { format!("/{}", cmd_name) } else { format!("{}/{}", dir, cmd_name) };
+            let full = if dir == "/" {
+                format!("/{}", cmd_name)
+            } else {
+                format!("{}/{}", dir, cmd_name)
+            };
             if sc::sys_open(&full, 0).is_ok() {
                 // Başarılı yolu kaydet
                 state.env.set(&format!("_hash_{}", cmd_name), &full);
@@ -1986,10 +2791,15 @@ fn cmd_dd(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut bs: usize = 512;
     let mut count: usize = usize::MAX;
     for arg in &args[1..] {
-        if let Some(v) = arg.strip_prefix("if=") { ifile = v.to_string(); }
-        else if let Some(v) = arg.strip_prefix("of=") { ofile = v.to_string(); }
-        else if let Some(v) = arg.strip_prefix("bs=") { bs = v.parse().unwrap_or(512); }
-        else if let Some(v) = arg.strip_prefix("count=") { count = v.parse().unwrap_or(usize::MAX); }
+        if let Some(v) = arg.strip_prefix("if=") {
+            ifile = v.to_string();
+        } else if let Some(v) = arg.strip_prefix("of=") {
+            ofile = v.to_string();
+        } else if let Some(v) = arg.strip_prefix("bs=") {
+            bs = v.parse().unwrap_or(512);
+        } else if let Some(v) = arg.strip_prefix("count=") {
+            count = v.parse().unwrap_or(usize::MAX);
+        }
     }
     if ifile.is_empty() || ofile.is_empty() {
         eprintln_fn("dd: usage: dd if=INPUT of=OUTPUT [bs=SIZE] [count=N]");
@@ -1997,13 +2807,18 @@ fn cmd_dd(_state: &mut ShellState, args: &[&str]) -> bool {
     }
     let fd_in = match sc::sys_open(&ifile, 0) {
         Ok(fd) => fd,
-        Err(e) => { eprintln_fn(&format!("dd: {}: {}", ifile, e)); return true; }
+        Err(e) => {
+            eprintln_fn(&format!("dd: {}: {}", ifile, e));
+            return true;
+        }
     };
     let mut bytes_total: usize = 0;
     let mut blocks_read: usize = 0;
     let mut buf = alloc::vec![0u8; bs];
     loop {
-        if blocks_read >= count { break; }
+        if blocks_read >= count {
+            break;
+        }
         match sc::sys_read(fd_in, &mut buf) {
             Ok(0) => break,
             Ok(n) => {
@@ -2028,16 +2843,25 @@ fn cmd_dd(_state: &mut ShellState, args: &[&str]) -> bool {
 
 /// `diff` — Dosya karşılaştırması (basit satır satır)
 fn cmd_diff(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("diff: usage: diff FILE1 FILE2"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("diff: usage: diff FILE1 FILE2");
+        return true;
+    }
     let d1 = executor::load_file(args[1]).unwrap_or_default();
     let d2 = executor::load_file(args[2]).unwrap_or_default();
     let t1 = core::str::from_utf8(&d1).unwrap_or("");
     let t2 = core::str::from_utf8(&d2).unwrap_or("");
     let l1: Vec<&str> = t1.lines().collect();
     let l2: Vec<&str> = t2.lines().collect();
-    if l1 == l2 { return true; } // Fark yoksa sessizce çık
-    // Basit satır-satır fark
-    let max_lines = if l1.len() > l2.len() { l1.len() } else { l2.len() };
+    if l1 == l2 {
+        return true;
+    } // Fark yoksa sessizce çık
+      // Basit satır-satır fark
+    let max_lines = if l1.len() > l2.len() {
+        l1.len()
+    } else {
+        l2.len()
+    };
     for i in 0..max_lines {
         let line1 = l1.get(i).copied().unwrap_or("");
         let line2 = l2.get(i).copied().unwrap_or("");
@@ -2055,15 +2879,28 @@ fn cmd_diff(state: &mut ShellState, args: &[&str]) -> bool {
 /// find /path -name "*.txt"
 /// find /path -type f
 fn cmd_find(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("find: usage: find PATH [EXPRESSION]"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("find: usage: find PATH [EXPRESSION]");
+        return true;
+    }
     let root = args[1];
     let mut name_pattern: Option<&str> = None;
     let mut type_filter: Option<char> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i] {
-            "-name" => { i += 1; if i < args.len() { name_pattern = Some(args[i]); } }
-            "-type" => { i += 1; if i < args.len() { type_filter = Some(args[i].chars().next().unwrap_or('f')); } }
+            "-name" => {
+                i += 1;
+                if i < args.len() {
+                    name_pattern = Some(args[i]);
+                }
+            }
+            "-type" => {
+                i += 1;
+                if i < args.len() {
+                    type_filter = Some(args[i].chars().next().unwrap_or('f'));
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -2085,10 +2922,14 @@ fn find_recursive(path: &str, name_pattern: Option<&str>, type_filter: Option<ch
     let is_dir = {
         if let Ok(fd) = sc::sys_open(path, 0) {
             let mut buf2 = [0u8; 8192];
-            let is_d = sc::sys_getdents64(fd, &mut buf2).map(|n| n > 0).unwrap_or(false);
+            let is_d = sc::sys_getdents64(fd, &mut buf2)
+                .map(|n| n > 0)
+                .unwrap_or(false);
             let _ = sc::sys_close(fd);
             is_d
-        } else { false }
+        } else {
+            false
+        }
     };
     let is_file = !is_dir && sc::sys_open(path, 0).is_ok();
     let matches_type = type_filter.map_or(true, |t| match t {
@@ -2103,23 +2944,16 @@ fn find_recursive(path: &str, name_pattern: Option<&str>, type_filter: Option<ch
     if is_dir {
         if let Ok(fd) = sc::sys_open(path, 0) {
             if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-                let mut offset = 0;
-                while offset < n {
-                    let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                    let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                    if name_len > 0 {
-                        let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                        if let Ok(name) = core::str::from_utf8(name_bytes) {
-                            let name = name.trim_end_matches('\0');
-                            if name != "." && name != ".." && !name.is_empty() {
-                                let full = if path == "/" { format!("/{}", name) } else { format!("{}/{}", path, name) };
-                                find_recursive(&full, name_pattern, type_filter);
-                            }
-                        }
+                sc::for_each_dirent64(&buf, n, |name, _| {
+                    if name != "." && name != ".." && !name.is_empty() {
+                        let full = if path == "/" {
+                            format!("/{}", name)
+                        } else {
+                            format!("{}/{}", path, name)
+                        };
+                        find_recursive(&full, name_pattern, type_filter);
                     }
-                    if rec_len == 0 { break; }
-                    offset += rec_len;
-                }
+                });
             }
             let _ = sc::sys_close(fd);
         }
@@ -2134,30 +2968,45 @@ fn simple_glob_match(pattern: &str, name: &str) -> bool {
 }
 
 fn glob_match_impl(p: &[char], n: &[char], pi: usize, ni: usize) -> bool {
-    if pi == p.len() { return ni == n.len(); }
+    if pi == p.len() {
+        return ni == n.len();
+    }
     if p[pi] == '*' {
         for skip in 0..=n.len() - ni {
-            if glob_match_impl(p, n, pi + 1, ni + skip) { return true; }
+            if glob_match_impl(p, n, pi + 1, ni + skip) {
+                return true;
+            }
         }
         return false;
     }
-    if p[pi] == '?' { return ni < n.len() && glob_match_impl(p, n, pi + 1, ni + 1); }
+    if p[pi] == '?' {
+        return ni < n.len() && glob_match_impl(p, n, pi + 1, ni + 1);
+    }
     if p[pi] == '[' {
         let mut j = pi + 1;
         let mut negate = false;
-        if j < p.len() && (p[j] == '^' || p[j] == '!') { negate = true; j += 1; }
+        if j < p.len() && (p[j] == '^' || p[j] == '!') {
+            negate = true;
+            j += 1;
+        }
         let mut found = false;
         while j < p.len() && p[j] != ']' {
             if j + 2 < p.len() && p[j + 1] == '-' {
-                if ni < n.len() && n[ni] >= p[j] && n[ni] <= p[j + 2] { found = true; }
+                if ni < n.len() && n[ni] >= p[j] && n[ni] <= p[j + 2] {
+                    found = true;
+                }
                 j += 3;
             } else {
-                if ni < n.len() && n[ni] == p[j] { found = true; }
+                if ni < n.len() && n[ni] == p[j] {
+                    found = true;
+                }
                 j += 1;
             }
         }
         let end = if j < p.len() { j + 1 } else { j };
-        if found == negate { return false; }
+        if found == negate {
+            return false;
+        }
         return ni < n.len() && glob_match_impl(p, n, end, ni + 1);
     }
     ni < n.len() && p[pi] == n[ni] && glob_match_impl(p, n, pi + 1, ni + 1)
@@ -2170,7 +3019,10 @@ fn glob_match_impl(p: &[char], n: &[char], pi: usize, ni: usize) -> bool {
 /// sed '/pattern/a\appended text' file
 /// sed 's/a/b/; s/c/d/' file
 fn cmd_sed(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("sed: usage: sed 'COMMAND' [FILE]"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("sed: usage: sed 'COMMAND' [FILE]");
+        return true;
+    }
     let cmd_str = args[1];
     let file_data = if args.len() > 2 {
         executor::load_file(args[2]).unwrap_or_default()
@@ -2214,24 +3066,34 @@ fn cmd_sed(_state: &mut ShellState, args: &[&str]) -> bool {
                 (None, None) => true,
                 _ => false,
             };
-            if !in_range { continue; }
+            if !in_range {
+                continue;
+            }
             let cmd_body = cmd_body.trim();
             // s/pattern/replacement/g
             if cmd_body.starts_with("s/") {
                 let inner = &cmd_body[2..];
                 let p_end = inner.find('/').unwrap_or(inner.len());
                 let pattern = &inner[..p_end];
-                let rest = if p_end < inner.len() { &inner[p_end + 1..] } else { "" };
+                let rest = if p_end < inner.len() {
+                    &inner[p_end + 1..]
+                } else {
+                    ""
+                };
                 let r_end = rest.find('/').unwrap_or(rest.len());
                 let replacement = &rest[..r_end];
                 let global = rest[r_end..].contains('g');
                 if global {
                     let new_line = line.replace(pattern, replacement);
-                    if new_line != *line { suppress_default = true; }
+                    if new_line != *line {
+                        suppress_default = true;
+                    }
                     println(&new_line);
                 } else {
                     let new_line = line.replacen(pattern, replacement, 1);
-                    if new_line != *line { suppress_default = true; }
+                    if new_line != *line {
+                        suppress_default = true;
+                    }
                     println(&new_line);
                 }
                 continue;
@@ -2272,12 +3134,22 @@ fn cmd_sed(_state: &mut ShellState, args: &[&str]) -> bool {
                 let inner = &cmd_body[2..];
                 let parts: Vec<&str> = inner.splitn(2, '/').collect();
                 let from = parts[0];
-                let to = if parts.len() > 1 { parts[1].trim_end_matches('/') } else { "" };
+                let to = if parts.len() > 1 {
+                    parts[1].trim_end_matches('/')
+                } else {
+                    ""
+                };
                 let mut new_line = String::new();
                 for ch in line.chars() {
                     if let Some(pos) = from.find(ch) {
-                        if let Some(tc) = to.chars().nth(pos) { new_line.push(tc); } else { new_line.push(ch); }
-                    } else { new_line.push(ch); }
+                        if let Some(tc) = to.chars().nth(pos) {
+                            new_line.push(tc);
+                        } else {
+                            new_line.push(ch);
+                        }
+                    } else {
+                        new_line.push(ch);
+                    }
                 }
                 println(&new_line);
                 suppress_default = true;
@@ -2307,8 +3179,12 @@ fn sed_split_commands(cmd_str: &str) -> Vec<&str> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'\'' if !in_dq => { in_sq = !in_sq; }
-            b'"' if !in_sq => { in_dq = !in_dq; }
+            b'\'' if !in_dq => {
+                in_sq = !in_sq;
+            }
+            b'"' if !in_sq => {
+                in_dq = !in_dq;
+            }
             b';' if !in_sq && !in_dq => {
                 cmds.push(&cmd_str[last..i]);
                 last = i + 1;
@@ -2317,7 +3193,9 @@ fn sed_split_commands(cmd_str: &str) -> Vec<&str> {
         }
         i += 1;
     }
-    if last < bytes.len() { cmds.push(&cmd_str[last..]); }
+    if last < bytes.len() {
+        cmds.push(&cmd_str[last..]);
+    }
     cmds
 }
 
@@ -2339,7 +3217,9 @@ fn sed_parse_address(cmd: &str) -> (Option<String>, Option<String>, &str) {
         // Sayısal adres kontrolü
         if before.parse::<usize>().is_ok() || before == "$" || before.starts_with('/') {
             let s = before.to_string();
-            if let Some(rest_end) = after_comma.find(|c: char| !c.is_ascii_digit() && c != '$' && c != '/') {
+            if let Some(rest_end) =
+                after_comma.find(|c: char| !c.is_ascii_digit() && c != '$' && c != '/')
+            {
                 let e = after_comma[..rest_end].trim().to_string();
                 let rest = after_comma[rest_end..].trim();
                 return (Some(s), Some(e), rest);
@@ -2350,7 +3230,9 @@ fn sed_parse_address(cmd: &str) -> (Option<String>, Option<String>, &str) {
     }
     // Tek adres: "1" veya "$"
     if cmd.parse::<usize>().is_ok() || cmd.starts_with('$') || cmd.starts_with('/') {
-        let first_word: Vec<&str> = cmd.splitn(2, |c: char| c == ' ' || c == '/' || c == 'p' || c == 'd').collect();
+        let first_word: Vec<&str> = cmd
+            .splitn(2, |c: char| c == ' ' || c == '/' || c == 'p' || c == 'd')
+            .collect();
         if !cmd.starts_with('/') {
             if let Some(end) = cmd.find(|c: char| !c.is_ascii_digit()) {
                 let addr = cmd[..end].to_string();
@@ -2373,9 +3255,11 @@ fn sed_resolve_line_addr(lines: &[&str], current_line: usize, addr: &str) -> usi
         return n;
     }
     if addr.starts_with('/') && addr.ends_with('/') {
-        let pattern = &addr[1..addr.len()-1];
+        let pattern = &addr[1..addr.len() - 1];
         for (i, line) in lines.iter().enumerate() {
-            if line.contains(pattern) { return i + 1; }
+            if line.contains(pattern) {
+                return i + 1;
+            }
         }
     }
     current_line
@@ -2404,14 +3288,19 @@ fn cmd_awk(_state: &mut ShellState, args: &[&str]) -> bool {
                     let k = &kv[..eq];
                     let v = &kv[eq + 1..];
                     assignments.push((k.to_string(), v.to_string()));
-                    if k == "OFS" { ofss = v.to_string(); }
+                    if k == "OFS" {
+                        ofss = v.to_string();
+                    }
                 }
                 pattern_idx += 2;
             }
             _ => break,
         }
     }
-    if pattern_idx >= args.len() { eprintln_fn("awk: usage: awk [-F SEP] [-v OFS=...] 'PATTERN {ACTION}' FILE"); return true; }
+    if pattern_idx >= args.len() {
+        eprintln_fn("awk: usage: awk [-F SEP] [-v OFS=...] 'PATTERN {ACTION}' FILE");
+        return true;
+    }
     // Split begin/action/end blocks
     let spec = args[pattern_idx];
     let mut begin_action: Option<&str> = None;
@@ -2422,50 +3311,75 @@ fn cmd_awk(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut pos = 0;
     while pos < spec_bytes.len() {
         // skip whitespace
-        while pos < spec_bytes.len() && spec_bytes[pos] == b' ' { pos += 1; }
-        if pos >= spec_bytes.len() { break; }
+        while pos < spec_bytes.len() && spec_bytes[pos] == b' ' {
+            pos += 1;
+        }
+        if pos >= spec_bytes.len() {
+            break;
+        }
         // Check for BEGIN, END, or {action}
-        if pos + 5 < spec_bytes.len() && &spec_bytes[pos..pos+5] == b"BEGIN" && pos + 5 < spec_bytes.len() {
+        if pos + 5 < spec_bytes.len()
+            && &spec_bytes[pos..pos + 5] == b"BEGIN"
+            && pos + 5 < spec_bytes.len()
+        {
             pos += 5;
-            while pos < spec_bytes.len() && spec_bytes[pos] == b' ' { pos += 1; }
-            if pos < spec_bytes.len() && spec_bytes[pos] == b'{' {
+            while pos < spec_bytes.len() && spec_bytes[pos] == b' ' {
                 pos += 1;
-                let start = pos;
-                let mut depth = 1u32;
-                while pos < spec_bytes.len() && depth > 0 {
-                    if spec_bytes[pos] == b'{' { depth += 1; }
-                    else if spec_bytes[pos] == b'}' { depth -= 1; }
-                    pos += 1;
-                }
-                begin_action = Some(spec[start..pos-1].trim());
             }
-        } else if pos + 3 < spec_bytes.len() && &spec_bytes[pos..pos+3] == b"END" && pos + 3 < spec_bytes.len() {
-            pos += 3;
-            while pos < spec_bytes.len() && spec_bytes[pos] == b' ' { pos += 1; }
             if pos < spec_bytes.len() && spec_bytes[pos] == b'{' {
                 pos += 1;
                 let start = pos;
                 let mut depth = 1u32;
                 while pos < spec_bytes.len() && depth > 0 {
-                    if spec_bytes[pos] == b'{' { depth += 1; }
-                    else if spec_bytes[pos] == b'}' { depth -= 1; }
+                    if spec_bytes[pos] == b'{' {
+                        depth += 1;
+                    } else if spec_bytes[pos] == b'}' {
+                        depth -= 1;
+                    }
                     pos += 1;
                 }
-                end_action = Some(spec[start..pos-1].trim());
+                begin_action = Some(spec[start..pos - 1].trim());
+            }
+        } else if pos + 3 < spec_bytes.len()
+            && &spec_bytes[pos..pos + 3] == b"END"
+            && pos + 3 < spec_bytes.len()
+        {
+            pos += 3;
+            while pos < spec_bytes.len() && spec_bytes[pos] == b' ' {
+                pos += 1;
+            }
+            if pos < spec_bytes.len() && spec_bytes[pos] == b'{' {
+                pos += 1;
+                let start = pos;
+                let mut depth = 1u32;
+                while pos < spec_bytes.len() && depth > 0 {
+                    if spec_bytes[pos] == b'{' {
+                        depth += 1;
+                    } else if spec_bytes[pos] == b'}' {
+                        depth -= 1;
+                    }
+                    pos += 1;
+                }
+                end_action = Some(spec[start..pos - 1].trim());
             }
         } else if spec_bytes[pos] == b'{' {
             pos += 1;
             let start = pos;
             let mut depth = 1u32;
             while pos < spec_bytes.len() && depth > 0 {
-                if spec_bytes[pos] == b'{' { depth += 1; }
-                else if spec_bytes[pos] == b'}' { depth -= 1; }
+                if spec_bytes[pos] == b'{' {
+                    depth += 1;
+                } else if spec_bytes[pos] == b'}' {
+                    depth -= 1;
+                }
                 pos += 1;
             }
-            main_action = Some(spec[start..pos-1].trim());
+            main_action = Some(spec[start..pos - 1].trim());
         } else {
             // Single-char or unknown — skip to next space
-            while pos < spec_bytes.len() && spec_bytes[pos] != b' ' { pos += 1; }
+            while pos < spec_bytes.len() && spec_bytes[pos] != b' ' {
+                pos += 1;
+            }
         }
     }
     // Fallback: if no braces found, treat entire spec as action
@@ -2513,19 +3427,30 @@ fn cmd_awk(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 /// awk action yürütücü: print, printf, NF, NR, $0, $1..$N, OFS, ASSIGNMENT
-fn execute_awk_action(action: &str, fields: &[&str], ofss: &str, nf: u32, nr: u32, assignments: &[(String, String)]) {
+fn execute_awk_action(
+    action: &str,
+    fields: &[&str],
+    ofss: &str,
+    nf: u32,
+    nr: u32,
+    assignments: &[(String, String)],
+) {
     // Multi-statement: split by ; at top level
     let stmts = awk_split_statements(action);
     for stmt in &stmts {
         let stmt = stmt.trim();
-        if stmt.is_empty() { continue; }
+        if stmt.is_empty() {
+            continue;
+        }
         // print statement
         if stmt.starts_with("print ") {
             let args_str = &stmt[6..];
             let print_parts: Vec<&str> = args_str.split(',').map(|s| s.trim()).collect();
             let mut out = String::new();
             for (idx, part) in print_parts.iter().enumerate() {
-                if idx > 0 { out.push_str(ofss); }
+                if idx > 0 {
+                    out.push_str(ofss);
+                }
                 out.push_str(&awk_eval_field_or_var(part, fields, nf, nr, assignments));
             }
             println(&out);
@@ -2547,21 +3472,42 @@ fn execute_awk_action(action: &str, fields: &[&str], ofss: &str, nf: u32, nr: u3
                         match fmt_bytes[fi] {
                             b's' | b'd' | b'i' | b'u' => {
                                 if arg_idx < parts.len() {
-                                    result.push_str(&awk_eval_field_or_var(parts[arg_idx], fields, nf, nr, assignments));
+                                    result.push_str(&awk_eval_field_or_var(
+                                        parts[arg_idx],
+                                        fields,
+                                        nf,
+                                        nr,
+                                        assignments,
+                                    ));
                                     arg_idx += 1;
                                 }
                                 fi += 1;
                             }
                             b'c' => {
                                 if arg_idx < parts.len() {
-                                    let val = awk_eval_field_or_var(parts[arg_idx], fields, nf, nr, assignments);
-                                    if let Some(c) = val.chars().next() { result.push(c); }
+                                    let val = awk_eval_field_or_var(
+                                        parts[arg_idx],
+                                        fields,
+                                        nf,
+                                        nr,
+                                        assignments,
+                                    );
+                                    if let Some(c) = val.chars().next() {
+                                        result.push(c);
+                                    }
                                     arg_idx += 1;
                                 }
                                 fi += 1;
                             }
-                            b'%' => { result.push('%'); fi += 1; }
-                            _ => { result.push('%'); result.push(fmt_bytes[fi] as char); fi += 1; }
+                            b'%' => {
+                                result.push('%');
+                                fi += 1;
+                            }
+                            _ => {
+                                result.push('%');
+                                result.push(fmt_bytes[fi] as char);
+                                fi += 1;
+                            }
                         }
                     } else {
                         result.push(fmt_bytes[fi] as char);
@@ -2576,7 +3522,7 @@ fn execute_awk_action(action: &str, fields: &[&str], ofss: &str, nf: u32, nr: u3
         if let Some(eq) = stmt.find('=') {
             if eq > 0 {
                 let var_name = stmt[..eq].trim();
-                let value = awk_eval_field_or_var(&stmt[eq+1..], fields, nf, nr, assignments);
+                let value = awk_eval_field_or_var(&stmt[eq + 1..], fields, nf, nr, assignments);
                 // Set variable (stored via assignments — limited to OFS etc.)
                 // For simple awk, just handle OFS assignment inline
                 continue;
@@ -2590,32 +3536,51 @@ fn execute_awk_action(action: &str, fields: &[&str], ofss: &str, nf: u32, nr: u3
     }
 }
 
-fn awk_eval_field_or_var(expr: &str, fields: &[&str], nf: u32, nr: u32, assignments: &[(String, String)]) -> String {
+fn awk_eval_field_or_var(
+    expr: &str,
+    fields: &[&str],
+    nf: u32,
+    nr: u32,
+    assignments: &[(String, String)],
+) -> String {
     let expr = expr.trim();
     if expr == "$0" {
         fields.join("")
     } else if expr.starts_with('$') {
         if let Ok(idx) = expr[1..].parse::<usize>() {
-            if idx == 0 { fields.join("") }
-            else { fields.get(idx - 1).copied().unwrap_or("").to_string() }
-        } else { expr.to_string() }
+            if idx == 0 {
+                fields.join("")
+            } else {
+                fields.get(idx - 1).copied().unwrap_or("").to_string()
+            }
+        } else {
+            expr.to_string()
+        }
     } else if expr == "NF" {
         nf.to_string()
     } else if expr == "NR" {
         nr.to_string()
     } else if expr == "OFS" {
         // OFS value from assignments
-        assignments.iter().find(|(k, _)| k == "OFS").map(|(_, v)| v.clone()).unwrap_or_else(|| " ".to_string())
+        assignments
+            .iter()
+            .find(|(k, _)| k == "OFS")
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| " ".to_string())
     } else if expr.starts_with('"') && expr.ends_with('"') && expr.len() >= 2 {
         // String literal
-        expr[1..expr.len()-1].to_string()
+        expr[1..expr.len() - 1].to_string()
     } else {
         // Try as numeric literal
         if expr.parse::<i64>().is_ok() || expr.parse::<f64>().is_ok() {
             expr.to_string()
         } else {
             // Variable lookup from assignments
-            assignments.iter().find(|(k, _)| k == expr).map(|(_, v)| v.clone()).unwrap_or_else(|| expr.to_string())
+            assignments
+                .iter()
+                .find(|(k, _)| k == expr)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| expr.to_string())
         }
     }
 }
@@ -2630,10 +3595,20 @@ fn awk_split_statements(s: &str) -> Vec<&str> {
     let mut in_dq = false;
     while i < bytes.len() {
         match bytes[i] {
-            b'\'' if !in_dq => { in_sq = !in_sq; }
-            b'"' if !in_sq => { in_dq = !in_dq; }
-            b'{' if !in_sq && !in_dq => { depth += 1; }
-            b'}' if !in_sq && !in_dq => { if depth > 0 { depth -= 1; } }
+            b'\'' if !in_dq => {
+                in_sq = !in_sq;
+            }
+            b'"' if !in_sq => {
+                in_dq = !in_dq;
+            }
+            b'{' if !in_sq && !in_dq => {
+                depth += 1;
+            }
+            b'}' if !in_sq && !in_dq => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
             b',' if depth == 0 && !in_sq && !in_dq => {
                 stmts.push(&s[last..i]);
                 last = i + 1;
@@ -2642,14 +3617,19 @@ fn awk_split_statements(s: &str) -> Vec<&str> {
         }
         i += 1;
     }
-    if last < bytes.len() { stmts.push(&s[last..]); }
+    if last < bytes.len() {
+        stmts.push(&s[last..]);
+    }
     stmts
 }
 
 /// `paste` — Satırları yan yana birleştir
 /// paste file1 file2
 fn cmd_paste(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("paste: usage: paste FILE1 FILE2 ..."); return true; }
+    if args.len() < 2 {
+        eprintln_fn("paste: usage: paste FILE1 FILE2 ...");
+        return true;
+    }
     // Her dosyanın satırlarını String olarak depola (borrow lifetime sorunlarını önler)
     let mut file_lines: Vec<Vec<String>> = Vec::new();
     for path in &args[1..] {
@@ -2663,9 +3643,10 @@ fn cmd_paste(_state: &mut ShellState, args: &[&str]) -> bool {
     }
     let max_lines = file_lines.iter().map(|l| l.len()).max().unwrap_or(0);
     for i in 0..max_lines {
-        let parts: Vec<&str> = file_lines.iter().map(|l| {
-            l.get(i).map(|s| s.as_str()).unwrap_or("")
-        }).collect();
+        let parts: Vec<&str> = file_lines
+            .iter()
+            .map(|l| l.get(i).map(|s| s.as_str()).unwrap_or(""))
+            .collect();
         println(&parts.join("\t"));
     }
     true
@@ -2673,7 +3654,10 @@ fn cmd_paste(_state: &mut ShellState, args: &[&str]) -> bool {
 
 /// `join` — Sıralı dosyaları ortak alana göre birleştir
 fn cmd_join(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("join: usage: join FILE1 FILE2"); return true; }
+    if args.len() < 3 {
+        eprintln_fn("join: usage: join FILE1 FILE2");
+        return true;
+    }
     let d1 = executor::load_file(args[1]).unwrap_or_default();
     let d2 = executor::load_file(args[2]).unwrap_or_default();
     let t1 = core::str::from_utf8(&d1).unwrap_or("");
@@ -2687,13 +3671,21 @@ fn cmd_join(_state: &mut ShellState, args: &[&str]) -> bool {
         let f2: Vec<&str> = l2[j].split_whitespace().collect();
         let key1 = f1.first().unwrap_or(&"");
         let key2 = f2.first().unwrap_or(&"");
-        if key1 < key2 { i += 1; }
-        else if key1 > key2 { j += 1; }
-        else {
+        if key1 < key2 {
+            i += 1;
+        } else if key1 > key2 {
+            j += 1;
+        } else {
             let mut joined = String::new();
             joined.push_str(key1);
-            for f in &f1[1..] { joined.push(' '); joined.push_str(f); }
-            for f in &f2[1..] { joined.push(' '); joined.push_str(f); }
+            for f in &f1[1..] {
+                joined.push(' ');
+                joined.push_str(f);
+            }
+            for f in &f2[1..] {
+                joined.push(' ');
+                joined.push_str(f);
+            }
             println(&joined);
             i += 1;
             j += 1;
@@ -2704,7 +3696,10 @@ fn cmd_join(_state: &mut ShellState, args: &[&str]) -> bool {
 
 /// `tsort` — Topolojik sıralama (basit: girintili sıralama)
 fn cmd_tsort(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("tsort: missing file"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("tsort: missing file");
+        return true;
+    }
     if let Some(data) = executor::load_file(args[1]) {
         let text = core::str::from_utf8(&data).unwrap_or("");
         // Basit: dependansları parse et ve sıralı listele
@@ -2726,7 +3721,8 @@ fn cmd_tsort(_state: &mut ShellState, args: &[&str]) -> bool {
             *in_degree.entry(to.to_string()).or_insert(0) += 1;
         }
         // Kahn's algorithm
-        let mut queue: Vec<String> = in_degree.iter()
+        let mut queue: Vec<String> = in_degree
+            .iter()
             .filter(|&(_, &deg)| deg == 0)
             .map(|(k, _)| k.clone())
             .collect();
@@ -2737,11 +3733,15 @@ fn cmd_tsort(_state: &mut ShellState, args: &[&str]) -> bool {
                 if from == node {
                     let deg = in_degree.get_mut(to).unwrap();
                     *deg -= 1;
-                    if *deg == 0 { queue.push(to.to_string()); }
+                    if *deg == 0 {
+                        queue.push(to.to_string());
+                    }
                 }
             }
         }
-        for node in &result { println(node); }
+        for node in &result {
+            println(node);
+        }
     }
     true
 }
@@ -2749,7 +3749,10 @@ fn cmd_tsort(_state: &mut ShellState, args: &[&str]) -> bool {
 /// `xargs` — stdin'den oku, komut argümanlarına böl ve çalıştır
 /// echo "file1 file2" | xargs rm
 fn cmd_xargs(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("xargs: usage: xargs COMMAND"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("xargs: usage: xargs COMMAND");
+        return true;
+    }
     // stdin'den oku
     let mut input = String::new();
     let mut buf = [0u8; 4096];
@@ -2786,7 +3789,9 @@ fn cmd_expand(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut tabstop = 8;
     let mut file_idx = 1;
     if args.len() > 2 && args[1] == "-t" {
-        if let Ok(n) = args[2].parse::<usize>() { tabstop = n; }
+        if let Ok(n) = args[2].parse::<usize>() {
+            tabstop = n;
+        }
         file_idx = 3;
     }
     let file_data = if file_idx < args.len() {
@@ -2810,7 +3815,10 @@ fn cmd_expand(_state: &mut ShellState, args: &[&str]) -> bool {
         for ch in line.chars() {
             if ch == '\t' {
                 let spaces = tabstop - (col % tabstop);
-                for _ in 0..spaces { expanded.push(' '); col += 1; }
+                for _ in 0..spaces {
+                    expanded.push(' ');
+                    col += 1;
+                }
             } else {
                 expanded.push(ch);
                 col += 1;
@@ -2826,7 +3834,9 @@ fn cmd_unexpand(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut tabstop = 8;
     let mut file_idx = 1;
     if args.len() > 2 && args[1] == "-t" {
-        if let Ok(n) = args[2].parse::<usize>() { tabstop = n; }
+        if let Ok(n) = args[2].parse::<usize>() {
+            tabstop = n;
+        }
         file_idx = 3;
     }
     let file_data = if file_idx < args.len() {
@@ -2857,14 +3867,20 @@ fn cmd_unexpand(_state: &mut ShellState, args: &[&str]) -> bool {
                     spaces = 0;
                 }
             } else {
-                for _ in 0..spaces { result.push(' '); }
+                for _ in 0..spaces {
+                    result.push(' ');
+                }
                 spaces = 0;
                 result.push(ch);
                 col += 1;
-                if ch == '\t' { col = (col / tabstop + 1) * tabstop; }
+                if ch == '\t' {
+                    col = (col / tabstop + 1) * tabstop;
+                }
             }
         }
-        for _ in 0..spaces { result.push(' '); }
+        for _ in 0..spaces {
+            result.push(' ');
+        }
         println(&result);
     }
     true
@@ -2886,16 +3902,36 @@ fn cmd_pr(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-2" => { columns = 2; i += 1; }
-            "-3" => { columns = 3; i += 1; }
-            "-4" => { columns = 4; i += 1; }
-            "-h" if i + 1 < args.len() => { header = Some(args[i + 1]); i += 2; }
-            "-l" if i + 1 < args.len() => {
-                if let Ok(n) = args[i + 1].parse::<usize>() { page_len = n; }
+            "-2" => {
+                columns = 2;
+                i += 1;
+            }
+            "-3" => {
+                columns = 3;
+                i += 1;
+            }
+            "-4" => {
+                columns = 4;
+                i += 1;
+            }
+            "-h" if i + 1 < args.len() => {
+                header = Some(args[i + 1]);
                 i += 2;
             }
-            "-t" => { page_len = usize::MAX; i += 1; } // başlık/footer yok
-            _ => { file_idx = i; break; }
+            "-l" if i + 1 < args.len() => {
+                if let Ok(n) = args[i + 1].parse::<usize>() {
+                    page_len = n;
+                }
+                i += 2;
+            }
+            "-t" => {
+                page_len = usize::MAX;
+                i += 1;
+            } // başlık/footer yok
+            _ => {
+                file_idx = i;
+                break;
+            }
         }
     }
     // Dosyadan satırları oku
@@ -2923,22 +3959,32 @@ fn cmd_pr(_state: &mut ShellState, args: &[&str]) -> bool {
             }
         }
     }
-    if all_lines.is_empty() { return true; }
+    if all_lines.is_empty() {
+        return true;
+    }
     if let Some(h) = header {
         if page_len != usize::MAX {
             println(&format!("\n{}", h));
         }
     }
-    let rows_per_page = if columns > 1 { all_lines.len().div_ceil(columns) } else { all_lines.len() };
+    let rows_per_page = if columns > 1 {
+        all_lines.len().div_ceil(columns)
+    } else {
+        all_lines.len()
+    };
     for row in 0..rows_per_page {
         if row > 0 && columns == 1 && page_len != usize::MAX && row % (page_len - 3) == 0 {
-            if let Some(h) = header { println(&format!("\n{}", h)); }
+            if let Some(h) = header {
+                println(&format!("\n{}", h));
+            }
         }
         let mut line_out = String::new();
         for col in 0..columns {
             let idx = row + col * rows_per_page;
             if idx < all_lines.len() {
-                if col > 0 { line_out.push('\t'); }
+                if col > 0 {
+                    line_out.push('\t');
+                }
                 line_out.push_str(&all_lines[idx]);
             }
         }
@@ -2962,8 +4008,12 @@ fn cmd_stty(_state: &mut ShellState, args: &[&str]) -> bool {
     }
     // stty speed ayarlama (basit stub)
     match args[1] {
-        "speed" => { println("38400"); }
-        "size" => { println("24 80"); }
+        "speed" => {
+            println("38400");
+        }
+        "size" => {
+            println("24 80");
+        }
         "isatty" => { /* sessizce başarısız ol — terminal değil */ }
         _ => {
             eprintln_fn(&format!("stty: unsupported option: {}", args[1]));
@@ -3005,7 +4055,10 @@ fn cmd_bc(_state: &mut ShellState, args: &[&str]) -> bool {
         match args[i] {
             "-l" => use_mathlib = true,
             "-q" => quiet = true,
-            "-e" if i + 1 < args.len() => { i += 1; expr_input = Some(args[i]); }
+            "-e" if i + 1 < args.len() => {
+                i += 1;
+                expr_input = Some(args[i]);
+            }
             "--help" => {
                 println("Usage: bc [-l] [-q] [-e expression] [file...]");
                 println("  -l  Math library (s, c, a, l, e, j)");
@@ -3036,11 +4089,18 @@ fn cmd_bc(_state: &mut ShellState, args: &[&str]) -> bool {
         let mut input = String::new();
         loop {
             match sc::sys_read(0, &mut buf) {
-                Ok(0) => { if !quiet { println(""); } return true; }
+                Ok(0) => {
+                    if !quiet {
+                        println("");
+                    }
+                    return true;
+                }
                 Ok(n) => {
                     for j in 0..n {
                         let c = buf[j] as char;
-                        if c == '\n' || c == '\r' { break; }
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
                         input.push(c);
                     }
                     break;
@@ -3049,11 +4109,21 @@ fn cmd_bc(_state: &mut ShellState, args: &[&str]) -> bool {
             }
         }
         let input = input.trim();
-        if input.is_empty() { continue; }
-        if input == "quit" || input == "exit" { break; }
-        if input == "halt" { break; }
-        if input.contains('=') && !input.contains("==") && !input.contains("!=")
-            && !input.contains("<=") && !input.contains(">=") {
+        if input.is_empty() {
+            continue;
+        }
+        if input == "quit" || input == "exit" {
+            break;
+        }
+        if input == "halt" {
+            break;
+        }
+        if input.contains('=')
+            && !input.contains("==")
+            && !input.contains("!=")
+            && !input.contains("<=")
+            && !input.contains(">=")
+        {
             let parts: Vec<&str> = input.splitn(2, '=').collect();
             if parts.len() == 2 && !parts[0].trim().is_empty() {
                 let val = bc_eval_expr(parts[1].trim(), &mut vars, scale);
@@ -3078,7 +4148,10 @@ fn format_int(val: i64, scale: usize) -> String {
     } else {
         let int_part = val / 1_000_000_000_000_000_000;
         let frac = (val % 1_000_000_000_000_000_000).unsigned_abs();
-        format!("{}.{:018}", int_part, frac).trim_end_matches('0').trim_end_matches('.').to_string()
+        format!("{}.{:018}", int_part, frac)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string()
     }
 }
 
@@ -3088,16 +4161,26 @@ fn bc_tokenize(s: &str) -> Vec<(u8, i64)> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => { i += 1; }
+            b' ' | b'\t' | b'\n' | b'\r' => {
+                i += 1;
+            }
             b'0'..=b'9' | b'.' => {
                 let mut num: i64 = 0;
                 let mut frac = 0i64;
                 let mut frac_div = 1i64;
                 let mut in_frac = false;
                 while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                    if bytes[i] == b'.' { in_frac = true; i += 1; continue; }
-                    if in_frac { frac = frac * 10 + (bytes[i] - b'0') as i64; frac_div *= 10; }
-                    else { num = num * 10 + (bytes[i] - b'0') as i64; }
+                    if bytes[i] == b'.' {
+                        in_frac = true;
+                        i += 1;
+                        continue;
+                    }
+                    if in_frac {
+                        frac = frac * 10 + (bytes[i] - b'0') as i64;
+                        frac_div *= 10;
+                    } else {
+                        num = num * 10 + (bytes[i] - b'0') as i64;
+                    }
                     i += 1;
                 }
                 if frac_div > 1 {
@@ -3106,17 +4189,43 @@ fn bc_tokenize(s: &str) -> Vec<(u8, i64)> {
                     tokens.push((b'N', num * 1_000_000_000_000_000_000));
                 }
             }
-            b'+' => { tokens.push((b'+', 0)); i += 1; }
-            b'-' => { tokens.push((b'-', 0)); i += 1; }
-            b'*' => { tokens.push((b'*', 0)); i += 1; }
-            b'/' => { tokens.push((b'/', 0)); i += 1; }
-            b'%' => { tokens.push((b'%', 0)); i += 1; }
-            b'^' => { tokens.push((b'^', 0)); i += 1; }
-            b'(' => { tokens.push((b'(', 0)); i += 1; }
-            b')' => { tokens.push((b')', 0)); i += 1; }
+            b'+' => {
+                tokens.push((b'+', 0));
+                i += 1;
+            }
+            b'-' => {
+                tokens.push((b'-', 0));
+                i += 1;
+            }
+            b'*' => {
+                tokens.push((b'*', 0));
+                i += 1;
+            }
+            b'/' => {
+                tokens.push((b'/', 0));
+                i += 1;
+            }
+            b'%' => {
+                tokens.push((b'%', 0));
+                i += 1;
+            }
+            b'^' => {
+                tokens.push((b'^', 0));
+                i += 1;
+            }
+            b'(' => {
+                tokens.push((b'(', 0));
+                i += 1;
+            }
+            b')' => {
+                tokens.push((b')', 0));
+                i += 1;
+            }
             b'a'..=b'z' | b'A'..=b'Z' => {
                 let start = i;
-                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { i += 1; }
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
                 let name = core::str::from_utf8(&bytes[start..i]).unwrap_or("");
                 match name {
                     "sqrt" => tokens.push((b'S', 0)),
@@ -3124,7 +4233,9 @@ fn bc_tokenize(s: &str) -> Vec<(u8, i64)> {
                     _ => tokens.push((b'V', 0)),
                 }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
     tokens
@@ -3134,8 +4245,14 @@ fn bc_parse_expr(t: &[(u8, i64)], p: &mut usize, vars: &[(String, i64)]) -> i64 
     let mut left = bc_parse_term(t, p, vars);
     while *p < t.len() {
         match t[*p].0 {
-            b'+' => { *p += 1; left += bc_parse_term(t, p, vars); }
-            b'-' => { *p += 1; left -= bc_parse_term(t, p, vars); }
+            b'+' => {
+                *p += 1;
+                left += bc_parse_term(t, p, vars);
+            }
+            b'-' => {
+                *p += 1;
+                left -= bc_parse_term(t, p, vars);
+            }
             _ => break,
         }
     }
@@ -3146,17 +4263,26 @@ fn bc_parse_term(t: &[(u8, i64)], p: &mut usize, vars: &[(String, i64)]) -> i64 
     let mut left = bc_parse_power(t, p, vars);
     while *p < t.len() {
         match t[*p].0 {
-            b'*' => { *p += 1; left = (left / 1_000_000_000) * (bc_parse_power(t, p, vars) / 1_000_000_000); }
+            b'*' => {
+                *p += 1;
+                left = (left / 1_000_000_000) * (bc_parse_power(t, p, vars) / 1_000_000_000);
+            }
             b'/' => {
                 *p += 1;
                 let right = bc_parse_power(t, p, vars);
-                if right == 0 { eprintln_fn("bc: divide by zero"); return 0; }
+                if right == 0 {
+                    eprintln_fn("bc: divide by zero");
+                    return 0;
+                }
                 left = (left / right) * 1_000_000_000_000_000_000;
             }
             b'%' => {
                 *p += 1;
                 let right = bc_parse_power(t, p, vars);
-                if right == 0 { eprintln_fn("bc: modulo by zero"); return 0; }
+                if right == 0 {
+                    eprintln_fn("bc: modulo by zero");
+                    return 0;
+                }
                 left = left % right;
             }
             _ => break,
@@ -3173,7 +4299,9 @@ fn bc_parse_power(t: &[(u8, i64)], p: &mut usize, vars: &[(String, i64)]) -> i64
         let exp_val = (exp / 1_000_000_000_000_000_000) as u32;
         let mut result: i64 = 1_000_000_000_000_000_000;
         let base_norm = base / 1_000_000_000_000_000_000;
-        for _ in 0..exp_val { result = (result / 1_000_000_000_000_000_000) * base_norm; }
+        for _ in 0..exp_val {
+            result = (result / 1_000_000_000_000_000_000) * base_norm;
+        }
         let _ = base_norm;
         result
     } else {
@@ -3194,44 +4322,76 @@ fn bc_parse_unary(t: &[(u8, i64)], p: &mut usize, vars: &[(String, i64)]) -> i64
 }
 
 fn bc_parse_primary(t: &[(u8, i64)], p: &mut usize, vars: &[(String, i64)]) -> i64 {
-    if *p >= t.len() { return 0; }
+    if *p >= t.len() {
+        return 0;
+    }
     match t[*p].0 {
-        b'N' => { let v = t[*p].1; *p += 1; v }
+        b'N' => {
+            let v = t[*p].1;
+            *p += 1;
+            v
+        }
         b'(' => {
             *p += 1;
             let v = bc_parse_expr(t, p, vars);
-            if *p < t.len() && t[*p].0 == b')' { *p += 1; }
+            if *p < t.len() && t[*p].0 == b')' {
+                *p += 1;
+            }
             v
         }
         b'S' => {
             *p += 1;
-            if *p < t.len() && t[*p].0 == b'(' { *p += 1; }
+            if *p < t.len() && t[*p].0 == b'(' {
+                *p += 1;
+            }
             let v = bc_parse_expr(t, p, vars);
-            if *p < t.len() && t[*p].0 == b')' { *p += 1; }
+            if *p < t.len() && t[*p].0 == b')' {
+                *p += 1;
+            }
             let norm = v / 1_000_000_000_000_000_000;
-            if norm < 0 { eprintln_fn("bc: sqrt of negative"); return 0; }
+            if norm < 0 {
+                eprintln_fn("bc: sqrt of negative");
+                return 0;
+            }
             let mut guess = norm;
-            if guess > 1 { for _ in 0..64 { guess = (guess + norm / guess) / 2; } }
+            if guess > 1 {
+                for _ in 0..64 {
+                    guess = (guess + norm / guess) / 2;
+                }
+            }
             guess * 1_000_000_000_000_000_000
         }
         b'A' => {
             *p += 1;
-            if *p < t.len() && t[*p].0 == b'(' { *p += 1; }
+            if *p < t.len() && t[*p].0 == b'(' {
+                *p += 1;
+            }
             let v = bc_parse_expr(t, p, vars);
-            if *p < t.len() && t[*p].0 == b')' { *p += 1; }
-            if v < 0 { -v } else { v }
+            if *p < t.len() && t[*p].0 == b')' {
+                *p += 1;
+            }
+            if v < 0 {
+                -v
+            } else {
+                v
+            }
         }
         b'V' => {
             *p += 1;
             0
         }
-        _ => { *p += 1; 0 }
+        _ => {
+            *p += 1;
+            0
+        }
     }
 }
 
 fn bc_eval_expr(input: &str, vars: &mut Vec<(String, i64)>, _scale: usize) -> i64 {
     let tokens = bc_tokenize(input);
-    if tokens.is_empty() { return 0; }
+    if tokens.is_empty() {
+        return 0;
+    }
     let mut pos = 0;
     bc_parse_expr(&tokens, &mut pos, vars)
 }
@@ -3243,14 +4403,19 @@ fn cmd_dc(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     if i < args.len() && args[i] == "-e" {
         i += 1;
-        if i < args.len() { dc_process_line(args[i], &mut stack); return true; }
+        if i < args.len() {
+            dc_process_line(args[i], &mut stack);
+            return true;
+        }
     }
     if i < args.len() && args[i] == "-f" {
         i += 1;
         if i < args.len() {
             if let Some(data) = executor::load_file(args[i]) {
                 let text = core::str::from_utf8(&data).unwrap_or("");
-                for line in text.lines() { dc_process_line(line, &mut stack); }
+                for line in text.lines() {
+                    dc_process_line(line, &mut stack);
+                }
             }
             return true;
         }
@@ -3269,7 +4434,9 @@ fn cmd_dc(_state: &mut ShellState, args: &[&str]) -> bool {
                 Ok(n) => {
                     for j in 0..n {
                         let c = buf[j] as char;
-                        if c == '\n' || c == '\r' { break; }
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
                         input.push(c);
                     }
                     break;
@@ -3278,8 +4445,12 @@ fn cmd_dc(_state: &mut ShellState, args: &[&str]) -> bool {
             }
         }
         let input = input.trim().to_string();
-        if input.is_empty() { continue; }
-        if input == "q" || input == "quit" { break; }
+        if input.is_empty() {
+            continue;
+        }
+        if input == "q" || input == "quit" {
+            break;
+        }
         dc_process_line(&input, &mut stack);
     }
     true
@@ -3289,26 +4460,100 @@ fn dc_process_line(line: &str, stack: &mut Vec<i64>) {
     let tokens: Vec<&str> = line.split_whitespace().collect();
     for token in tokens {
         match token {
-            "+" => { let b = stack.pop().unwrap_or(0); let a = stack.pop().unwrap_or(0); stack.push(a + b); }
-            "-" => { let b = stack.pop().unwrap_or(0); let a = stack.pop().unwrap_or(0); stack.push(a - b); }
-            "*" => { let b = stack.pop().unwrap_or(0); let a = stack.pop().unwrap_or(0); stack.push(a * b); }
-            "/" => { let b = stack.pop().unwrap_or(0); let a = stack.pop().unwrap_or(0); if b != 0 { stack.push(a / b); } else { eprintln_fn("dc: divide by zero"); } }
+            "+" => {
+                let b = stack.pop().unwrap_or(0);
+                let a = stack.pop().unwrap_or(0);
+                stack.push(a + b);
+            }
+            "-" => {
+                let b = stack.pop().unwrap_or(0);
+                let a = stack.pop().unwrap_or(0);
+                stack.push(a - b);
+            }
+            "*" => {
+                let b = stack.pop().unwrap_or(0);
+                let a = stack.pop().unwrap_or(0);
+                stack.push(a * b);
+            }
+            "/" => {
+                let b = stack.pop().unwrap_or(0);
+                let a = stack.pop().unwrap_or(0);
+                if b != 0 {
+                    stack.push(a / b);
+                } else {
+                    eprintln_fn("dc: divide by zero");
+                }
+            }
             "^" => {
                 let b = stack.pop().unwrap_or(0) as u32;
                 let a = stack.pop().unwrap_or(0);
                 let mut r: i64 = 1;
-                for _ in 0..b { r = r.wrapping_mul(a); }
+                for _ in 0..b {
+                    r = r.wrapping_mul(a);
+                }
                 stack.push(r);
             }
-            "%" => { let b = stack.pop().unwrap_or(0); let a = stack.pop().unwrap_or(0); if b != 0 { stack.push(a % b); } else { eprintln_fn("dc: modulo by zero"); } }
-            "v" => { let a = stack.pop().unwrap_or(0); if a >= 0 { let mut g = a; if g > 1 { for _ in 0..64 { g = (g + a / g) / 2; } } stack.push(g); } else { eprintln_fn("dc: sqrt of negative"); } }
-            "p" => { if let Some(v) = stack.last() { println(&format!("{}", v)); } else { println(""); } }
-            "n" => { if let Some(v) = stack.pop() { print(&format!("{}", v)); } }
-            "f" => { for v in stack.iter().rev() { println(&format!("{}", v)); } }
-            "c" => { stack.clear(); }
-            "d" => { if let Some(v) = stack.last() { stack.push(*v); } }
-            "r" => { let len = stack.len(); if len >= 2 { stack.swap(len - 1, len - 2); } }
-            _ => { if let Ok(n) = token.parse::<i64>() { stack.push(n); } else { eprintln_fn(&format!("dc: unknown command: {}", token)); } }
+            "%" => {
+                let b = stack.pop().unwrap_or(0);
+                let a = stack.pop().unwrap_or(0);
+                if b != 0 {
+                    stack.push(a % b);
+                } else {
+                    eprintln_fn("dc: modulo by zero");
+                }
+            }
+            "v" => {
+                let a = stack.pop().unwrap_or(0);
+                if a >= 0 {
+                    let mut g = a;
+                    if g > 1 {
+                        for _ in 0..64 {
+                            g = (g + a / g) / 2;
+                        }
+                    }
+                    stack.push(g);
+                } else {
+                    eprintln_fn("dc: sqrt of negative");
+                }
+            }
+            "p" => {
+                if let Some(v) = stack.last() {
+                    println(&format!("{}", v));
+                } else {
+                    println("");
+                }
+            }
+            "n" => {
+                if let Some(v) = stack.pop() {
+                    print(&format!("{}", v));
+                }
+            }
+            "f" => {
+                for v in stack.iter().rev() {
+                    println(&format!("{}", v));
+                }
+            }
+            "c" => {
+                stack.clear();
+            }
+            "d" => {
+                if let Some(v) = stack.last() {
+                    stack.push(*v);
+                }
+            }
+            "r" => {
+                let len = stack.len();
+                if len >= 2 {
+                    stack.swap(len - 1, len - 2);
+                }
+            }
+            _ => {
+                if let Ok(n) = token.parse::<i64>() {
+                    stack.push(n);
+                } else {
+                    eprintln_fn(&format!("dc: unknown command: {}", token));
+                }
+            }
         }
     }
 }
@@ -3316,16 +4561,28 @@ fn dc_process_line(line: &str, stack: &mut Vec<i64>) {
 /// `expr` — Evaluate expression (POSIX)
 /// Supports: +, -, *, /, %, comparisons (=, !=, <, >, <=, >=), match, substr, index, length
 fn cmd_expr(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("expr: syntax error"); return true; }
+    if args.len() < 2 {
+        eprintln_fn("expr: syntax error");
+        return true;
+    }
     let tokens: Vec<&str> = args[1..].to_vec();
     let mut pos = 0;
     match expr_parse_or(&tokens, &mut pos) {
-        ExprVal::Num(n) => { println(&format!("{}", n)); n != 0 }
-        ExprVal::Str(s) => { println(&s); !s.is_empty() }
+        ExprVal::Num(n) => {
+            println(&format!("{}", n));
+            n != 0
+        }
+        ExprVal::Str(s) => {
+            println(&s);
+            !s.is_empty()
+        }
     }
 }
 
-enum ExprVal { Num(i64), Str(String) }
+enum ExprVal {
+    Num(i64),
+    Str(String),
+}
 
 fn expr_parse_or(t: &[&str], p: &mut usize) -> ExprVal {
     let mut left = expr_parse_and(t, p);
@@ -3334,7 +4591,13 @@ fn expr_parse_or(t: &[&str], p: &mut usize) -> ExprVal {
         let right = expr_parse_and(t, p);
         let lv = expr_to_num(&left);
         let rv = expr_to_num(&right);
-        left = if lv != 0 { left } else if rv != 0 { right } else { ExprVal::Num(0) };
+        left = if lv != 0 {
+            left
+        } else if rv != 0 {
+            right
+        } else {
+            ExprVal::Num(0)
+        };
     }
     left
 }
@@ -3346,7 +4609,11 @@ fn expr_parse_and(t: &[&str], p: &mut usize) -> ExprVal {
         let right = expr_parse_cmp(t, p);
         let lv = expr_to_num(&left);
         let rv = expr_to_num(&right);
-        left = if lv != 0 && rv != 0 { left } else { ExprVal::Num(0) };
+        left = if lv != 0 && rv != 0 {
+            left
+        } else {
+            ExprVal::Num(0)
+        };
     }
     left
 }
@@ -3361,8 +4628,12 @@ fn expr_parse_cmp(t: &[&str], p: &mut usize) -> ExprVal {
             let lv = expr_to_num(&left);
             let rv = expr_to_num(&right);
             let result = match op {
-                "=" => lv == rv, "!=" => lv != rv, "<" => lv < rv,
-                ">" => lv > rv, "<=" => lv <= rv, ">=" => lv >= rv,
+                "=" => lv == rv,
+                "!=" => lv != rv,
+                "<" => lv < rv,
+                ">" => lv > rv,
+                "<=" => lv <= rv,
+                ">=" => lv >= rv,
                 _ => false,
             };
             return ExprVal::Num(if result { 1 } else { 0 });
@@ -3374,7 +4645,8 @@ fn expr_parse_cmp(t: &[&str], p: &mut usize) -> ExprVal {
 fn expr_parse_add(t: &[&str], p: &mut usize) -> ExprVal {
     let mut left = expr_parse_mul(t, p);
     while *p < t.len() && (t[*p] == "+" || t[*p] == "-") {
-        let op = t[*p]; *p += 1;
+        let op = t[*p];
+        *p += 1;
         let right = expr_parse_mul(t, p);
         let lv = expr_to_num(&left);
         let rv = expr_to_num(&right);
@@ -3386,14 +4658,27 @@ fn expr_parse_add(t: &[&str], p: &mut usize) -> ExprVal {
 fn expr_parse_mul(t: &[&str], p: &mut usize) -> ExprVal {
     let mut left = expr_parse_unary(t, p);
     while *p < t.len() && (t[*p] == "*" || t[*p] == "/" || t[*p] == "%") {
-        let op = t[*p]; *p += 1;
+        let op = t[*p];
+        *p += 1;
         let right = expr_parse_unary(t, p);
         let lv = expr_to_num(&left);
         let rv = expr_to_num(&right);
         left = ExprVal::Num(match op {
             "*" => lv * rv,
-            "/" => { if rv == 0 { eprintln_fn("expr: division by zero"); return ExprVal::Num(0); } lv / rv }
-            "%" => { if rv == 0 { eprintln_fn("expr: division by zero"); return ExprVal::Num(0); } lv % rv }
+            "/" => {
+                if rv == 0 {
+                    eprintln_fn("expr: division by zero");
+                    return ExprVal::Num(0);
+                }
+                lv / rv
+            }
+            "%" => {
+                if rv == 0 {
+                    eprintln_fn("expr: division by zero");
+                    return ExprVal::Num(0);
+                }
+                lv % rv
+            }
             _ => 0,
         });
     }
@@ -3436,7 +4721,9 @@ fn expr_parse_func(t: &[&str], p: &mut usize) -> ExprVal {
                 let s = expr_to_str(&expr_parse_primary(t, p));
                 let chars = expr_to_str(&expr_parse_primary(t, p));
                 for (i, c) in s.chars().enumerate() {
-                    if chars.contains(c) { return ExprVal::Num((i + 1) as i64); }
+                    if chars.contains(c) {
+                        return ExprVal::Num((i + 1) as i64);
+                    }
                 }
                 return ExprVal::Num(0);
             }
@@ -3448,7 +4735,9 @@ fn expr_parse_func(t: &[&str], p: &mut usize) -> ExprVal {
             "(" => {
                 *p += 1;
                 let v = expr_parse_or(t, p);
-                if *p < t.len() && t[*p] == ")" { *p += 1; }
+                if *p < t.len() && t[*p] == ")" {
+                    *p += 1;
+                }
                 return v;
             }
             _ => {}
@@ -3458,18 +4747,30 @@ fn expr_parse_func(t: &[&str], p: &mut usize) -> ExprVal {
 }
 
 fn expr_parse_primary(t: &[&str], p: &mut usize) -> ExprVal {
-    if *p >= t.len() { return ExprVal::Num(0); }
-    let token = t[*p]; *p += 1;
-    if let Ok(n) = token.parse::<i64>() { ExprVal::Num(n) }
-    else { ExprVal::Str(token.to_string()) }
+    if *p >= t.len() {
+        return ExprVal::Num(0);
+    }
+    let token = t[*p];
+    *p += 1;
+    if let Ok(n) = token.parse::<i64>() {
+        ExprVal::Num(n)
+    } else {
+        ExprVal::Str(token.to_string())
+    }
 }
 
 fn expr_to_num(v: &ExprVal) -> i64 {
-    match v { ExprVal::Num(n) => *n, ExprVal::Str(s) => s.parse::<i64>().unwrap_or(0) }
+    match v {
+        ExprVal::Num(n) => *n,
+        ExprVal::Str(s) => s.parse::<i64>().unwrap_or(0),
+    }
 }
 
 fn expr_to_str(v: &ExprVal) -> String {
-    match v { ExprVal::Num(n) => format!("{}", n), ExprVal::Str(s) => s.clone() }
+    match v {
+        ExprVal::Num(n) => format!("{}", n),
+        ExprVal::Str(s) => s.clone(),
+    }
 }
 
 // ============================================================================
@@ -3485,11 +4786,19 @@ fn cmd_man(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-k" => { search_mode = true; }
-            "-f" => { apropos_mode = true; }
+            "-k" => {
+                search_mode = true;
+            }
+            "-f" => {
+                apropos_mode = true;
+            }
             "-a" | "--all" => {}
-            "-s" | "--section" => { i += 1; } // skip section arg
-            _ => { topics.push(args[i]); }
+            "-s" | "--section" => {
+                i += 1;
+            } // skip section arg
+            _ => {
+                topics.push(args[i]);
+            }
         }
         i += 1;
     }
@@ -3502,7 +4811,9 @@ fn cmd_man(_state: &mut ShellState, args: &[&str]) -> bool {
                 found = true;
             }
         }
-        if !found { println(&format!("{}: nothing appropriate.", keyword)); }
+        if !found {
+            println(&format!("{}: nothing appropriate.", keyword));
+        }
         return true;
     }
     if topics.is_empty() {
@@ -3513,7 +4824,10 @@ fn cmd_man(_state: &mut ShellState, args: &[&str]) -> bool {
         let mut found = false;
         for &(name, section, desc) in MAN_DB.iter() {
             if name == *topic {
-                println(&format!("{}({})\t\t\te chOS Programmer's Manual\t\t\t{}({})", name, section, name, section));
+                println(&format!(
+                    "{}({})\t\t\te chOS Programmer's Manual\t\t\t{}({})",
+                    name, section, name, section
+                ));
                 println("");
                 println("NAME");
                 println(&format!("       {} - {}", name, desc));
@@ -3522,7 +4836,10 @@ fn cmd_man(_state: &mut ShellState, args: &[&str]) -> bool {
                 println(&format!("       {} [OPTIONS] [ARGUMENTS]", name));
                 println("");
                 println("DESCRIPTION");
-                println(&format!("       {} is a built-in echOS shell command.", name));
+                println(&format!(
+                    "       {} is a built-in echOS shell command.",
+                    name
+                ));
                 println(&format!("       {}", desc));
                 println("");
                 found = true;
@@ -3624,7 +4941,11 @@ const MAN_DB: &[(&str, &str, &str)] = &[
     ("head", "1", "output the first part of files"),
     ("tail", "1", "output the last part of files"),
     ("find", "1", "search for files in a directory hierarchy"),
-    ("sed", "1", "stream editor for filtering and transforming text"),
+    (
+        "sed",
+        "1",
+        "stream editor for filtering and transforming text",
+    ),
     ("awk", "1", "pattern scanning and processing language"),
     ("tr", "1", "translate or delete characters"),
     ("cut", "1", "remove sections from each line of files"),
@@ -3655,7 +4976,11 @@ const MAN_DB: &[(&str, &str, &str)] = &[
     ("dmesg", "1", "print or control the kernel ring buffer"),
     ("whoami", "1", "print effective userid"),
     ("id", "1", "print real and effective user and group IDs"),
-    ("env", "1", "print environment or run in modified environment"),
+    (
+        "env",
+        "1",
+        "print environment or run in modified environment",
+    ),
     ("export", "1p", "set export attribute for variables"),
     ("history", "1", "display command history"),
     ("cd", "1p", "change working directory"),
@@ -3699,9 +5024,14 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-p" if i + 1 < args.len() => { i += 1; prompt = args[i]; }
+            "-p" if i + 1 < args.len() => {
+                i += 1;
+                prompt = args[i];
+            }
             "-s" => {}
-            _ => { filename = Some(args[i]); }
+            _ => {
+                filename = Some(args[i]);
+            }
         }
         i += 1;
     }
@@ -3710,7 +5040,9 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
     if let Some(fname) = filename {
         if let Some(data) = executor::load_file(fname) {
             let text = core::str::from_utf8(&data).unwrap_or("");
-            for line in text.lines() { lines.push(line.to_string()); }
+            for line in text.lines() {
+                lines.push(line.to_string());
+            }
             let bytes = data.len();
             println(&format!("{}", bytes));
         } else {
@@ -3720,7 +5052,9 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut buf = [0u8; 4096];
     let mut modified = false;
     loop {
-        if !prompt.is_empty() { print(prompt); }
+        if !prompt.is_empty() {
+            print(prompt);
+        }
         let mut input = String::new();
         loop {
             match sc::sys_read(0, &mut buf) {
@@ -3728,7 +5062,9 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                 Ok(n) => {
                     for j in 0..n {
                         let c = buf[j] as char;
-                        if c == '\n' || c == '\r' { break; }
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
                         input.push(c);
                     }
                     break;
@@ -3737,7 +5073,9 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
             }
         }
         let input = input.trim();
-        if input.is_empty() { continue; }
+        if input.is_empty() {
+            continue;
+        }
         let (addr, cmd) = ed_parse_addr(input, lines.len(), current);
         match cmd {
             "q" => {
@@ -3748,32 +5086,48 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                     break;
                 }
             }
-            "Q" => { break; }
+            "Q" => {
+                break;
+            }
             "p" | "P" => {
                 let (start, end) = ed_range(addr, current, lines.len());
                 for i in start..end.min(lines.len()) {
                     println(&lines[i]);
                 }
-                if start < lines.len() { current = end.min(lines.len()).saturating_sub(1); }
+                if start < lines.len() {
+                    current = end.min(lines.len()).saturating_sub(1);
+                }
             }
             "n" => {
                 let (start, end) = ed_range(addr, current, lines.len());
                 for i in start..end.min(lines.len()) {
                     println(&format!("{}\t{}", i + 1, lines[i]));
                 }
-                if start < lines.len() { current = end.min(lines.len()).saturating_sub(1); }
+                if start < lines.len() {
+                    current = end.min(lines.len()).saturating_sub(1);
+                }
             }
             "d" => {
                 let (start, end) = ed_range(addr, current, lines.len());
                 if start < lines.len() {
                     lines.drain(start..end.min(lines.len()));
-                    current = if start < lines.len() { start } else { lines.len().saturating_sub(1) };
+                    current = if start < lines.len() {
+                        start
+                    } else {
+                        lines.len().saturating_sub(1)
+                    };
                     modified = true;
-                } else { println("?"); }
+                } else {
+                    println("?");
+                }
             }
             "a" => {
                 println(".");
-                let insert_at = if addr.is_some() { addr.unwrap().min(lines.len()) } else { current + 1 };
+                let insert_at = if addr.is_some() {
+                    addr.unwrap().min(lines.len())
+                } else {
+                    current + 1
+                };
                 let mut new_lines = Vec::new();
                 loop {
                     let mut line = String::new();
@@ -3781,13 +5135,17 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                         Ok(n) => {
                             for j in 0..n {
                                 let c = buf[j] as char;
-                                if c == '\n' || c == '\r' { break; }
+                                if c == '\n' || c == '\r' {
+                                    break;
+                                }
                                 line.push(c);
                             }
                         }
                         Err(_) => break,
                     }
-                    if line == "." { break; }
+                    if line == "." {
+                        break;
+                    }
                     new_lines.push(line);
                 }
                 let count = new_lines.len();
@@ -3798,7 +5156,11 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                 modified = true;
             }
             "i" => {
-                let insert_at = if addr.is_some() { addr.unwrap().min(lines.len()) } else { current };
+                let insert_at = if addr.is_some() {
+                    addr.unwrap().min(lines.len())
+                } else {
+                    current
+                };
                 let mut new_lines = Vec::new();
                 loop {
                     let mut line = String::new();
@@ -3806,20 +5168,28 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                         Ok(n) => {
                             for j in 0..n {
                                 let c = buf[j] as char;
-                                if c == '\n' || c == '\r' { break; }
+                                if c == '\n' || c == '\r' {
+                                    break;
+                                }
                                 line.push(c);
                             }
                         }
                         Err(_) => break,
                     }
-                    if line == "." { break; }
+                    if line == "." {
+                        break;
+                    }
                     new_lines.push(line);
                 }
                 let count = new_lines.len();
                 for (i, l) in new_lines.into_iter().enumerate() {
                     lines.insert(insert_at + i, l);
                 }
-                current = if count > 0 { insert_at + count - 1 } else { insert_at };
+                current = if count > 0 {
+                    insert_at + count - 1
+                } else {
+                    insert_at
+                };
                 modified = true;
             }
             "c" => {
@@ -3833,13 +5203,17 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                             Ok(n) => {
                                 for j in 0..n {
                                     let c = buf[j] as char;
-                                    if c == '\n' || c == '\r' { break; }
+                                    if c == '\n' || c == '\r' {
+                                        break;
+                                    }
                                     line.push(c);
                                 }
                             }
                             Err(_) => break,
                         }
-                        if line == "." { break; }
+                        if line == "." {
+                            break;
+                        }
                         new_lines.push(line);
                     }
                     let count = new_lines.len();
@@ -3848,18 +5222,32 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                     }
                     current = if count > 0 { start + count - 1 } else { start };
                     modified = true;
-                } else { println("?"); }
+                } else {
+                    println("?");
+                }
             }
             "w" | "W" => {
-                let fname = if cmd.len() > 1 { &cmd[1..] } else { filename.unwrap_or("") };
+                let fname = if cmd.len() > 1 {
+                    &cmd[1..]
+                } else {
+                    filename.unwrap_or("")
+                };
                 let fname = fname.trim();
-                let fname = if fname.is_empty() { filename.unwrap_or("") } else { fname };
+                let fname = if fname.is_empty() {
+                    filename.unwrap_or("")
+                } else {
+                    fname
+                };
                 let mut data = Vec::new();
                 for (i, line) in lines.iter().enumerate() {
                     data.extend_from_slice(line.as_bytes());
-                    if i < lines.len() - 1 { data.push(b'\n'); }
+                    if i < lines.len() - 1 {
+                        data.push(b'\n');
+                    }
                 }
-                if !data.is_empty() { data.push(b'\n'); }
+                if !data.is_empty() {
+                    data.push(b'\n');
+                }
                 executor::write_file(fname, &data);
                 println(&format!("{}", data.len()));
                 modified = false;
@@ -3890,7 +5278,7 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                     let rest = &cmd[1..];
                     if let Some(end_pos) = rest.find('/') {
                         let pattern = &rest[..end_pos];
-                        let subcmd = &rest[end_pos+1..];
+                        let subcmd = &rest[end_pos + 1..];
                         for (i, line) in lines.iter().enumerate() {
                             if line.contains(pattern) {
                                 current = i;
@@ -3901,25 +5289,39 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                                 }
                             }
                         }
-                    } else { println("?"); }
-                } else { println("?"); }
+                    } else {
+                        println("?");
+                    }
+                } else {
+                    println("?");
+                }
             }
             "m" => {
                 let (start, end) = ed_range(addr, current, lines.len());
                 if start < lines.len() {
-                    println(&format!("Move lines {}-{} (not fully implemented)", start + 1, end));
-                } else { println("?"); }
+                    println(&format!(
+                        "Move lines {}-{} (not fully implemented)",
+                        start + 1,
+                        end
+                    ));
+                } else {
+                    println("?");
+                }
             }
             "j" => {
                 let (start, end) = ed_range(addr, current, lines.len());
                 if end - start >= 2 && end <= lines.len() {
                     let mut joined = String::new();
-                    for i in start..end { joined.push_str(&lines[i]); }
+                    for i in start..end {
+                        joined.push_str(&lines[i]);
+                    }
                     lines.drain(start..end);
                     lines.insert(start, joined);
                     current = start;
                     modified = true;
-                } else { println("?"); }
+                } else {
+                    println("?");
+                }
             }
             "=" => {
                 if addr.is_some() {
@@ -3928,13 +5330,17 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
                     println(&format!("{}", lines.len()));
                 }
             }
-            "$" => { current = if lines.is_empty() { 0 } else { lines.len() - 1 }; }
+            "$" => {
+                current = if lines.is_empty() { 0 } else { lines.len() - 1 };
+            }
             _ => {
                 if let Ok(n) = input.parse::<usize>() {
                     if n > 0 && n <= lines.len() {
                         current = n - 1;
                         println(&lines[current]);
-                    } else { println("?"); }
+                    } else {
+                        println("?");
+                    }
                 } else {
                     println("?");
                 }
@@ -3946,10 +5352,14 @@ fn cmd_ed(_state: &mut ShellState, args: &[&str]) -> bool {
 
 fn ed_parse_addr(input: &str, _len: usize, _cur: usize) -> (Option<usize>, &str) {
     let input = input.trim();
-    if input.is_empty() { return (None, ""); }
+    if input.is_empty() {
+        return (None, "");
+    }
     if input.starts_with(|c: char| c.is_ascii_digit()) {
         let mut end = 0;
-        while end < input.len() && input.as_bytes()[end].is_ascii_digit() { end += 1; }
+        while end < input.len() && input.as_bytes()[end].is_ascii_digit() {
+            end += 1;
+        }
         let addr: usize = input[..end].parse().unwrap_or(1);
         let cmd = input[end..].trim();
         (Some(addr.saturating_sub(1)), cmd)
@@ -3984,7 +5394,9 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
     while i < args.len() {
         match args[i] {
             "-R" => {} // read-only mode
-            _ => { filename = Some(args[i]); }
+            _ => {
+                filename = Some(args[i]);
+            }
         }
         i += 1;
     }
@@ -3993,13 +5405,22 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
     if let Some(fname) = filename {
         if let Some(data) = executor::load_file(fname) {
             let text = core::str::from_utf8(&data).unwrap_or("");
-            for line in text.lines() { lines.push(line.to_string()); }
+            for line in text.lines() {
+                lines.push(line.to_string());
+            }
         }
     }
-    if lines.is_empty() { lines.push(String::new()); }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
     println(&format!("\x1b[2J\x1b[H"));
     let fname_display = filename.unwrap_or("[No Name]");
-    println(&format!("\x1b[1m{} {} -- {} line(s) --\x1b[0m", editor_name, fname_display, lines.len()));
+    println(&format!(
+        "\x1b[1m{} {} -- {} line(s) --\x1b[0m",
+        editor_name,
+        fname_display,
+        lines.len()
+    ));
     println("\x1b[33m[ESC] normal  [i] insert  [:] cmd  [dd] del  [/] find  [o] open line\x1b[0m");
     println("---");
     let max_display = 20usize;
@@ -4022,7 +5443,9 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                 Ok(n) => {
                     for j in 0..n {
                         let c = buf[j] as char;
-                        if c == '\n' || c == '\r' { break; }
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
                         input.push(c);
                     }
                     break;
@@ -4031,7 +5454,9 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
             }
         }
         let input = input.trim();
-        if input.is_empty() { continue; }
+        if input.is_empty() {
+            continue;
+        }
         if input == "i" || input == "I" || input == "insert" || input == "a" || input == "A" {
             print(&format!("Insert at line {}: ", cur_line + 1));
             let mut new_line = String::new();
@@ -4040,7 +5465,9 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                     Ok(n) => {
                         for j in 0..n {
                             let c = buf[j] as char;
-                            if c == '\n' || c == '\r' { break; }
+                            if c == '\n' || c == '\r' {
+                                break;
+                            }
                             new_line.push(c);
                         }
                         break;
@@ -4053,8 +5480,11 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                 lines.insert(cur_line + 1, new_line);
                 cur_line += 1;
             } else {
-                if cur_line < lines.len() { lines[cur_line] = new_line; }
-                else { lines.push(new_line); }
+                if cur_line < lines.len() {
+                    lines[cur_line] = new_line;
+                } else {
+                    lines.push(new_line);
+                }
             }
             modified = true;
         } else if input == "o" || input == "O" {
@@ -4065,7 +5495,9 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                     Ok(n) => {
                         for j in 0..n {
                             let c = buf[j] as char;
-                            if c == '\n' || c == '\r' { break; }
+                            if c == '\n' || c == '\r' {
+                                break;
+                            }
                             new_line.push(c);
                         }
                         break;
@@ -4086,17 +5518,25 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                 undo.push(lines.clone());
                 let deleted = lines.remove(cur_line);
                 println(&format!("Deleted: {}", deleted));
-                if cur_line >= lines.len() && !lines.is_empty() { cur_line = lines.len() - 1; }
-                if lines.is_empty() { lines.push(String::new()); }
+                if cur_line >= lines.len() && !lines.is_empty() {
+                    cur_line = lines.len() - 1;
+                }
+                if lines.is_empty() {
+                    lines.push(String::new());
+                }
                 modified = true;
             }
         } else if input == "u" || input == "undo" {
             if let Some(prev) = undo.pop() {
                 lines = prev;
-                if cur_line >= lines.len() { cur_line = lines.len().saturating_sub(1); }
+                if cur_line >= lines.len() {
+                    cur_line = lines.len().saturating_sub(1);
+                }
                 println("[Undone]");
                 modified = true;
-            } else { println("[Nothing to undo]"); }
+            } else {
+                println("[Nothing to undo]");
+            }
         } else if input.starts_with('/') {
             let pattern = &input[1..];
             if !pattern.is_empty() {
@@ -4109,7 +5549,9 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                         break;
                     }
                 }
-                if !found { println(&format!("Pattern not found: {}", pattern)); }
+                if !found {
+                    println(&format!("Pattern not found: {}", pattern));
+                }
             }
         } else if input.starts_with(":") || input.starts_with("Ex") {
             let cmd = input.trim_start_matches(":").trim_start_matches("Ex ");
@@ -4119,22 +5561,37 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                         let mut data = Vec::new();
                         for (i, line) in lines.iter().enumerate() {
                             data.extend_from_slice(line.as_bytes());
-                            if i < lines.len() - 1 { data.push(b'\n'); }
+                            if i < lines.len() - 1 {
+                                data.push(b'\n');
+                            }
                         }
-                        if !data.is_empty() { data.push(b'\n'); }
+                        if !data.is_empty() {
+                            data.push(b'\n');
+                        }
                         executor::write_file(fname, &data);
-                        println(&format!("\"{}\" {} lines, {} bytes written", fname, lines.len(), data.len()));
+                        println(&format!(
+                            "\"{}\" {} lines, {} bytes written",
+                            fname,
+                            lines.len(),
+                            data.len()
+                        ));
                         modified = false;
-                    } else { println("No file name"); }
+                    } else {
+                        println("No file name");
+                    }
                 }
                 "wq" => {
                     if let Some(fname) = filename {
                         let mut data = Vec::new();
                         for (i, line) in lines.iter().enumerate() {
                             data.extend_from_slice(line.as_bytes());
-                            if i < lines.len() - 1 { data.push(b'\n'); }
+                            if i < lines.len() - 1 {
+                                data.push(b'\n');
+                            }
                         }
-                        if !data.is_empty() { data.push(b'\n'); }
+                        if !data.is_empty() {
+                            data.push(b'\n');
+                        }
                         executor::write_file(fname, &data);
                     }
                     println("\x1b[2J\x1b[H");
@@ -4157,9 +5614,13 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                         let mut data = Vec::new();
                         for (i, line) in lines.iter().enumerate() {
                             data.extend_from_slice(line.as_bytes());
-                            if i < lines.len() - 1 { data.push(b'\n'); }
+                            if i < lines.len() - 1 {
+                                data.push(b'\n');
+                            }
                         }
-                        if !data.is_empty() { data.push(b'\n'); }
+                        if !data.is_empty() {
+                            data.push(b'\n');
+                        }
                         executor::write_file(fname, &data);
                     }
                     println("\x1b[2J\x1b[H");
@@ -4170,9 +5631,13 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                         let mut data = Vec::new();
                         for (i, line) in lines.iter().enumerate() {
                             data.extend_from_slice(line.as_bytes());
-                            if i < lines.len() - 1 { data.push(b'\n'); }
+                            if i < lines.len() - 1 {
+                                data.push(b'\n');
+                            }
                         }
-                        if !data.is_empty() { data.push(b'\n'); }
+                        if !data.is_empty() {
+                            data.push(b'\n');
+                        }
                         executor::write_file(fname, &data);
                     }
                     println("\x1b[2J\x1b[H");
@@ -4214,9 +5679,13 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
                 let mut data = Vec::new();
                 for (i, line) in lines.iter().enumerate() {
                     data.extend_from_slice(line.as_bytes());
-                    if i < lines.len() - 1 { data.push(b'\n'); }
+                    if i < lines.len() - 1 {
+                        data.push(b'\n');
+                    }
                 }
-                if !data.is_empty() { data.push(b'\n'); }
+                if !data.is_empty() {
+                    data.push(b'\n');
+                }
                 executor::write_file(fname, &data);
             }
             println("\x1b[2J\x1b[H");
@@ -4226,7 +5695,10 @@ fn cmd_vi(_state: &mut ShellState, args: &[&str]) -> bool {
             println("          /search :w(save) :q(quit) :q!(force quit) :wq");
             println("          j(down) k(up) G(last) gg(first) ZZ(save+quit)");
         } else {
-            println(&format!("Unknown command: {} (type 'help' for commands)", input));
+            println(&format!(
+                "Unknown command: {} (type 'help' for commands)",
+                input
+            ));
         }
     }
 }
@@ -4246,16 +5718,38 @@ fn cmd_strace(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-c" => { count_mode = true; cmd_start = i + 1; }
-            "-e" if i + 1 < args.len() => { i += 1; trace_filter = Some(args[i]); cmd_start = i + 1; }
-            "-o" if i + 1 < args.len() => { i += 1; output_file = Some(args[i]); cmd_start = i + 1; }
-            "-p" if i + 1 < args.len() => {
-                i += 1; trace_pid = args[i].parse::<usize>().ok(); cmd_start = i + 1;
+            "-c" => {
+                count_mode = true;
+                cmd_start = i + 1;
             }
-            "-f" => { cmd_start = i + 1; }
-            "-T" => { cmd_start = i + 1; }
-            "--" => { cmd_start = i + 1; break; }
-            _ => { break; }
+            "-e" if i + 1 < args.len() => {
+                i += 1;
+                trace_filter = Some(args[i]);
+                cmd_start = i + 1;
+            }
+            "-o" if i + 1 < args.len() => {
+                i += 1;
+                output_file = Some(args[i]);
+                cmd_start = i + 1;
+            }
+            "-p" if i + 1 < args.len() => {
+                i += 1;
+                trace_pid = args[i].parse::<usize>().ok();
+                cmd_start = i + 1;
+            }
+            "-f" => {
+                cmd_start = i + 1;
+            }
+            "-T" => {
+                cmd_start = i + 1;
+            }
+            "--" => {
+                cmd_start = i + 1;
+                break;
+            }
+            _ => {
+                break;
+            }
         }
         i += 1;
     }
@@ -4285,7 +5779,10 @@ fn cmd_strace(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut total_calls = 0usize;
     let ret = unsafe { sc::raw_syscall(101, 16, pid, 0, 0, 0, 0) }; // PTRACE_ATTACH
     if ret < 0 {
-        eprintln_fn(&format!("strace: ptrace attach to pid {} failed: error {}", pid, -ret));
+        eprintln_fn(&format!(
+            "strace: ptrace attach to pid {} failed: error {}",
+            pid, -ret
+        ));
         return true;
     }
     let mut status: i32 = 0;
@@ -4293,18 +5790,25 @@ fn cmd_strace(_state: &mut ShellState, args: &[&str]) -> bool {
     unsafe { sc::raw_syscall(101, 17, pid, 0, 0, 0, 0) }; // PTRACE_SYSCALL
     loop {
         let _ = sc::sys_wait4(pid as isize, &mut status, 0);
-        if (status >> 8) & 0xff == 0x7f { break; }
+        if (status >> 8) & 0xff == 0x7f {
+            break;
+        }
         let sc_num = unsafe { sc::raw_syscall(101, 12, pid, 0, 0, 0, 0) } as usize;
         let idx = syscall_count.iter().position(|s| s.0 == sc_num);
-        if let Some(idx) = idx { syscall_count[idx].1 += 1; }
-        else { syscall_count.push((sc_num, 1)); }
+        if let Some(idx) = idx {
+            syscall_count[idx].1 += 1;
+        } else {
+            syscall_count.push((sc_num, 1));
+        }
         total_calls += 1;
         if !count_mode {
             println(&format!("[pid {}] syscall_{}(...) = ?", pid, sc_num));
         }
         unsafe { sc::raw_syscall(101, 17, pid, 0, 0, 0, 0) };
         let _ = sc::sys_wait4(pid as isize, &mut status, 0);
-        if (status >> 8) & 0xff == 0x7f { break; }
+        if (status >> 8) & 0xff == 0x7f {
+            break;
+        }
         unsafe { sc::raw_syscall(101, 17, pid, 0, 0, 0, 0) };
     }
     if count_mode {
@@ -4312,12 +5816,21 @@ fn cmd_strace(_state: &mut ShellState, args: &[&str]) -> bool {
         println("------ ----------- ----------- --------- --------- --------");
         syscall_count.sort_by(|a, b| b.1.cmp(&a.1));
         for (num, count) in &syscall_count {
-            let pct = if total_calls > 0 { *count as f64 * 100.0 / total_calls as f64 } else { 0.0 };
-            println(&format!("{:>5.1}%    0.000000           0 {:>9} {:>9} syscall_{}",
-                pct, count, 0, num));
+            let pct = if total_calls > 0 {
+                *count as f64 * 100.0 / total_calls as f64
+            } else {
+                0.0
+            };
+            println(&format!(
+                "{:>5.1}%    0.000000           0 {:>9} {:>9} syscall_{}",
+                pct, count, 0, num
+            ));
         }
         println("------ ----------- ----------- --------- --------- --------");
-        println(&format!("100.00    0.000000                     {}           total", total_calls));
+        println(&format!(
+            "100.00    0.000000                     {}           total",
+            total_calls
+        ));
     }
     true
 }
@@ -4327,7 +5840,10 @@ fn cmd_perf(state: &mut ShellState, args: &[&str]) -> bool {
     let subcmd = if args.len() > 1 { args[1] } else { "stat" };
     match subcmd {
         "stat" => {
-            if args.len() < 3 { println("Usage: perf stat <command> [args...]"); return true; }
+            if args.len() < 3 {
+                println("Usage: perf stat <command> [args...]");
+                return true;
+            }
             let mut start_time = [0usize; 2];
             let _ = sc::sys_clock_gettime(1, &mut start_time);
             let pid = sc::sys_fork();
@@ -4355,16 +5871,27 @@ fn cmd_perf(state: &mut ShellState, args: &[&str]) -> bool {
                     println(&format!(" {:>14}      cycles", 0));
                     println(&format!(" {:>14}      instructions", 0));
                     println("");
-                    println(&format!("       {:.6} seconds time elapsed", elapsed_ms as f64 / 1000.0));
+                    println(&format!(
+                        "       {:.6} seconds time elapsed",
+                        elapsed_ms as f64 / 1000.0
+                    ));
                     state.exit_code = (status >> 8) & 0xff;
                 }
-                Err(e) => { eprintln_fn(&format!("perf: fork failed: error {}", e)); }
+                Err(e) => {
+                    eprintln_fn(&format!("perf: fork failed: error {}", e));
+                }
             }
         }
         "record" => {
-            if args.len() < 3 { println("Usage: perf record [-g] [-o file] <command>"); return true; }
+            if args.len() < 3 {
+                println("Usage: perf record [-g] [-o file] <command>");
+                return true;
+            }
             println("perf record: collecting profiling data...");
-            let cmd_idx = args.iter().position(|a| !a.starts_with('-') && *a != "record").unwrap_or(2);
+            let cmd_idx = args
+                .iter()
+                .position(|a| !a.starts_with('-') && *a != "record")
+                .unwrap_or(2);
             let pid = sc::sys_fork();
             match pid {
                 Ok(0) => {
@@ -4377,7 +5904,9 @@ fn cmd_perf(state: &mut ShellState, args: &[&str]) -> bool {
                     let _ = sc::sys_wait4(child as isize, &mut status, 0);
                     println("[ perf record: Wrote perf.data ]");
                 }
-                Err(_) => { eprintln_fn("perf record: fork failed"); }
+                Err(_) => {
+                    eprintln_fn("perf record: fork failed");
+                }
             }
         }
         "report" => {
@@ -4385,7 +5914,9 @@ fn cmd_perf(state: &mut ShellState, args: &[&str]) -> bool {
             println("# ........  .......  .............  ......");
             if let Some(data) = executor::load_file("perf.data") {
                 println(&format!("# perf.data: {} bytes", data.len()));
-            } else { println("# No perf.data file found."); }
+            } else {
+                println("# No perf.data file found.");
+            }
         }
         "top" => {
             println("perf top: Samples: 0, Event count: 0");
@@ -4405,7 +5936,9 @@ fn cmd_perf(state: &mut ShellState, args: &[&str]) -> bool {
             println("  page-faults OR faults              [Software event]");
             println("  context-switches OR cs             [Software event]");
         }
-        _ => { println("Usage: perf <stat|record|report|top|list> [options] [command]"); }
+        _ => {
+            println("Usage: perf <stat|record|report|top|list> [options] [command]");
+        }
     }
     true
 }
@@ -4414,35 +5947,67 @@ fn cmd_perf(state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_insmod(_state: &mut ShellState, args: &[&str]) -> bool {
     let is_rmmod = args[0] == "rmmod";
     if is_rmmod {
-        if args.len() < 2 { eprintln_fn("Usage: rmmod [-f] module_name..."); return true; }
+        if args.len() < 2 {
+            eprintln_fn("Usage: rmmod [-f] module_name...");
+            return true;
+        }
         let mut force = false;
         let mut modules: Vec<&str> = Vec::new();
         for i in 1..args.len() {
             match args[i] {
-                "-f" | "--force" => { force = true; }
+                "-f" | "--force" => {
+                    force = true;
+                }
                 "-v" | "--verbose" => {}
-                _ => { modules.push(args[i]); }
+                _ => {
+                    modules.push(args[i]);
+                }
             }
         }
         for module in &modules {
-            if force { println(&format!("rmmod: force-removing module '{}'", module)); }
-            else { println(&format!("rmmod: removing module '{}'", module)); }
+            if force {
+                println(&format!("rmmod: force-removing module '{}'", module));
+            } else {
+                println(&format!("rmmod: removing module '{}'", module));
+            }
             println(&format!("rmmod: module '{}' unloaded successfully", module));
         }
     } else {
-        if args.len() < 2 { eprintln_fn("Usage: insmod module.ko [params...]"); return true; }
+        if args.len() < 2 {
+            eprintln_fn("Usage: insmod module.ko [params...]");
+            return true;
+        }
         let module_path = args[1];
-        let module_name = module_path.split('/').last().unwrap_or(module_path).trim_end_matches(".ko");
+        let module_name = module_path
+            .split('/')
+            .last()
+            .unwrap_or(module_path)
+            .trim_end_matches(".ko");
         match executor::load_file(module_path) {
             Some(data) => {
-                println(&format!("insmod: loading module '{}' ({} bytes)", module_name, data.len()));
+                println(&format!(
+                    "insmod: loading module '{}' ({} bytes)",
+                    module_name,
+                    data.len()
+                ));
                 if data.len() >= 4 && &data[0..4] == b"\x7fELF" {
-                    println(&format!("insmod: module '{}' loaded successfully", module_name));
+                    println(&format!(
+                        "insmod: module '{}' loaded successfully",
+                        module_name
+                    ));
                 } else {
-                    eprintln_fn(&format!("insmod: invalid module format for '{}'", module_path));
+                    eprintln_fn(&format!(
+                        "insmod: invalid module format for '{}'",
+                        module_path
+                    ));
                 }
             }
-            None => { eprintln_fn(&format!("insmod: cannot load '{}': No such file", module_path)); }
+            None => {
+                eprintln_fn(&format!(
+                    "insmod: cannot load '{}': No such file",
+                    module_path
+                ));
+            }
         }
     }
     true
@@ -4460,16 +6025,29 @@ fn cmd_kdump(_state: &mut ShellState, args: &[&str]) -> bool {
             println("  status:      ready");
         }
         "--load" | "-l" => {
-            let kernel = if args.len() > 2 { args[2] } else { "/boot/vmlinuz" };
+            let kernel = if args.len() > 2 {
+                args[2]
+            } else {
+                "/boot/vmlinuz"
+            };
             println(&format!("kdump: loading crash kernel from {}", kernel));
             match executor::load_file(kernel) {
-                Some(data) => println(&format!("kdump: crash kernel loaded ({} bytes)", data.len())),
+                Some(data) => println(&format!(
+                    "kdump: crash kernel loaded ({} bytes)",
+                    data.len()
+                )),
                 None => eprintln_fn(&format!("kdump: cannot load {}", kernel)),
             }
         }
-        "--reset" => { println("kdump: resetting crash dump configuration"); }
-        "--list" => { println("Available crash dumps: (none)"); }
-        _ => { println("Usage: kdump [--status|--load|--reset|--list]"); }
+        "--reset" => {
+            println("kdump: resetting crash dump configuration");
+        }
+        "--list" => {
+            println("Available crash dumps: (none)");
+        }
+        _ => {
+            println("Usage: kdump [--status|--load|--reset|--list]");
+        }
     }
     true
 }
@@ -4482,17 +6060,29 @@ fn cmd_conntrack(_state: &mut ShellState, args: &[&str]) -> bool {
             println("conntrack v1.4.7: connection tracking table");
             if let Some(data) = executor::load_file("/proc/net/nf_conntrack") {
                 let text = core::str::from_utf8(&data).unwrap_or("");
-                for line in text.lines() { println(line); }
-            } else { println("  (no entries — netfilter not active)"); }
+                for line in text.lines() {
+                    println(line);
+                }
+            } else {
+                println("  (no entries — netfilter not active)");
+            }
         }
         "-S" | "--stats" => {
             println("cpu\t\tsearched\tfound\t\tnew\t\tinvalid\tdelete");
             println("0\t\t0\t\t0\t\t0\t\t0\t\t0");
         }
-        "-F" | "--flush" => { println("conntrack: table flushed"); }
-        "-C" | "--count" => { println("0"); }
-        "-D" => { println("conntrack: delete requires matching criteria"); }
-        _ => { println("Usage: conntrack [-L|-S|-F|-C|-D]"); }
+        "-F" | "--flush" => {
+            println("conntrack: table flushed");
+        }
+        "-C" | "--count" => {
+            println("0");
+        }
+        "-D" => {
+            println("conntrack: delete requires matching criteria");
+        }
+        _ => {
+            println("Usage: conntrack [-L|-S|-F|-C|-D]");
+        }
     }
     true
 }
@@ -4518,17 +6108,22 @@ fn cmd_ech_tools(_state: &mut ShellState, args: &[&str]) -> bool {
     match subcmd {
         "list" => {
             println("echOS Tool Suite:");
-            println("  ech-tools list|bench|diag|sysinfo|fsck|nettest|memtest|disktest|cpuid|version");
+            println(
+                "  ech-tools list|bench|diag|sysinfo|fsck|nettest|memtest|disktest|cpuid|version",
+            );
         }
         "bench" => {
             println("echOS Benchmark Suite");
             let mut start = [0usize; 2];
             let _ = sc::sys_clock_gettime(1, &mut start);
             let mut sum: u64 = 0;
-            for i in 0..1_000_000u64 { sum = sum.wrapping_add(i); }
+            for i in 0..1_000_000u64 {
+                sum = sum.wrapping_add(i);
+            }
             let mut end = [0usize; 2];
             let _ = sc::sys_clock_gettime(1, &mut end);
-            let ns = (end[0]*1_000_000_000+end[1]).wrapping_sub(start[0]*1_000_000_000+start[1]);
+            let ns =
+                (end[0] * 1_000_000_000 + end[1]).wrapping_sub(start[0] * 1_000_000_000 + start[1]);
             println(&format!("  CPU: 1M iterations in {} ns (sum={})", ns, sum));
         }
         "diag" => {
@@ -4541,7 +6136,9 @@ fn cmd_ech_tools(_state: &mut ShellState, args: &[&str]) -> bool {
             }
             if let Ok(n) = sc::sys_eon_memory_stats(&mut buf) {
                 let text = core::str::from_utf8(&buf[..n]).unwrap_or("");
-                for line in text.lines() { println(&format!("  {}", line)); }
+                for line in text.lines() {
+                    println(&format!("  {}", line));
+                }
             }
         }
         "sysinfo" => {
@@ -4549,26 +6146,44 @@ fn cmd_ech_tools(_state: &mut ShellState, args: &[&str]) -> bool {
             println(&format!("  PID: {}", sc::sys_getpid()));
             let mut buf = [0u8; 256];
             if let Ok(n) = sc::sys_eon_get_hostname(&mut buf) {
-                println(&format!("  Hostname: {}", core::str::from_utf8(&buf[..n]).unwrap_or("unknown")));
+                println(&format!(
+                    "  Hostname: {}",
+                    core::str::from_utf8(&buf[..n]).unwrap_or("unknown")
+                ));
             }
             if let Ok(n) = sc::sys_eon_rtc_datetime(&mut buf) {
-                println(&format!("  Date/Time: {}", core::str::from_utf8(&buf[..n]).unwrap_or("unknown")));
+                println(&format!(
+                    "  Date/Time: {}",
+                    core::str::from_utf8(&buf[..n]).unwrap_or("unknown")
+                ));
             }
         }
-        "fsck" => { println("echOS Filesystem Check: /: clean, no errors."); }
+        "fsck" => {
+            println("echOS Filesystem Check: /: clean, no errors.");
+        }
         "nettest" => {
             println("echOS Network Test");
             let mut buf = [0u8; 4096];
             if let Ok(n) = sc::sys_eon_net_config(&mut buf) {
-                println(&format!("  Network: {}", core::str::from_utf8(&buf[..n]).unwrap_or("unknown")));
-            } else { println("  Network: not configured"); }
+                println(&format!(
+                    "  Network: {}",
+                    core::str::from_utf8(&buf[..n]).unwrap_or("unknown")
+                ));
+            } else {
+                println("  Network: not configured");
+            }
         }
         "memtest" => {
             println("echOS Memory Test");
             let mut v: Vec<u8> = Vec::new();
-            for i in 0..1024 { v.push((i & 0xff) as u8); }
+            for i in 0..1024 {
+                v.push((i & 0xff) as u8);
+            }
             let ok = v.iter().enumerate().all(|(i, &b)| b == (i & 0xff) as u8);
-            println(&format!("  Pattern test: {}", if ok { "PASS" } else { "FAIL" }));
+            println(&format!(
+                "  Pattern test: {}",
+                if ok { "PASS" } else { "FAIL" }
+            ));
         }
         "disktest" => {
             println("echOS Disk Test");
@@ -4579,23 +6194,35 @@ fn cmd_ech_tools(_state: &mut ShellState, args: &[&str]) -> bool {
             let _ = executor::load_file("/tmp/.ech_disk_test");
             let mut end = [0usize; 2];
             let _ = sc::sys_clock_gettime(1, &mut end);
-            let ns = (end[0]*1_000_000_000+end[1]).wrapping_sub(start[0]*1_000_000_000+start[1]);
+            let ns =
+                (end[0] * 1_000_000_000 + end[1]).wrapping_sub(start[0] * 1_000_000_000 + start[1]);
             println(&format!("  Write+Read 4K: {} ns", ns));
         }
         "cpuid" => {
             println("CPU: x86_64 Long mode");
             println("Features: SSE SSE2 SSE3 SSE4.1 SSE4.2 AVX AES RDRAND");
         }
-        "version" => { println("echOS v1.0.0 (shell: echshell v1.0, build: production)"); }
-        _ => { println(&format!("ech-tools: unknown command '{}'", subcmd)); }
+        "version" => {
+            println("echOS v1.0.0 (shell: echshell v1.0, build: production)");
+        }
+        _ => {
+            println(&format!("ech-tools: unknown command '{}'", subcmd));
+        }
     }
     true
 }
 
 /// `doom` — Doom game launcher
 fn cmd_doom(_state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() > 1 && args[1] == "--version" { println("echOS Doom Launcher v1.0"); return true; }
-    let iwad_paths = ["/usr/share/games/doom/doom.wad", "/usr/share/doom/doom.wad", "doom.wad"];
+    if args.len() > 1 && args[1] == "--version" {
+        println("echOS Doom Launcher v1.0");
+        return true;
+    }
+    let iwad_paths = [
+        "/usr/share/games/doom/doom.wad",
+        "/usr/share/doom/doom.wad",
+        "doom.wad",
+    ];
     println("echOS Doom Launcher");
     let mut found = false;
     for path in &iwad_paths {
@@ -4608,7 +6235,9 @@ fn cmd_doom(_state: &mut ShellState, args: &[&str]) -> bool {
     }
     if !found {
         println("No IWAD file found. Place doom.wad in:");
-        for path in &iwad_paths { println(&format!("  {}", path)); }
+        for path in &iwad_paths {
+            println(&format!("  {}", path));
+        }
     }
     true
 }
@@ -4637,13 +6266,17 @@ fn cmd_compat(_state: &mut ShellState, args: &[&str]) -> bool {
                     println("  ELF support:    native (x86_64)");
                     println("  /proc:          partial");
                 }
-                "syscalls" => { println("Linux-compatible syscalls: ~137 (POSIX ~85%)"); }
+                "syscalls" => {
+                    println("Linux-compatible syscalls: ~137 (POSIX ~85%)");
+                }
                 "run" if args.len() > 2 => {
                     let envp: Vec<&str> = Vec::new();
                     let _ = sc::sys_execve(args[2], &args[2..], &envp);
                     eprintln_fn(&format!("linux: failed to execute {}", args[2]));
                 }
-                _ => { println("Usage: linux [status|syscalls|run <binary>]"); }
+                _ => {
+                    println("Usage: linux [status|syscalls|run <binary>]");
+                }
             }
         }
         _ => {}
@@ -4686,7 +6319,11 @@ fn cmd_multiplexer(_state: &mut ShellState, args: &[&str]) -> bool {
             println("tmux: session 'echsession' destroyed");
         }
         "new-session" if is_tmux => {
-            let name = if args.len() > 2 { args[2] } else { "echsession" };
+            let name = if args.len() > 2 {
+                args[2]
+            } else {
+                "echsession"
+            };
             println(&format!("tmux: new session '{}'", name));
         }
         "split" | "split-window" => {
@@ -4725,15 +6362,34 @@ fn cmd_remote(_state: &mut ShellState, args: &[&str]) -> bool {
             let mut i = 1;
             while i < args.len() {
                 match args[i] {
-                    "-p" if i + 1 < args.len() => { i += 1; port = args[i]; }
-                    "-l" if i + 1 < args.len() => { i += 1; user = Some(args[i]); }
-                    "-i" if i + 1 < args.len() => { i += 1; key = Some(args[i]); }
-                    "-v" | "-vv" | "-vvv" => { println("ssh: verbose mode"); }
-                    "-V" => { println("OpenSSH_9.6p1, echOS compat"); return true; }
-                    "-o" => { i += 1; }
+                    "-p" if i + 1 < args.len() => {
+                        i += 1;
+                        port = args[i];
+                    }
+                    "-l" if i + 1 < args.len() => {
+                        i += 1;
+                        user = Some(args[i]);
+                    }
+                    "-i" if i + 1 < args.len() => {
+                        i += 1;
+                        key = Some(args[i]);
+                    }
+                    "-v" | "-vv" | "-vvv" => {
+                        println("ssh: verbose mode");
+                    }
+                    "-V" => {
+                        println("OpenSSH_9.6p1, echOS compat");
+                        return true;
+                    }
+                    "-o" => {
+                        i += 1;
+                    }
                     _ => {
-                        if host.is_none() { host = Some(args[i]); }
-                        else { remote_cmd = Some(args[i]); }
+                        if host.is_none() {
+                            host = Some(args[i]);
+                        } else {
+                            remote_cmd = Some(args[i]);
+                        }
                     }
                 }
                 i += 1;
@@ -4741,7 +6397,9 @@ fn cmd_remote(_state: &mut ShellState, args: &[&str]) -> bool {
             if let Some(h) = host {
                 let u = user.unwrap_or("root");
                 println(&format!("ssh: connecting to {}@{}:{}", u, h, port));
-                if let Some(k) = key { println(&format!("ssh: using key {}", k)); }
+                if let Some(k) = key {
+                    println(&format!("ssh: using key {}", k));
+                }
                 if let Some(cmd) = remote_cmd {
                     println(&format!("ssh: executing remote command: {}", cmd));
                 }
@@ -4756,7 +6414,9 @@ fn cmd_remote(_state: &mut ShellState, args: &[&str]) -> bool {
             let mut recursive = false;
             let mut i = 1;
             while i < args.len() && args[i].starts_with('-') {
-                if args[i] == "-r" || args[i] == "-R" { recursive = true; }
+                if args[i] == "-r" || args[i] == "-R" {
+                    recursive = true;
+                }
                 i += 1;
             }
             if i + 1 < args.len() {
@@ -4772,7 +6432,9 @@ fn cmd_remote(_state: &mut ShellState, args: &[&str]) -> bool {
                     println("scp: at least one path must be remote (user@host:path)");
                     return true;
                 }
-                if recursive { println("scp: recursive mode"); }
+                if recursive {
+                    println("scp: recursive mode");
+                }
                 println("scp: transfer requires TCP socket support");
             }
         }
@@ -4788,22 +6450,43 @@ fn cmd_remote(_state: &mut ShellState, args: &[&str]) -> bool {
             let mut paths: Vec<&str> = Vec::new();
             for i in 1..args.len() {
                 match args[i] {
-                    "-a" => { archive = true; }
-                    "-v" => { verbose = true; }
-                    "-z" => { compress = true; }
-                    "--delete" => { delete = true; }
-                    _ => { paths.push(args[i]); }
+                    "-a" => {
+                        archive = true;
+                    }
+                    "-v" => {
+                        verbose = true;
+                    }
+                    "-z" => {
+                        compress = true;
+                    }
+                    "--delete" => {
+                        delete = true;
+                    }
+                    _ => {
+                        paths.push(args[i]);
+                    }
                 }
             }
             if paths.len() >= 2 {
                 let is_remote = paths[0].contains(':') || paths[1].contains(':');
                 println(&format!("rsync: {} -> {}", paths[0], paths[1]));
-                if archive { println("rsync: archive mode"); }
-                if verbose { println("rsync: verbose"); }
-                if compress { println("rsync: compression enabled"); }
-                if delete { println("rsync: delete extraneous files"); }
-                if is_remote { println("rsync: remote sync requires TCP socket support"); }
-                else { println("rsync: local sync"); }
+                if archive {
+                    println("rsync: archive mode");
+                }
+                if verbose {
+                    println("rsync: verbose");
+                }
+                if compress {
+                    println("rsync: compression enabled");
+                }
+                if delete {
+                    println("rsync: delete extraneous files");
+                }
+                if is_remote {
+                    println("rsync: remote sync requires TCP socket support");
+                } else {
+                    println("rsync: local sync");
+                }
             } else {
                 println("rsync: source and destination required");
             }
@@ -4831,7 +6514,9 @@ fn cmd_ip(_state: &mut ShellState, args: &[&str]) -> bool {
                 println("    inet 127.0.0.1/8 scope host lo");
                 if !text.is_empty() {
                     println("2: eth0: <BROADCAST,UP> mtu 1500");
-                    for line in text.lines() { println(&format!("    {}", line)); }
+                    for line in text.lines() {
+                        println(&format!("    {}", line));
+                    }
                 } else {
                     println("2: eth0: <BROADCAST,DOWN> mtu 1500");
                 }
@@ -4856,7 +6541,9 @@ fn cmd_ip(_state: &mut ShellState, args: &[&str]) -> bool {
         "netns" => {
             println("(no network namespaces)");
         }
-        _ => { println("Usage: ip [addr|link|route|neigh|netns]"); }
+        _ => {
+            println("Usage: ip [addr|link|route|neigh|netns]");
+        }
     }
     true
 }
@@ -4874,17 +6561,29 @@ fn cmd_route(_state: &mut ShellState, args: &[&str]) -> bool {
     match args[1] {
         "add" => {
             if args.len() > 4 {
-                println(&format!("route: adding route {} via {} dev {}",
-                    args.get(2).unwrap_or(&""), args.get(4).unwrap_or(&""), args.get(6).unwrap_or(&"eth0")));
-            } else { eprintln_fn("route: add requires destination, gateway, and device"); }
+                println(&format!(
+                    "route: adding route {} via {} dev {}",
+                    args.get(2).unwrap_or(&""),
+                    args.get(4).unwrap_or(&""),
+                    args.get(6).unwrap_or(&"eth0")
+                ));
+            } else {
+                eprintln_fn("route: add requires destination, gateway, and device");
+            }
         }
         "del" | "delete" => {
             if args.len() > 2 {
                 println(&format!("route: deleting route {}", args[2]));
-            } else { eprintln_fn("route: del requires destination"); }
+            } else {
+                eprintln_fn("route: del requires destination");
+            }
         }
-        "flush" => { println("route: routing cache flushed"); }
-        _ => { println("Usage: route [-n|show|add|del|flush]"); }
+        "flush" => {
+            println("route: routing cache flushed");
+        }
+        _ => {
+            println("Usage: route [-n|show|add|del|flush]");
+        }
     }
     true
 }
@@ -4900,7 +6599,9 @@ fn cmd_arp(_state: &mut ShellState, args: &[&str]) -> bool {
     match args[1] {
         "-d" if args.len() > 2 => println(&format!("arp: deleted entry for {}", args[2])),
         "-s" if args.len() > 3 => println(&format!("arp: added {} at {}", args[2], args[3])),
-        _ => { println("Usage: arp [-a|-n|-d host|-s host hwaddr]"); }
+        _ => {
+            println("Usage: arp [-a|-n|-d host|-s host hwaddr]");
+        }
     }
     true
 }
@@ -4960,10 +6661,18 @@ fn cmd_lsof(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-p" if i + 1 < args.len() => { i += 1; filter_pid = args[i].parse::<usize>().ok(); }
-            "-u" if i + 1 < args.len() => { i += 1; filter_user = Some(args[i]); }
+            "-p" if i + 1 < args.len() => {
+                i += 1;
+                filter_pid = args[i].parse::<usize>().ok();
+            }
+            "-u" if i + 1 < args.len() => {
+                i += 1;
+                filter_user = Some(args[i]);
+            }
             "-i" => {} // network files
-            _ => { filter_file = Some(args[i]); }
+            _ => {
+                filter_file = Some(args[i]);
+            }
         }
         i += 1;
     }
@@ -4972,10 +6681,22 @@ fn cmd_lsof(_state: &mut ShellState, args: &[&str]) -> bool {
     println("COMMAND   PID  USER   FD   TYPE  DEVICE  SIZE/OFF  NODE NAME");
     let pid = sc::sys_getpid();
     if filter_pid.is_none() || filter_pid == Some(pid) {
-        println(&format!("echshell  {:<5} root   cwd   DIR   0:1     4096        2 /", pid));
-        println(&format!("echshell  {:<5} root   0u    CHR   5:0     0         1 /dev/tty0", pid));
-        println(&format!("echshell  {:<5} root   1u    CHR   5:0     0         1 /dev/tty0", pid));
-        println(&format!("echshell  {:<5} root   2u    CHR   5:0     0         1 /dev/tty0", pid));
+        println(&format!(
+            "echshell  {:<5} root   cwd   DIR   0:1     4096        2 /",
+            pid
+        ));
+        println(&format!(
+            "echshell  {:<5} root   0u    CHR   5:0     0         1 /dev/tty0",
+            pid
+        ));
+        println(&format!(
+            "echshell  {:<5} root   1u    CHR   5:0     0         1 /dev/tty0",
+            pid
+        ));
+        println(&format!(
+            "echshell  {:<5} root   2u    CHR   5:0     0         1 /dev/tty0",
+            pid
+        ));
     }
     let mut buf = [0u8; 4096];
     if let Ok(n) = sc::sys_eon_list_tasks(&mut buf) {
@@ -4986,7 +6707,10 @@ fn cmd_lsof(_state: &mut ShellState, args: &[&str]) -> bool {
                 let task_pid = parts[0].parse::<usize>().unwrap_or(0);
                 if filter_pid.is_none() || filter_pid == Some(task_pid) {
                     if task_pid != pid {
-                        println(&format!("{:<10}{:<6}root   cwd   DIR   0:1     4096        2 /", parts[1], task_pid));
+                        println(&format!(
+                            "{:<10}{:<6}root   cwd   DIR   0:1     4096        2 /",
+                            parts[1], task_pid
+                        ));
                     }
                 }
             }
@@ -5010,7 +6734,9 @@ fn cmd_fuser(_state: &mut ShellState, args: &[&str]) -> bool {
             "-k" | "--kill" => kill_mode = true,
             "-v" | "--verbose" => verbose = true,
             "-m" | "--mount" => mount_mode = true,
-            _ => { targets.push(args[i]); }
+            _ => {
+                targets.push(args[i]);
+            }
         }
     }
     if verbose {
@@ -5020,7 +6746,10 @@ fn cmd_fuser(_state: &mut ShellState, args: &[&str]) -> bool {
     for target in &targets {
         let pid = sc::sys_getpid();
         if verbose {
-            println(&format!("{:<20} root       {:<5} ..c.. echshell", target, pid));
+            println(&format!(
+                "{:<20} root       {:<5} ..c.. echshell",
+                target, pid
+            ));
         } else {
             println(&format!("{}: {}", target, pid));
         }
@@ -5041,8 +6770,13 @@ fn cmd_mtr(_state: &mut ShellState, args: &[&str]) -> bool {
     while i < args.len() {
         match args[i] {
             "-r" | "--report" => report_mode = true,
-            "-c" if i + 1 < args.len() => { i += 1; count = args[i].parse().unwrap_or(10); }
-            _ => { host = Some(args[i]); }
+            "-c" if i + 1 < args.len() => {
+                i += 1;
+                count = args[i].parse().unwrap_or(10);
+            }
+            _ => {
+                host = Some(args[i]);
+            }
         }
         i += 1;
     }
@@ -5051,7 +6785,10 @@ fn cmd_mtr(_state: &mut ShellState, args: &[&str]) -> bool {
     println(&format!("Start: {} mtr report", target));
     println("HOST: echOS                     Loss%   Snt   Last   Avg  Best  Wrst StDev");
     println("  1.|-- 10.0.2.2                 0.0%     1    0.3   0.3   0.3   0.3   0.0");
-    println(&format!("  2.|-- {}                      0.0%     1    1.2   1.2   1.2   1.2   0.0", target));
+    println(&format!(
+        "  2.|-- {}                      0.0%     1    1.2   1.2   1.2   1.2   0.0",
+        target
+    ));
     if !report_mode {
         println("(report mode: use -r for batch output)");
     }
@@ -5082,7 +6819,9 @@ fn cmd_ldd(_state: &mut ShellState, args: &[&str]) -> bool {
                 println("  -d, --data-relocs   process data relocations");
                 return true;
             }
-            _ => { files.push(args[i]); }
+            _ => {
+                files.push(args[i]);
+            }
         }
     }
     let _ = verbose;
@@ -5102,7 +6841,10 @@ fn cmd_ldd(_state: &mut ShellState, args: &[&str]) -> bool {
                 } else {
                     println(&format!("{}:", file));
                     for dep in &needed {
-                        println(&format!("\t{} => /usr/lib/{} (0x0000000000000000)", dep, dep));
+                        println(&format!(
+                            "\t{} => /usr/lib/{} (0x0000000000000000)",
+                            dep, dep
+                        ));
                     }
                     println("\tlinux-vdso.so.1 (0x00007ffc00000000)");
                     println("\t/lib64/ld-linux-x86-64.so.2 (0x00007f0000000000)");
@@ -5119,38 +6861,65 @@ fn cmd_ldd(_state: &mut ShellState, args: &[&str]) -> bool {
 fn extract_elf_needed(data: &[u8], is_64: bool) -> Vec<String> {
     let mut needed = Vec::new();
     if is_64 {
-        if data.len() < 64 { return needed; }
-        let e_phoff = u64::from_le_bytes(data[32..40].try_into().unwrap_or([0;8])) as usize;
-        let e_phentsize = u16::from_le_bytes(data[54..56].try_into().unwrap_or([0;2])) as usize;
-        let e_phnum = u16::from_le_bytes(data[56..58].try_into().unwrap_or([0;2])) as usize;
+        if data.len() < 64 {
+            return needed;
+        }
+        let e_phoff = u64::from_le_bytes(data[32..40].try_into().unwrap_or([0; 8])) as usize;
+        let e_phentsize = u16::from_le_bytes(data[54..56].try_into().unwrap_or([0; 2])) as usize;
+        let e_phnum = u16::from_le_bytes(data[56..58].try_into().unwrap_or([0; 2])) as usize;
         #[allow(unused_assignments)]
         let mut strtab_offset = 0usize;
         for i in 0..e_phnum {
             let off = e_phoff + i * e_phentsize;
-            if off + e_phentsize > data.len() { break; }
-            let p_type = u32::from_le_bytes(data[off..off+4].try_into().unwrap_or([0;4]));
-            if p_type == 3 { // PT_DYNAMIC
-                let p_offset = u64::from_le_bytes(data[off+8..off+16].try_into().unwrap_or([0;8])) as usize;
-                let p_filesz = u64::from_le_bytes(data[off+32..off+40].try_into().unwrap_or([0;8])) as usize;
+            if off + e_phentsize > data.len() {
+                break;
+            }
+            let p_type = u32::from_le_bytes(data[off..off + 4].try_into().unwrap_or([0; 4]));
+            if p_type == 3 {
+                // PT_DYNAMIC
+                let p_offset =
+                    u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap_or([0; 8]))
+                        as usize;
+                let p_filesz =
+                    u64::from_le_bytes(data[off + 32..off + 40].try_into().unwrap_or([0; 8]))
+                        as usize;
                 let mut dyn_off = p_offset;
                 let mut strtab_ptr = 0usize;
                 while dyn_off + 16 <= p_offset + p_filesz && dyn_off + 16 <= data.len() {
-                    let d_tag = i64::from_le_bytes(data[dyn_off..dyn_off+8].try_into().unwrap_or([0;8]));
-                    let d_val = u64::from_le_bytes(data[dyn_off+8..dyn_off+16].try_into().unwrap_or([0;8])) as usize;
-                    if d_tag == 5 { strtab_ptr = d_val; break; } // DT_STRTAB
-                    if d_tag == 0 { break; }
+                    let d_tag =
+                        i64::from_le_bytes(data[dyn_off..dyn_off + 8].try_into().unwrap_or([0; 8]));
+                    let d_val = u64::from_le_bytes(
+                        data[dyn_off + 8..dyn_off + 16].try_into().unwrap_or([0; 8]),
+                    ) as usize;
+                    if d_tag == 5 {
+                        strtab_ptr = d_val;
+                        break;
+                    } // DT_STRTAB
+                    if d_tag == 0 {
+                        break;
+                    }
                     dyn_off += 16;
                 }
                 // Find strtab file offset via LOAD segments
                 let mut strtab_file_off = strtab_ptr;
                 for j in 0..e_phnum {
                     let ph_off = e_phoff + j * e_phentsize;
-                    if ph_off + e_phentsize > data.len() { break; }
-                    let pt = u32::from_le_bytes(data[ph_off..ph_off+4].try_into().unwrap_or([0;4]));
-                    if pt == 1 { // PT_LOAD
-                        let vaddr = u64::from_le_bytes(data[ph_off+16..ph_off+24].try_into().unwrap_or([0;8])) as usize;
-                        let foff = u64::from_le_bytes(data[ph_off+8..ph_off+16].try_into().unwrap_or([0;8])) as usize;
-                        let memsz = u64::from_le_bytes(data[ph_off+40..ph_off+48].try_into().unwrap_or([0;8])) as usize;
+                    if ph_off + e_phentsize > data.len() {
+                        break;
+                    }
+                    let pt =
+                        u32::from_le_bytes(data[ph_off..ph_off + 4].try_into().unwrap_or([0; 4]));
+                    if pt == 1 {
+                        // PT_LOAD
+                        let vaddr = u64::from_le_bytes(
+                            data[ph_off + 16..ph_off + 24].try_into().unwrap_or([0; 8]),
+                        ) as usize;
+                        let foff = u64::from_le_bytes(
+                            data[ph_off + 8..ph_off + 16].try_into().unwrap_or([0; 8]),
+                        ) as usize;
+                        let memsz = u64::from_le_bytes(
+                            data[ph_off + 40..ph_off + 48].try_into().unwrap_or([0; 8]),
+                        ) as usize;
                         if strtab_ptr >= vaddr && strtab_ptr < vaddr + memsz {
                             strtab_file_off = foff + (strtab_ptr - vaddr);
                             break;
@@ -5161,15 +6930,23 @@ fn extract_elf_needed(data: &[u8], is_64: bool) -> Vec<String> {
                 // Read DT_NEEDED entries
                 dyn_off = p_offset;
                 while dyn_off + 16 <= p_offset + p_filesz && dyn_off + 16 <= data.len() {
-                    let d_tag = i64::from_le_bytes(data[dyn_off..dyn_off+8].try_into().unwrap_or([0;8]));
-                    let d_val = u64::from_le_bytes(data[dyn_off+8..dyn_off+16].try_into().unwrap_or([0;8])) as usize;
-                    if d_tag == 0 { break; }
-                    if d_tag == 1 { // DT_NEEDED
+                    let d_tag =
+                        i64::from_le_bytes(data[dyn_off..dyn_off + 8].try_into().unwrap_or([0; 8]));
+                    let d_val = u64::from_le_bytes(
+                        data[dyn_off + 8..dyn_off + 16].try_into().unwrap_or([0; 8]),
+                    ) as usize;
+                    if d_tag == 0 {
+                        break;
+                    }
+                    if d_tag == 1 {
+                        // DT_NEEDED
                         let name_off = strtab_offset + d_val;
                         if name_off < data.len() {
                             let end = data[name_off..].iter().position(|&b| b == 0).unwrap_or(0);
                             if end > 0 {
-                                if let Ok(name) = core::str::from_utf8(&data[name_off..name_off+end]) {
+                                if let Ok(name) =
+                                    core::str::from_utf8(&data[name_off..name_off + end])
+                                {
                                     needed.push(name.to_string());
                                 }
                             }
@@ -5202,7 +6979,10 @@ fn cmd_getconf(_state: &mut ShellState, args: &[&str]) -> bool {
     }
     let var = args[1];
     for &(name, val) in GETCONF_VARS.iter() {
-        if name == var { println(val); return true; }
+        if name == var {
+            println(val);
+            return true;
+        }
     }
     eprintln_fn(&format!("getconf: Unrecognized variable '{}'", var));
     _state.exit_code = 1;
@@ -5210,23 +6990,43 @@ fn cmd_getconf(_state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 const GETCONF_VARS: &[(&str, &str)] = &[
-    ("PAGE_SIZE", "4096"), ("PAGESIZE", "4096"),
-    ("_NPROCESSORS_ONLN", "4"), ("_NPROCESSORS_CONF", "4"),
-    ("_SC_CLK_TCK", "100"), ("CLK_TCK", "100"),
-    ("ARG_MAX", "2097152"), ("CHILD_MAX", "65535"),
-    ("HOST_NAME_MAX", "64"), ("LINE_MAX", "2048"),
-    ("LOGIN_NAME_MAX", "256"), ("OPEN_MAX", "1024"),
-    ("PATH_MAX", "4096"), ("PIPE_BUF", "4096"),
-    ("NAME_MAX", "255"), ("NGROUPS_MAX", "65536"),
-    ("_SC_PAGESIZE", "4096"), ("_SC_PAGE_SIZE", "4096"),
-    ("_SC_NPROCESSORS_ONLN", "4"), ("_SC_NPROCESSORS_CONF", "4"),
-    ("_SC_PHYS_PAGES", "262144"), ("_SC_AVPHYS_PAGES", "131072"),
-    ("_SC_OPEN_MAX", "1024"), ("_SC_CHILD_MAX", "65535"),
-    ("_SC_ARG_MAX", "2097152"), ("_SC_HOST_NAME_MAX", "64"),
-    ("_SC_LOGIN_NAME_MAX", "256"), ("_SC_NGROUPS_MAX", "65536"),
-    ("CHAR_BIT", "8"), ("CHAR_MAX", "127"), ("INT_MAX", "2147483647"),
-    ("LONG_BIT", "64"), ("WORD_BIT", "32"),
-    ("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+    ("PAGE_SIZE", "4096"),
+    ("PAGESIZE", "4096"),
+    ("_NPROCESSORS_ONLN", "4"),
+    ("_NPROCESSORS_CONF", "4"),
+    ("_SC_CLK_TCK", "100"),
+    ("CLK_TCK", "100"),
+    ("ARG_MAX", "2097152"),
+    ("CHILD_MAX", "65535"),
+    ("HOST_NAME_MAX", "64"),
+    ("LINE_MAX", "2048"),
+    ("LOGIN_NAME_MAX", "256"),
+    ("OPEN_MAX", "1024"),
+    ("PATH_MAX", "4096"),
+    ("PIPE_BUF", "4096"),
+    ("NAME_MAX", "255"),
+    ("NGROUPS_MAX", "65536"),
+    ("_SC_PAGESIZE", "4096"),
+    ("_SC_PAGE_SIZE", "4096"),
+    ("_SC_NPROCESSORS_ONLN", "4"),
+    ("_SC_NPROCESSORS_CONF", "4"),
+    ("_SC_PHYS_PAGES", "262144"),
+    ("_SC_AVPHYS_PAGES", "131072"),
+    ("_SC_OPEN_MAX", "1024"),
+    ("_SC_CHILD_MAX", "65535"),
+    ("_SC_ARG_MAX", "2097152"),
+    ("_SC_HOST_NAME_MAX", "64"),
+    ("_SC_LOGIN_NAME_MAX", "256"),
+    ("_SC_NGROUPS_MAX", "65536"),
+    ("CHAR_BIT", "8"),
+    ("CHAR_MAX", "127"),
+    ("INT_MAX", "2147483647"),
+    ("LONG_BIT", "64"),
+    ("WORD_BIT", "32"),
+    (
+        "PATH",
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    ),
     ("POSIX_VERSION", "200809"),
 ];
 
@@ -5256,10 +7056,21 @@ fn cmd_logger(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() {
         match args[i] {
-            "-t" if i + 1 < args.len() => { i += 1; tag = args[i]; }
-            "-p" if i + 1 < args.len() => { i += 1; priority = args[i]; }
-            "-f" if i + 1 < args.len() => { i += 1; file_log = Some(args[i]); }
-            _ => { break; }
+            "-t" if i + 1 < args.len() => {
+                i += 1;
+                tag = args[i];
+            }
+            "-p" if i + 1 < args.len() => {
+                i += 1;
+                priority = args[i];
+            }
+            "-f" if i + 1 < args.len() => {
+                i += 1;
+                file_log = Some(args[i]);
+            }
+            _ => {
+                break;
+            }
         }
         i += 1;
     }
@@ -5274,7 +7085,9 @@ fn cmd_logger(_state: &mut ShellState, args: &[&str]) -> bool {
                 Ok(n) => {
                     for j in 0..n {
                         let c = buf[j] as char;
-                        if c == '\n' || c == '\r' { break; }
+                        if c == '\n' || c == '\r' {
+                            break;
+                        }
                         msg.push(c);
                     }
                     break;
@@ -5346,8 +7159,15 @@ fn cmd_ulimit(state: &mut ShellState, args: &[&str]) -> bool {
                 }
             }
         }
-        "-u" => { if args.len() > 2 {} else { println("65535"); } }
-        "-p" => { println("8"); }
+        "-u" => {
+            if args.len() > 2 {
+            } else {
+                println("65535");
+            }
+        }
+        "-p" => {
+            println("8");
+        }
         "-H" | "-S" => {} // hard/soft flag
         _ => {
             eprintln_fn(&format!("ulimit: invalid option: {}", flag));
@@ -5376,7 +7196,10 @@ fn cmd_newgrp(state: &mut ShellState, args: &[&str]) -> bool {
 fn cmd_swap(_state: &mut ShellState, args: &[&str]) -> bool {
     match args[0] {
         "mkswap" => {
-            if args.len() < 2 { eprintln_fn("Usage: mkswap [-L label] device"); return true; }
+            if args.len() < 2 {
+                eprintln_fn("Usage: mkswap [-L label] device");
+                return true;
+            }
             let device = args[args.len() - 1];
             println(&format!("Setting up swapspace version 1, size = 0 bytes"));
             println(&format!("mkswap: {} — swap area initialized", device));
@@ -5390,12 +7213,21 @@ fn cmd_swap(_state: &mut ShellState, args: &[&str]) -> bool {
             println(&format!("swapon: {} enabled", device));
         }
         "swapoff" => {
-            if args.len() < 2 { eprintln_fn("Usage: swapoff device"); return true; }
+            if args.len() < 2 {
+                eprintln_fn("Usage: swapoff device");
+                return true;
+            }
             println(&format!("swapoff: {} disabled", args[args.len() - 1]));
         }
         "swaplabel" => {
-            if args.len() < 2 { eprintln_fn("Usage: swaplabel device"); return true; }
-            println(&format!("swaplabel: {}: no swap signature found", args[args.len() - 1]));
+            if args.len() < 2 {
+                eprintln_fn("Usage: swaplabel device");
+                return true;
+            }
+            println(&format!(
+                "swaplabel: {}: no swap signature found",
+                args[args.len() - 1]
+            ));
         }
         _ => {}
     }
@@ -5411,17 +7243,28 @@ fn cmd_chgrp(_state: &mut ShellState, args: &[&str]) -> bool {
     let mut recursive = false;
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
-        if args[i] == "-R" || args[i] == "--recursive" { recursive = true; i += 1; }
-        else { break; }
+        if args[i] == "-R" || args[i] == "--recursive" {
+            recursive = true;
+            i += 1;
+        } else {
+            break;
+        }
     }
-    if args.len() <= i + 1 { eprintln_fn("Usage: chgrp [-R] GROUP FILE..."); return true; }
+    if args.len() <= i + 1 {
+        eprintln_fn("Usage: chgrp [-R] GROUP FILE...");
+        return true;
+    }
     let group = args[i];
     for j in (i + 1)..args.len() {
         let path = args[j];
         let gid: usize = group.parse().unwrap_or(0);
         let _ = sc::sys_chown(path, u32::MAX, gid as u32);
-        println(&format!("chgrp: changed group of '{}' to '{}'{}", path, group,
-            if recursive { " (recursive)" } else { "" }));
+        println(&format!(
+            "chgrp: changed group of '{}' to '{}'{}",
+            path,
+            group,
+            if recursive { " (recursive)" } else { "" }
+        ));
     }
     true
 }
@@ -5433,28 +7276,45 @@ fn cmd_pathchk(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
         match args[i] {
-            "-p" => { portable = true; i += 1; }
-            "-P" => { posix_mode = true; i += 1; }
-            _ => { i += 1; }
+            "-p" => {
+                portable = true;
+                i += 1;
+            }
+            "-P" => {
+                posix_mode = true;
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
     let max_len = if posix_mode { 255 } else { 4096 };
     let mut ok = true;
     for j in i..args.len() {
         let name = args[j];
-        if name.is_empty() { eprintln_fn("pathchk: empty file name"); ok = false; continue; }
+        if name.is_empty() {
+            eprintln_fn("pathchk: empty file name");
+            ok = false;
+            continue;
+        }
         if name.len() > max_len {
-            eprintln_fn(&format!("pathchk: '{}': name too long", name)); ok = false;
+            eprintln_fn(&format!("pathchk: '{}': name too long", name));
+            ok = false;
         }
         if portable {
             for c in name.chars() {
                 if !c.is_ascii_alphanumeric() && c != '/' && c != '.' && c != '_' && c != '-' {
-                    eprintln_fn(&format!("pathchk: '{}': non-portable character", name)); ok = false; break;
+                    eprintln_fn(&format!("pathchk: '{}': non-portable character", name));
+                    ok = false;
+                    break;
                 }
             }
         }
     }
-    if !ok { state.exit_code = 1; }
+    if !ok {
+        state.exit_code = 1;
+    }
     true
 }
 
@@ -5466,42 +7326,76 @@ fn cmd_base_encode(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
         match args[i] {
-            "-d" | "--decode" => { decode_mode = true; i += 1; }
-            "-w" | "--wrap" => { i += 1; if i < args.len() { wrap = args[i].parse().unwrap_or(76); } i += 1; }
-            _ => { i += 1; }
+            "-d" | "--decode" => {
+                decode_mode = true;
+                i += 1;
+            }
+            "-w" | "--wrap" => {
+                i += 1;
+                if i < args.len() {
+                    wrap = args[i].parse().unwrap_or(76);
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
         }
     }
     let input = if i < args.len() {
         match executor::load_file(args[i]) {
             Some(d) => d,
-            None => { eprintln_fn(&format!("{}: {}: No such file", cmd, args[i])); state.exit_code = 1; return true; }
+            None => {
+                eprintln_fn(&format!("{}: {}: No such file", cmd, args[i]));
+                state.exit_code = 1;
+                return true;
+            }
         }
     } else {
         let mut buf = Vec::new();
         let mut tmp = [0u8; 4096];
-        loop { match sc::sys_read(0, &mut tmp) { Ok(0) => break, Ok(n) => buf.extend_from_slice(&tmp[..n]), Err(_) => break } }
+        loop {
+            match sc::sys_read(0, &mut tmp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
+        }
         buf
     };
     if decode_mode {
         let text = core::str::from_utf8(&input).unwrap_or("").trim();
         let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         match base_decode(&cleaned, cmd) {
-            Some(decoded) => { print(core::str::from_utf8(&decoded).unwrap_or("")); }
-            None => { eprintln_fn(&format!("{}: invalid input", cmd)); state.exit_code = 1; }
+            Some(decoded) => {
+                print(core::str::from_utf8(&decoded).unwrap_or(""));
+            }
+            None => {
+                eprintln_fn(&format!("{}: invalid input", cmd));
+                state.exit_code = 1;
+            }
         }
     } else {
         let encoded = base_encode(&input, cmd);
         if wrap > 0 {
             for chunk in encoded.as_bytes().chunks(wrap) {
-                if let Ok(s) = core::str::from_utf8(chunk) { println(s); }
+                if let Ok(s) = core::str::from_utf8(chunk) {
+                    println(s);
+                }
             }
-        } else { println(&encoded); }
+        } else {
+            println(&encoded);
+        }
     }
     true
 }
 
 fn base_encode(data: &[u8], mode: &str) -> String {
-    let alphabet: &[u8] = if mode == "base32" { b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" as &[u8] } else { b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" as &[u8] };
+    let alphabet: &[u8] = if mode == "base32" {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" as &[u8]
+    } else {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" as &[u8]
+    };
     let bpc = if mode == "base32" { 5 } else { 6 };
     let mut result = String::new();
     let mut buffer: u32 = 0;
@@ -5518,22 +7412,33 @@ fn base_encode(data: &[u8], mode: &str) -> String {
         result.push(alphabet[((buffer << (bpc - bits)) & ((1 << bpc) - 1)) as usize] as char);
     }
     let gs = if mode == "base32" { 8 } else { 4 };
-    while result.len() % gs != 0 { result.push('='); }
+    while result.len() % gs != 0 {
+        result.push('=');
+    }
     result
 }
 
 fn base_decode(input: &str, mode: &str) -> Option<Vec<u8>> {
-    let alphabet: &[u8] = if mode == "base32" { b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" as &[u8] } else { b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" as &[u8] };
+    let alphabet: &[u8] = if mode == "base32" {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567" as &[u8]
+    } else {
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" as &[u8]
+    };
     let bpc = if mode == "base32" { 5 } else { 6 };
     let mut result = Vec::new();
     let mut buffer: u32 = 0;
     let mut bits: u32 = 0;
     for c in input.bytes() {
-        if c == b'=' { break; }
+        if c == b'=' {
+            break;
+        }
         let val = alphabet.iter().position(|&b| b == c)? as u32;
         buffer = (buffer << bpc) | val;
         bits += bpc;
-        if bits >= 8 { bits -= 8; result.push((buffer >> bits) as u8); }
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buffer >> bits) as u8);
+        }
     }
     Some(result)
 }
@@ -5543,14 +7448,26 @@ fn cmd_b2sum(state: &mut ShellState, args: &[&str]) -> bool {
     let mut length = 64usize;
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
-        if args[i] == "-l" || args[i] == "--length" { i += 1; if i < args.len() { length = args[i].parse::<usize>().unwrap_or(512) / 8; } }
+        if args[i] == "-l" || args[i] == "--length" {
+            i += 1;
+            if i < args.len() {
+                length = args[i].parse::<usize>().unwrap_or(512) / 8;
+            }
+        }
         i += 1;
     }
-    if i >= args.len() { eprintln_fn("Usage: b2sum [-l bits] FILE..."); return true; }
+    if i >= args.len() {
+        eprintln_fn("Usage: b2sum [-l bits] FILE...");
+        return true;
+    }
     for j in i..args.len() {
         let data = match executor::load_file(args[j]) {
             Some(d) => d,
-            None => { eprintln_fn(&format!("b2sum: {}: No such file", args[j])); state.exit_code = 1; continue; }
+            None => {
+                eprintln_fn(&format!("b2sum: {}: No such file", args[j]));
+                state.exit_code = 1;
+                continue;
+            }
         };
         let hash = blake2b_hash(&data, length);
         println(&format!("{}  {}", hash, args[j]));
@@ -5559,46 +7476,103 @@ fn cmd_b2sum(state: &mut ShellState, args: &[&str]) -> bool {
 }
 
 fn blake2b_hash(data: &[u8], out_len: usize) -> String {
-    let iv: [u64; 8] = [0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179];
+    let iv: [u64; 8] = [
+        0x6a09e667f3bcc908,
+        0xbb67ae8584caa73b,
+        0x3c6ef372fe94f82b,
+        0xa54ff53a5f1d36f1,
+        0x510e527fade682d1,
+        0x9b05688c2b3e6c1f,
+        0x1f83d9abfb41bd6b,
+        0x5be0cd19137e2179,
+    ];
     let mut h = iv;
     h[0] ^= 0x01010000 ^ (out_len as u64);
     let mut t: u128 = 0;
-    let chunks: Vec<&[u8]> = if data.is_empty() { alloc::vec![&[] as &[u8]] } else { data.chunks(128).collect() };
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        alloc::vec![&[] as &[u8]]
+    } else {
+        data.chunks(128).collect()
+    };
     for (idx, chunk) in chunks.iter().enumerate() {
         let is_last = idx == chunks.len() - 1;
         t += chunk.len() as u128;
         let mut block = [0u8; 128];
         block[..chunk.len()].copy_from_slice(chunk);
         let mut v = [0u64; 16];
-        for k in 0..8 { v[k] = h[k]; v[k + 8] = iv[k]; }
+        for k in 0..8 {
+            v[k] = h[k];
+            v[k + 8] = iv[k];
+        }
         v[12] ^= t as u64;
         v[13] ^= (t >> 64) as u64;
-        if is_last { v[14] = !v[14]; }
-        let sigma: [[usize; 16]; 10] = [[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],[14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3],[11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4],[7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8],[9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13],[2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9],[12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11],[13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10],[6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5],[10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0]];
+        if is_last {
+            v[14] = !v[14];
+        }
+        let sigma: [[usize; 16]; 10] = [
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+            [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
+            [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+            [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
+            [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+            [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
+            [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+            [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
+            [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+        ];
         for round in 0..12 {
             let s = &sigma[round % 10];
             let mut m = [0u64; 16];
-            for k in 0..16 { let off = k * 8; let mut bytes = [0u8; 8]; for b in 0..8 { if off + b < 128 { bytes[b] = block[off + b]; } } m[k] = u64::from_le_bytes(bytes); }
+            for k in 0..16 {
+                let off = k * 8;
+                let mut bytes = [0u8; 8];
+                for b in 0..8 {
+                    if off + b < 128 {
+                        bytes[b] = block[off + b];
+                    }
+                }
+                m[k] = u64::from_le_bytes(bytes);
+            }
             let g = |v: &mut [u64; 16], a: usize, b: usize, c: usize, d: usize, x: u64, y: u64| {
-                v[a] = v[a].wrapping_add(v[b]).wrapping_add(x); v[d] = (v[d] ^ v[a]).rotate_right(32);
-                v[c] = v[c].wrapping_add(v[d]); v[b] = (v[b] ^ v[c]).rotate_right(24);
-                v[a] = v[a].wrapping_add(v[b]).wrapping_add(y); v[d] = (v[d] ^ v[a]).rotate_right(16);
-                v[c] = v[c].wrapping_add(v[d]); v[b] = (v[b] ^ v[c]).rotate_right(63);
+                v[a] = v[a].wrapping_add(v[b]).wrapping_add(x);
+                v[d] = (v[d] ^ v[a]).rotate_right(32);
+                v[c] = v[c].wrapping_add(v[d]);
+                v[b] = (v[b] ^ v[c]).rotate_right(24);
+                v[a] = v[a].wrapping_add(v[b]).wrapping_add(y);
+                v[d] = (v[d] ^ v[a]).rotate_right(16);
+                v[c] = v[c].wrapping_add(v[d]);
+                v[b] = (v[b] ^ v[c]).rotate_right(63);
             };
-            g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]); g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
-            g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]); g(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
-            g(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]); g(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-            g(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]); g(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+            g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+            g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+            g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+            g(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+            g(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
+            g(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
+            g(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+            g(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
         }
-        for k in 0..8 { h[k] ^= v[k] ^ v[k + 8]; }
+        for k in 0..8 {
+            h[k] ^= v[k] ^ v[k + 8];
+        }
     }
     let mut out = String::new();
     for k in 0..8 {
         let bytes = h[k].to_le_bytes();
-        for b in &bytes { if out.len() / 2 >= out_len { break; } out.push_str(&format!("{:02x}", b)); }
-        if out.len() / 2 >= out_len { break; }
+        for b in &bytes {
+            if out.len() / 2 >= out_len {
+                break;
+            }
+            out.push_str(&format!("{:02x}", b));
+        }
+        if out.len() / 2 >= out_len {
+            break;
+        }
     }
-    while out.len() > out_len * 2 { out.pop(); }
+    while out.len() > out_len * 2 {
+        out.pop();
+    }
     out
 }
 
@@ -5606,8 +7580,12 @@ fn blake2b_hash(data: &[u8], out_len: usize) -> String {
 fn cmd_dircolors(_state: &mut ShellState, args: &[&str]) -> bool {
     let cshell = args.len() > 1 && (args[1] == "-c" || args[1] == "--csh");
     let colors = "rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:ex=01;32";
-    if cshell { println(&format!("setenv LS_COLORS '{}'", colors)); }
-    else { println(&format!("LS_COLORS='{}'", colors)); println("export LS_COLORS"); }
+    if cshell {
+        println(&format!("setenv LS_COLORS '{}'", colors));
+    } else {
+        println(&format!("LS_COLORS='{}'", colors));
+        println("export LS_COLORS");
+    }
     true
 }
 
@@ -5616,7 +7594,10 @@ fn cmd_pinky(_state: &mut ShellState, args: &[&str]) -> bool {
     let uid = sc::sys_getuid();
     let user = if uid == 0 { "root" } else { "user" };
     if args.len() > 1 && args[1] == "-l" {
-        println(&format!("Login name: {}\nIn real life: echOS User\nDirectory: /home/{}\nShell: /bin/echshell", user, user));
+        println(&format!(
+            "Login name: {}\nIn real life: echOS User\nDirectory: /home/{}\nShell: /bin/echshell",
+            user, user
+        ));
     } else {
         println(&format!("{:<10} {:<20} {:<10}", "Login", "Name", "TTY"));
         println(&format!("{:<10} {:<20} {:<10}", user, "echOS User", "tty0"));
@@ -5629,28 +7610,56 @@ fn cmd_ptx(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     let mut width = 72usize;
     while i < args.len() && args[i].starts_with('-') {
-        if args[i] == "-w" { i += 1; if i < args.len() { width = args[i].parse().unwrap_or(72); } }
+        if args[i] == "-w" {
+            i += 1;
+            if i < args.len() {
+                width = args[i].parse().unwrap_or(72);
+            }
+        }
         i += 1;
     }
-    if i >= args.len() { eprintln_fn("Usage: ptx [-w width] FILE"); return true; }
-    let data = match executor::load_file(args[i]) { Some(d) => d, None => { eprintln_fn(&format!("ptx: {}: not found", args[i])); state.exit_code = 1; return true; } };
+    if i >= args.len() {
+        eprintln_fn("Usage: ptx [-w width] FILE");
+        return true;
+    }
+    let data = match executor::load_file(args[i]) {
+        Some(d) => d,
+        None => {
+            eprintln_fn(&format!("ptx: {}: not found", args[i]));
+            state.exit_code = 1;
+            return true;
+        }
+    };
     let text = core::str::from_utf8(&data).unwrap_or("");
     let mut entries: Vec<(String, String, String)> = Vec::new();
     for line in text.lines() {
         let words: Vec<&str> = line.split_whitespace().collect();
         for (widx, _) in words.iter().enumerate() {
-            entries.push((words[..widx].join(" "), words[widx].to_string(), words[widx+1..].join(" ")));
+            entries.push((
+                words[..widx].join(" "),
+                words[widx].to_string(),
+                words[widx + 1..].join(" "),
+            ));
         }
     }
     entries.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
     let half = width / 2;
-    for (b, k, a) in &entries { println(&format!("{:>w$}  {} {}", b, k, a, w = half)[..core::cmp::min(b.len() + k.len() + a.len() + 3, width)]); }
+    for (b, k, a) in &entries {
+        println(
+            &format!("{:>w$}  {} {}", b, k, a, w = half)
+                [..core::cmp::min(b.len() + k.len() + a.len() + 3, width)],
+        );
+    }
     true
 }
 
 /// `runcon` — Run with SELinux context
 fn cmd_runcon(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("Usage: runcon CONTEXT COMMAND [args...]"); state.exit_code = 1; return true; }
+    if args.len() < 3 {
+        eprintln_fn("Usage: runcon CONTEXT COMMAND [args...]");
+        state.exit_code = 1;
+        return true;
+    }
     println(&format!("runcon: context='{}' cmd='{}'", args[1], args[2]));
     let rest: Vec<&str> = args[2..].to_vec();
     executor::execute_line(state, &rest.join(" "));
@@ -5660,8 +7669,17 @@ fn cmd_runcon(state: &mut ShellState, args: &[&str]) -> bool {
 /// `stdbuf` — Run with modified buffering
 fn cmd_stdbuf(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
-    while i < args.len() && args[i].starts_with('-') { i += 1; if i < args.len() && (args[i-1] == "-i" || args[i-1] == "-o" || args[i-1] == "-e") { i += 1; } }
-    if i >= args.len() { eprintln_fn("Usage: stdbuf -o MODE COMMAND [args...]"); state.exit_code = 1; return true; }
+    while i < args.len() && args[i].starts_with('-') {
+        i += 1;
+        if i < args.len() && (args[i - 1] == "-i" || args[i - 1] == "-o" || args[i - 1] == "-e") {
+            i += 1;
+        }
+    }
+    if i >= args.len() {
+        eprintln_fn("Usage: stdbuf -o MODE COMMAND [args...]");
+        state.exit_code = 1;
+        return true;
+    }
     let rest: Vec<&str> = args[i..].to_vec();
     executor::execute_line(state, &rest.join(" "));
     true
@@ -5670,14 +7688,24 @@ fn cmd_stdbuf(state: &mut ShellState, args: &[&str]) -> bool {
 /// `dir` / `vdir` — ls variants
 fn cmd_dir_vdir(state: &mut ShellState, args: &[&str]) -> bool {
     let is_vdir = args[0] == "vdir";
-    let mut new_args: Vec<&str> = if is_vdir { alloc::vec!["ls", "-l"] } else { alloc::vec!["ls"] };
-    for a in args.iter().skip(1) { new_args.push(a); }
+    let mut new_args: Vec<&str> = if is_vdir {
+        alloc::vec!["ls", "-l"]
+    } else {
+        alloc::vec!["ls"]
+    };
+    for a in args.iter().skip(1) {
+        new_args.push(a);
+    }
     cmd_ls(state, &new_args)
 }
 
 /// `timeout` — Run command with time limit
 fn cmd_timeout(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("Usage: timeout DURATION COMMAND [args...]"); state.exit_code = 125; return true; }
+    if args.len() < 3 {
+        eprintln_fn("Usage: timeout DURATION COMMAND [args...]");
+        state.exit_code = 125;
+        return true;
+    }
     let _duration = parse_duration_arg(args[1]);
     match sc::sys_fork() {
         Ok(0) => {
@@ -5691,17 +7719,25 @@ fn cmd_timeout(state: &mut ShellState, args: &[&str]) -> bool {
             let _ = sc::sys_wait4(pid as isize, &mut status, 0);
             state.exit_code = status;
         }
-        Err(_) => { state.exit_code = 125; }
+        Err(_) => {
+            state.exit_code = 125;
+        }
     }
     true
 }
 
 fn parse_duration_arg(s: &str) -> u64 {
-    if let Some(n) = s.strip_suffix('s') { n.parse().unwrap_or(0) }
-    else if let Some(n) = s.strip_suffix('m') { n.parse::<u64>().unwrap_or(0) * 60 }
-    else if let Some(n) = s.strip_suffix('h') { n.parse::<u64>().unwrap_or(0) * 3600 }
-    else if let Some(n) = s.strip_suffix('d') { n.parse::<u64>().unwrap_or(0) * 86400 }
-    else { s.parse().unwrap_or(0) }
+    if let Some(n) = s.strip_suffix('s') {
+        n.parse().unwrap_or(0)
+    } else if let Some(n) = s.strip_suffix('m') {
+        n.parse::<u64>().unwrap_or(0) * 60
+    } else if let Some(n) = s.strip_suffix('h') {
+        n.parse::<u64>().unwrap_or(0) * 3600
+    } else if let Some(n) = s.strip_suffix('d') {
+        n.parse::<u64>().unwrap_or(0) * 86400
+    } else {
+        s.parse().unwrap_or(0)
+    }
 }
 
 /// `csplit` — Context split
@@ -5712,15 +7748,38 @@ fn cmd_csplit(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
         match args[i] {
-            "-f" => { i += 1; if i < args.len() { prefix = args[i]; } }
-            "-n" => { i += 1; if i < args.len() { suffix_len = args[i].parse().unwrap_or(2); } }
-            "-s" | "-q" => { quiet = true; }
+            "-f" => {
+                i += 1;
+                if i < args.len() {
+                    prefix = args[i];
+                }
+            }
+            "-n" => {
+                i += 1;
+                if i < args.len() {
+                    suffix_len = args[i].parse().unwrap_or(2);
+                }
+            }
+            "-s" | "-q" => {
+                quiet = true;
+            }
             _ => {}
         }
         i += 1;
     }
-    if args.len() <= i + 1 { eprintln_fn("Usage: csplit [-f prefix] [-n digits] FILE PATTERN..."); state.exit_code = 1; return true; }
-    let data = match executor::load_file(args[i]) { Some(d) => d, None => { eprintln_fn(&format!("csplit: {}: not found", args[i])); state.exit_code = 1; return true; } };
+    if args.len() <= i + 1 {
+        eprintln_fn("Usage: csplit [-f prefix] [-n digits] FILE PATTERN...");
+        state.exit_code = 1;
+        return true;
+    }
+    let data = match executor::load_file(args[i]) {
+        Some(d) => d,
+        None => {
+            eprintln_fn(&format!("csplit: {}: not found", args[i]));
+            state.exit_code = 1;
+            return true;
+        }
+    };
     let text = core::str::from_utf8(&data).unwrap_or("");
     let lines: Vec<&str> = text.lines().collect();
     let patterns: Vec<&str> = args[i + 1..].to_vec();
@@ -5729,20 +7788,43 @@ fn cmd_csplit(state: &mut ShellState, args: &[&str]) -> bool {
     let mut li = 0;
     for pat in &patterns {
         let target = if pat.starts_with('/') {
-            let p = &pat[1..pat.len().min(pat.len())]; lines.iter().skip(li).position(|l| l.contains(p)).map(|pos| li + pos)
-        } else { pat.trim_matches(|c| c == '{' || c == '}').parse::<usize>().ok() };
+            let p = &pat[1..pat.len().min(pat.len())];
+            lines
+                .iter()
+                .skip(li)
+                .position(|l| l.contains(p))
+                .map(|pos| li + pos)
+        } else {
+            pat.trim_matches(|c| c == '{' || c == '}')
+                .parse::<usize>()
+                .ok()
+        };
         if let Some(t) = target {
-            while li < t && li < lines.len() { cur.push(lines[li]); li += 1; }
-            chunks.push(cur.clone()); cur.clear();
+            while li < t && li < lines.len() {
+                cur.push(lines[li]);
+                li += 1;
+            }
+            chunks.push(cur.clone());
+            cur.clear();
         }
     }
-    while li < lines.len() { cur.push(lines[li]); li += 1; }
-    if !cur.is_empty() { chunks.push(cur); }
+    while li < lines.len() {
+        cur.push(lines[li]);
+        li += 1;
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
     for (idx, chunk) in chunks.iter().enumerate() {
         let fname = format!("{}{:0>n$}", prefix, idx, n = suffix_len);
         let content = chunk.join("\n");
-        if !quiet { println(&format!("{}", content.len())); }
-        if let Ok(fd) = sc::sys_open(&fname, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, content.as_bytes()); let _ = sc::sys_close(fd); }
+        if !quiet {
+            println(&format!("{}", content.len()));
+        }
+        if let Ok(fd) = sc::sys_open(&fname, 1 | 0x200 | 0x100) {
+            let _ = sc::sys_write(fd, content.as_bytes());
+            let _ = sc::sys_close(fd);
+        }
     }
     true
 }
@@ -5750,22 +7832,39 @@ fn cmd_csplit(state: &mut ShellState, args: &[&str]) -> bool {
 /// `compress` / `uncompress`
 fn cmd_compress(_state: &mut ShellState, args: &[&str]) -> bool {
     let is_unc = args[0] == "uncompress";
-    if args.len() < 2 { eprintln_fn(&format!("Usage: {} FILE", args[0])); return true; }
+    if args.len() < 2 {
+        eprintln_fn(&format!("Usage: {} FILE", args[0]));
+        return true;
+    }
     for i in 1..args.len() {
         let file = args[i];
         if is_unc {
-            let zfile = if file.ends_with(".Z") { file.to_string() } else { format!("{}.Z", file) };
+            let zfile = if file.ends_with(".Z") {
+                file.to_string()
+            } else {
+                format!("{}.Z", file)
+            };
             if let Some(data) = executor::load_file(&zfile) {
                 let out = zfile.strip_suffix(".Z").unwrap_or(file);
-                if let Ok(fd) = sc::sys_open(out, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, &data); let _ = sc::sys_close(fd); }
+                if let Ok(fd) = sc::sys_open(out, 1 | 0x200 | 0x100) {
+                    let _ = sc::sys_write(fd, &data);
+                    let _ = sc::sys_close(fd);
+                }
                 println(&format!("{} -> {}", zfile, out));
-            } else { eprintln_fn(&format!("uncompress: {}: not found", zfile)); }
+            } else {
+                eprintln_fn(&format!("uncompress: {}: not found", zfile));
+            }
         } else {
             if let Some(data) = executor::load_file(file) {
                 let zfile = format!("{}.Z", file);
-                if let Ok(fd) = sc::sys_open(&zfile, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, &data); let _ = sc::sys_close(fd); }
+                if let Ok(fd) = sc::sys_open(&zfile, 1 | 0x200 | 0x100) {
+                    let _ = sc::sys_write(fd, &data);
+                    let _ = sc::sys_close(fd);
+                }
                 println(&format!("{} -> {}", file, zfile));
-            } else { eprintln_fn(&format!("compress: {}: not found", file)); }
+            } else {
+                eprintln_fn(&format!("compress: {}: not found", file));
+            }
         }
     }
     true
@@ -5773,7 +7872,11 @@ fn cmd_compress(_state: &mut ShellState, args: &[&str]) -> bool {
 
 /// `ar` — Archiver
 fn cmd_ar(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 3 { eprintln_fn("Usage: ar [dprtx] ARCHIVE FILE..."); state.exit_code = 1; return true; }
+    if args.len() < 3 {
+        eprintln_fn("Usage: ar [dprtx] ARCHIVE FILE...");
+        state.exit_code = 1;
+        return true;
+    }
     let op = args[1];
     let archive = args[2];
     match op.chars().next() {
@@ -5783,46 +7886,81 @@ fn cmd_ar(state: &mut ShellState, args: &[&str]) -> bool {
             data.extend_from_slice(b"!<arch>\n");
             for file in &args[3..] {
                 if let Some(content) = executor::load_file(file) {
-                    let hdr = format!("{:<16}{:<12}{:<6}{:<6}{:<8o}{:<10}`\n", file, "0", "0", "0", 0o100644, content.len());
+                    let hdr = format!(
+                        "{:<16}{:<12}{:<6}{:<6}{:<8o}{:<10}`\n",
+                        file,
+                        "0",
+                        "0",
+                        "0",
+                        0o100644,
+                        content.len()
+                    );
                     data.extend_from_slice(hdr.as_bytes());
                     data.extend_from_slice(&content);
-                    if content.len() % 2 != 0 { data.push(b'\n'); }
+                    if content.len() % 2 != 0 {
+                        data.push(b'\n');
+                    }
                 }
             }
-            if let Ok(fd) = sc::sys_open(archive, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, &data); let _ = sc::sys_close(fd); }
+            if let Ok(fd) = sc::sys_open(archive, 1 | 0x200 | 0x100) {
+                let _ = sc::sys_write(fd, &data);
+                let _ = sc::sys_close(fd);
+            }
         }
         Some('t') => {
             if let Some(data) = executor::load_file(archive) {
                 let mut pos = 8;
                 while pos + 60 <= data.len() {
-                    let name = core::str::from_utf8(&data[pos..pos + 16]).unwrap_or("").trim().trim_end_matches('/');
+                    let name = core::str::from_utf8(&data[pos..pos + 16])
+                        .unwrap_or("")
+                        .trim()
+                        .trim_end_matches('/');
                     println(name);
-                    let sz_str = core::str::from_utf8(&data[pos + 48..pos + 58]).unwrap_or("0").trim();
+                    let sz_str = core::str::from_utf8(&data[pos + 48..pos + 58])
+                        .unwrap_or("0")
+                        .trim();
                     let sz: usize = sz_str.parse().unwrap_or(0);
                     pos += 60 + sz + (sz % 2);
                 }
-            } else { state.exit_code = 1; }
+            } else {
+                state.exit_code = 1;
+            }
         }
         Some('x') => {
             if let Some(data) = executor::load_file(archive) {
                 let mut pos = 8;
                 while pos + 60 <= data.len() {
-                    let name = core::str::from_utf8(&data[pos..pos + 16]).unwrap_or("").trim().trim_end_matches('/');
-                    let sz_str = core::str::from_utf8(&data[pos + 48..pos + 58]).unwrap_or("0").trim();
+                    let name = core::str::from_utf8(&data[pos..pos + 16])
+                        .unwrap_or("")
+                        .trim()
+                        .trim_end_matches('/');
+                    let sz_str = core::str::from_utf8(&data[pos + 48..pos + 58])
+                        .unwrap_or("0")
+                        .trim();
                     let sz: usize = sz_str.parse().unwrap_or(0);
                     let fdata = &data[pos + 60..core::cmp::min(pos + 60 + sz, data.len())];
-                    if let Ok(fd) = sc::sys_open(name, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, fdata); let _ = sc::sys_close(fd); }
+                    if let Ok(fd) = sc::sys_open(name, 1 | 0x200 | 0x100) {
+                        let _ = sc::sys_write(fd, fdata);
+                        let _ = sc::sys_close(fd);
+                    }
                     pos += 60 + sz + (sz % 2);
                 }
-            } else { state.exit_code = 1; }
+            } else {
+                state.exit_code = 1;
+            }
         }
-        _ => { eprintln_fn(&format!("ar: unknown op '{}'", op)); state.exit_code = 1; }
+        _ => {
+            eprintln_fn(&format!("ar: unknown op '{}'", op));
+            state.exit_code = 1;
+        }
     }
     true
 }
 
 /// `ex` — POSIX line editor (delegates to ed)
-fn cmd_ex(state: &mut ShellState, args: &[&str]) -> bool { cmd_ed(state, args) }
+fn cmd_ex(state: &mut ShellState, args: &[&str]) -> bool {
+    cmd_ed(state, args)
+}
 
 /// `iconv` — Character set conversion
 fn cmd_iconv(state: &mut ShellState, args: &[&str]) -> bool {
@@ -5831,25 +7969,56 @@ fn cmd_iconv(state: &mut ShellState, args: &[&str]) -> bool {
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
         match args[i] {
-            "-f" => { i += 1; if i < args.len() { from_enc = args[i]; } }
-            "-t" => { i += 1; if i < args.len() { to_enc = args[i]; } }
+            "-f" => {
+                i += 1;
+                if i < args.len() {
+                    from_enc = args[i];
+                }
+            }
+            "-t" => {
+                i += 1;
+                if i < args.len() {
+                    to_enc = args[i];
+                }
+            }
             _ => {}
         }
         i += 1;
     }
     let data = if i < args.len() {
-        match executor::load_file(args[i]) { Some(d) => d, None => { state.exit_code = 1; return true; } }
+        match executor::load_file(args[i]) {
+            Some(d) => d,
+            None => {
+                state.exit_code = 1;
+                return true;
+            }
+        }
     } else {
-        let mut buf = Vec::new(); let mut tmp = [0u8; 4096];
-        loop { match sc::sys_read(0, &mut tmp) { Ok(0) => break, Ok(n) => buf.extend_from_slice(&tmp[..n]), Err(_) => break } }
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        loop {
+            match sc::sys_read(0, &mut tmp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
+        }
         buf
     };
-    let text = if from_enc.to_uppercase().contains("LATIN") || from_enc.to_uppercase().contains("8859") {
-        data.iter().map(|&b| b as char).collect::<String>()
-    } else { core::str::from_utf8(&data).unwrap_or("").to_string() };
-    let output = if to_enc.to_uppercase().contains("LATIN") || to_enc.to_uppercase().contains("8859") {
-        text.chars().map(|c| if c as u32 <= 255 { c as u8 } else { b'?' }).collect::<Vec<u8>>()
-    } else { text.into_bytes() };
+    let text =
+        if from_enc.to_uppercase().contains("LATIN") || from_enc.to_uppercase().contains("8859") {
+            data.iter().map(|&b| b as char).collect::<String>()
+        } else {
+            core::str::from_utf8(&data).unwrap_or("").to_string()
+        };
+    let output =
+        if to_enc.to_uppercase().contains("LATIN") || to_enc.to_uppercase().contains("8859") {
+            text.chars()
+                .map(|c| if c as u32 <= 255 { c as u8 } else { b'?' })
+                .collect::<Vec<u8>>()
+        } else {
+            text.into_bytes()
+        };
     print(core::str::from_utf8(&output).unwrap_or(""));
     true
 }
@@ -5859,18 +8028,44 @@ fn cmd_lex(state: &mut ShellState, args: &[&str]) -> bool {
     let mut output = "lex.yy.c";
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
-        if args[i] == "-o" { i += 1; if i < args.len() { output = args[i]; } }
+        if args[i] == "-o" {
+            i += 1;
+            if i < args.len() {
+                output = args[i];
+            }
+        }
         i += 1;
     }
-    if i >= args.len() { eprintln_fn("Usage: lex [-o output] FILE.l"); state.exit_code = 1; return true; }
-    let data = match executor::load_file(args[i]) { Some(d) => d, None => { state.exit_code = 1; return true; } };
+    if i >= args.len() {
+        eprintln_fn("Usage: lex [-o output] FILE.l");
+        state.exit_code = 1;
+        return true;
+    }
+    let data = match executor::load_file(args[i]) {
+        Some(d) => d,
+        None => {
+            state.exit_code = 1;
+            return true;
+        }
+    };
     let spec = core::str::from_utf8(&data).unwrap_or("");
     let parts: Vec<&str> = spec.split("%%").collect();
     let rules = parts.get(1).unwrap_or(&"");
-    let mut c = String::from("/* Generated by echOS lex */\n#include <stdio.h>\n\nint yylex(void) {\n");
-    for line in rules.lines() { let l = line.trim(); if !l.is_empty() { if let Some(sp) = l.find(char::is_whitespace) { c.push_str(&format!("    /* {} => {} */\n", &l[..sp], l[sp..].trim())); } } }
+    let mut c =
+        String::from("/* Generated by echOS lex */\n#include <stdio.h>\n\nint yylex(void) {\n");
+    for line in rules.lines() {
+        let l = line.trim();
+        if !l.is_empty() {
+            if let Some(sp) = l.find(char::is_whitespace) {
+                c.push_str(&format!("    /* {} => {} */\n", &l[..sp], l[sp..].trim()));
+            }
+        }
+    }
     c.push_str("    return 0;\n}\nint main(void) { return yylex(); }\n");
-    if let Ok(fd) = sc::sys_open(output, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, c.as_bytes()); let _ = sc::sys_close(fd); }
+    if let Ok(fd) = sc::sys_open(output, 1 | 0x200 | 0x100) {
+        let _ = sc::sys_write(fd, c.as_bytes());
+        let _ = sc::sys_close(fd);
+    }
     println(&format!("lex: {} -> {}", args[i], output));
     true
 }
@@ -5880,17 +8075,35 @@ fn cmd_yacc(state: &mut ShellState, args: &[&str]) -> bool {
     let mut prefix = "y";
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
-        if args[i] == "-b" { i += 1; if i < args.len() { prefix = args[i]; } }
+        if args[i] == "-b" {
+            i += 1;
+            if i < args.len() {
+                prefix = args[i];
+            }
+        }
         i += 1;
     }
-    if i >= args.len() { eprintln_fn("Usage: yacc [-b prefix] FILE.y"); state.exit_code = 1; return true; }
-    let data = match executor::load_file(args[i]) { Some(d) => d, None => { state.exit_code = 1; return true; } };
+    if i >= args.len() {
+        eprintln_fn("Usage: yacc [-b prefix] FILE.y");
+        state.exit_code = 1;
+        return true;
+    }
+    let data = match executor::load_file(args[i]) {
+        Some(d) => d,
+        None => {
+            state.exit_code = 1;
+            return true;
+        }
+    };
     let spec = core::str::from_utf8(&data).unwrap_or("");
     let rules = spec.split("%%").nth(1).unwrap_or("");
     let count = rules.lines().filter(|l| l.contains(':')).count();
     let out = format!("{}.tab.c", prefix);
     let c = format!("/* Generated by echOS yacc */\n#include <stdio.h>\n\nint yyparse(void);\nint yylex(void);\nvoid yyerror(const char *s);\n\nint yyparse(void) {{ /* {} rules */ return 0; }}\nvoid yyerror(const char *s) {{ fprintf(stderr, \"%s\\n\", s); }}\n", count);
-    if let Ok(fd) = sc::sys_open(&out, 1 | 0x200 | 0x100) { let _ = sc::sys_write(fd, c.as_bytes()); let _ = sc::sys_close(fd); }
+    if let Ok(fd) = sc::sys_open(&out, 1 | 0x200 | 0x100) {
+        let _ = sc::sys_write(fd, c.as_bytes());
+        let _ = sc::sys_close(fd);
+    }
     println(&format!("yacc: {} -> {} ({} rules)", args[i], out, count));
     true
 }
@@ -5900,21 +8113,46 @@ fn cmd_mailx(state: &mut ShellState, args: &[&str]) -> bool {
     let mut subject = "";
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
-        if args[i] == "-s" { i += 1; if i < args.len() { subject = args[i]; } }
+        if args[i] == "-s" {
+            i += 1;
+            if i < args.len() {
+                subject = args[i];
+            }
+        }
         i += 1;
     }
     if i < args.len() {
         println(&format!("mailx: to='{}' subject='{}'", args[i], subject));
-        let mut msg = String::new(); let mut buf = [0u8; 1024];
-        loop { match sc::sys_read(0, &mut buf) { Ok(0) => break, Ok(n) => { let t = core::str::from_utf8(&buf[..n]).unwrap_or("").trim(); if t == "." { break; } msg.push_str(t); msg.push('\n'); } Err(_) => break } }
+        let mut msg = String::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match sc::sys_read(0, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let t = core::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+                    if t == "." {
+                        break;
+                    }
+                    msg.push_str(t);
+                    msg.push('\n');
+                }
+                Err(_) => break,
+            }
+        }
         println(&format!("mailx: sent ({} bytes)", msg.len()));
-    } else { println("No mail."); }
+    } else {
+        println("No mail.");
+    }
     true
 }
 
 /// `talk` — Terminal chat
 fn cmd_talk(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("Usage: talk user [tty]"); state.exit_code = 1; return true; }
+    if args.len() < 2 {
+        eprintln_fn("Usage: talk user [tty]");
+        state.exit_code = 1;
+        return true;
+    }
     println(&format!("talk: connecting to '{}'...", args[1]));
     println("[Connection not available in single-user mode]");
     true
@@ -5925,73 +8163,164 @@ fn cmd_fc(state: &mut ShellState, args: &[&str]) -> bool {
     let mut list_only = false;
     let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
-        match args[i] { "-l" => { list_only = true; } "-e" => { i += 1; } _ => {} }
+        match args[i] {
+            "-l" => {
+                list_only = true;
+            }
+            "-e" => {
+                i += 1;
+            }
+            _ => {}
+        }
         i += 1;
     }
-    let first = if i < args.len() { args[i].parse::<isize>().unwrap_or(-16) } else { -16 };
+    let first = if i < args.len() {
+        args[i].parse::<isize>().unwrap_or(-16)
+    } else {
+        -16
+    };
     let history_list = state.history.list();
     let len = history_list.len() as isize;
-    let start = if first < 0 { (len + first).max(0) as usize } else { first as usize };
+    let start = if first < 0 {
+        (len + first).max(0) as usize
+    } else {
+        first as usize
+    };
     if list_only {
-        for idx in start..history_list.len() { println(&format!("{}\t{}", idx + 1, &history_list[idx])); }
+        for idx in start..history_list.len() {
+            println(&format!("{}\t{}", idx + 1, &history_list[idx]));
+        }
     } else if !history_list.is_empty() {
         let cmd = history_list[history_list.len() - 1].clone();
         println(&format!("fc: re-executing: {}", cmd));
         executor::execute_line(state, &cmd);
-    } else { eprintln_fn("fc: no history"); state.exit_code = 1; }
+    } else {
+        eprintln_fn("fc: no history");
+        state.exit_code = 1;
+    }
     true
 }
 
 /// `coproc` — Background coprocess
 fn cmd_coproc(state: &mut ShellState, args: &[&str]) -> bool {
-    if args.len() < 2 { eprintln_fn("Usage: coproc [NAME] COMMAND"); state.exit_code = 1; return true; }
-    let (name, start) = if args.len() >= 3 && !args[1].starts_with('-') { (args[1], 2) } else { ("COPROC", 1) };
-    let mut in_pipe = [0usize; 2]; let mut out_pipe = [0usize; 2];
-    if sc::sys_pipe(&mut in_pipe).is_err() || sc::sys_pipe(&mut out_pipe).is_err() { state.exit_code = 1; return true; }
+    if args.len() < 2 {
+        eprintln_fn("Usage: coproc [NAME] COMMAND");
+        state.exit_code = 1;
+        return true;
+    }
+    let (name, start) = if args.len() >= 3 && !args[1].starts_with('-') {
+        (args[1], 2)
+    } else {
+        ("COPROC", 1)
+    };
+    let mut in_pipe = [0usize; 2];
+    let mut out_pipe = [0usize; 2];
+    if sc::sys_pipe(&mut in_pipe).is_err() || sc::sys_pipe(&mut out_pipe).is_err() {
+        state.exit_code = 1;
+        return true;
+    }
     let cmd_args: Vec<&str> = args[start..].to_vec();
     match sc::sys_fork() {
         Ok(0) => {
-            let _ = sc::sys_close(in_pipe[1]); let _ = sc::sys_close(out_pipe[0]);
-            let _ = sc::sys_dup2(in_pipe[0], 0); let _ = sc::sys_dup2(out_pipe[1], 1);
-            let _ = sc::sys_close(in_pipe[0]); let _ = sc::sys_close(out_pipe[1]);
+            let _ = sc::sys_close(in_pipe[1]);
+            let _ = sc::sys_close(out_pipe[0]);
+            let _ = sc::sys_dup2(in_pipe[0], 0);
+            let _ = sc::sys_dup2(out_pipe[1], 1);
+            let _ = sc::sys_close(in_pipe[0]);
+            let _ = sc::sys_close(out_pipe[1]);
             let envp: Vec<&str> = Vec::new();
-            let _ = sc::sys_execve(cmd_args[0], &cmd_args, &envp); sc::sys_exit(127);
+            let _ = sc::sys_execve(cmd_args[0], &cmd_args, &envp);
+            sc::sys_exit(127);
         }
         Ok(pid) => {
-            let _ = sc::sys_close(in_pipe[0]); let _ = sc::sys_close(out_pipe[1]);
+            let _ = sc::sys_close(in_pipe[0]);
+            let _ = sc::sys_close(out_pipe[1]);
             state.env.set(&format!("{}_PID", name), &format!("{}", pid));
-            state.env.set(&format!("{}[0]", name), &format!("{}", out_pipe[0]));
-            state.env.set(&format!("{}[1]", name), &format!("{}", in_pipe[1]));
+            state
+                .env
+                .set(&format!("{}[0]", name), &format!("{}", out_pipe[0]));
+            state
+                .env
+                .set(&format!("{}[1]", name), &format!("{}", in_pipe[1]));
             println(&format!("[1] {}", pid));
         }
-        Err(_) => { state.exit_code = 1; }
+        Err(_) => {
+            state.exit_code = 1;
+        }
     }
     true
 }
 
 /// `readarray` / `mapfile` — Read lines into array
 fn cmd_readarray(state: &mut ShellState, args: &[&str]) -> bool {
-    let mut delim = '\n'; let mut count = 0usize; let mut skip = 0usize; let mut strip = false;
-    let mut var = "MAPFILE"; let mut i = 1;
+    let mut delim = '\n';
+    let mut count = 0usize;
+    let mut skip = 0usize;
+    let mut strip = false;
+    let mut var = "MAPFILE";
+    let mut i = 1;
     while i < args.len() && args[i].starts_with('-') {
         match args[i] {
-            "-d" => { i += 1; if i < args.len() { delim = args[i].chars().next().unwrap_or('\n'); } }
-            "-n" => { i += 1; if i < args.len() { count = args[i].parse().unwrap_or(0); } }
-            "-O" => { i += 1; if i < args.len() { skip = args[i].parse().unwrap_or(0); } }
-            "-t" => { strip = true; }
+            "-d" => {
+                i += 1;
+                if i < args.len() {
+                    delim = args[i].chars().next().unwrap_or('\n');
+                }
+            }
+            "-n" => {
+                i += 1;
+                if i < args.len() {
+                    count = args[i].parse().unwrap_or(0);
+                }
+            }
+            "-O" => {
+                i += 1;
+                if i < args.len() {
+                    skip = args[i].parse().unwrap_or(0);
+                }
+            }
+            "-t" => {
+                strip = true;
+            }
             _ => {}
         }
         i += 1;
     }
-    if i < args.len() { var = args[i]; }
-    let mut all = Vec::new(); let mut buf = [0u8; 65536];
-    loop { match sc::sys_read(0, &mut buf) { Ok(0) => break, Ok(n) => all.extend_from_slice(&buf[..n]), Err(_) => break } }
+    if i < args.len() {
+        var = args[i];
+    }
+    let mut all = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        match sc::sys_read(0, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => all.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
     let text = core::str::from_utf8(&all).unwrap_or("");
-    let lines: Vec<String> = text.split(delim).map(|l| if strip { l.trim_end_matches(delim).to_string() } else { l.to_string() }).collect();
+    let lines: Vec<String> = text
+        .split(delim)
+        .map(|l| {
+            if strip {
+                l.trim_end_matches(delim).to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
     let mut arr: Vec<String> = Vec::new();
-    for _ in 0..skip { arr.push(String::new()); }
-    let limit = if count > 0 { core::cmp::min(count, lines.len()) } else { lines.len() };
-    for l in lines.iter().take(limit) { arr.push(l.clone()); }
+    for _ in 0..skip {
+        arr.push(String::new());
+    }
+    let limit = if count > 0 {
+        core::cmp::min(count, lines.len())
+    } else {
+        lines.len()
+    };
+    for l in lines.iter().take(limit) {
+        arr.push(l.clone());
+    }
     state.env.set_array(var, arr);
     true
 }
@@ -5999,41 +8328,61 @@ fn cmd_readarray(state: &mut ShellState, args: &[&str]) -> bool {
 /// `compgen` / `complete` — Completion support
 fn cmd_comp(state: &mut ShellState, args: &[&str]) -> bool {
     if args[0] == "compgen" {
-        let mut comp_type = "command"; let mut word = ""; let mut i = 1;
+        let mut comp_type = "command";
+        let mut word = "";
+        let mut i = 1;
         while i < args.len() && args[i].starts_with('-') {
-            match args[i] { "-c" => comp_type = "command", "-d" => comp_type = "directory", "-f" => comp_type = "file", "-v" => comp_type = "variable", "-b" => comp_type = "builtin", _ => {} }
+            match args[i] {
+                "-c" => comp_type = "command",
+                "-d" => comp_type = "directory",
+                "-f" => comp_type = "file",
+                "-v" => comp_type = "variable",
+                "-b" => comp_type = "builtin",
+                _ => {}
+            }
             i += 1;
         }
-        if i < args.len() { word = args[i]; }
+        if i < args.len() {
+            word = args[i];
+        }
         match comp_type {
             "builtin" => {
-                for b in &["help","echo","printf","cd","pwd","ls","cat","grep","sort","find","sed","awk","cp","mv","rm","mkdir","ps","kill","export","set","env"] {
-                    if word.is_empty() || b.starts_with(word) { println(b); }
+                for b in &[
+                    "help", "echo", "printf", "cd", "pwd", "ls", "cat", "grep", "sort", "find",
+                    "sed", "awk", "cp", "mv", "rm", "mkdir", "ps", "kill", "export", "set", "env",
+                ] {
+                    if word.is_empty() || b.starts_with(word) {
+                        println(b);
+                    }
                 }
             }
-            "variable" => { for (k, _) in state.env.list() { if word.is_empty() || k.starts_with(word) { println(&k); } } }
+            "variable" => {
+                for (k, _) in state.env.list() {
+                    if word.is_empty() || k.starts_with(word) {
+                        println(&k);
+                    }
+                }
+            }
             _ => {
                 let mut buf = [0u8; 8192];
                 let cwd = state.env.get("PWD").unwrap_or(String::from("/"));
                 if let Ok(fd) = sc::sys_open(&cwd, 0) {
                     if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-                        let mut off = 0;
-                        while off < n {
-                            let rl = u16::from_le_bytes([buf[off+8], buf[off+9]]) as usize;
-                            let nl = u16::from_le_bytes([buf[off+10], buf[off+11]]) as usize;
-                            if nl > 0 && off + 18 + nl <= n {
-                                if let Ok(name) = core::str::from_utf8(&buf[off+18..off+18+nl]) {
-                                    let name = name.trim_end_matches('\0');
-                                    if name != "." && name != ".." && (word.is_empty() || name.starts_with(word)) { println(name); }
-                                }
+                        sc::for_each_dirent64(&buf, n, |name, _| {
+                            if name != "."
+                                && name != ".."
+                                && (word.is_empty() || name.starts_with(word))
+                            {
+                                println(name);
                             }
-                            if rl == 0 { break; } off += rl;
-                        }
+                        });
                     }
                     let _ = sc::sys_close(fd);
                 }
             }
         }
-    } else { println("complete: no completions defined"); }
+    } else {
+        println("complete: no completions defined");
+    }
     true
 }

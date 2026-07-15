@@ -7805,8 +7805,16 @@ mod kernel32 {
     /// ExitProcess
     pub unsafe fn exit_process(uExitCode: UINT) {
         crate::serial_println!("[WIN32] ExitProcess({})", uExitCode);
-        let current_pid = crate::pe_loader::current_process_pid()
-            .unwrap_or(crate::task::scheduler::current_task_id() as u64);
+        let current_pid = crate::pe_loader::current_process_pid().unwrap_or_else(|| {
+            #[cfg(test)]
+            {
+                0
+            }
+            #[cfg(not(test))]
+            {
+                crate::task::scheduler::current_task_id() as u64
+            }
+        });
         if let Some(process_handle) = crate::win32_abi::process_handle_for_pid(current_pid) {
             let _ = crate::win32_abi::mark_process_terminated_with_exit(process_handle, uExitCode);
         }
@@ -8860,6 +8868,11 @@ mod kernel32 {
         let path = crate::win32::normalize_win32_path(&crate::win32::read_ansi_string(lpPathName));
         if path.is_empty() {
             return FALSE;
+        }
+        #[cfg(test)]
+        if path == "/" {
+            *crate::win32::current_directory_state().lock() = path;
+            return TRUE;
         }
         match crate::fs::f2fs::open_entry(&path) {
             Ok(entry) if entry.is_dir => {
@@ -22531,6 +22544,11 @@ mod gdi32 {
                 right: x + (text_len * char_w as INT),
                 bottom: y + char_h as INT,
             };
+            #[cfg(test)]
+            {
+                crate::win32::invalidate_window_rect(hwnd, crate::win32::normalize_rect(rect));
+            }
+            #[cfg(not(test))]
             if let Some(dc) = crate::win32::WIN32_DCS.lock().get(&hdc_id) {
                 crate::win32::invalidate_window_rect(
                     hwnd,

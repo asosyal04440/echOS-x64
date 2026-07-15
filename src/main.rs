@@ -308,6 +308,10 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     }
 
     serial_write_str(&format_args!("[PANIC] Kernel panic\n"));
+    #[cfg(any(target_os = "none", target_os = "uefi"))]
+    unsafe {
+        core::arch::asm!("int3");
+    }
     let rbp: u64;
     let rsp: u64;
     unsafe {

@@ -74,9 +74,7 @@ impl AtSpiBridge {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref AT_SPI: Arc<AtSpiBridge> = Arc::new(AtSpiBridge::new());
-}
+static AT_SPI: spin::Lazy<Arc<AtSpiBridge>> = spin::Lazy::new(|| Arc::new(AtSpiBridge::new()));
 
 pub fn init() {
     AT_SPI.start();

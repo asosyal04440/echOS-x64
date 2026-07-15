@@ -1,6 +1,6 @@
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use alloc::format;
 
 use crate::shell_syscall as sc;
 
@@ -9,26 +9,28 @@ pub enum Token {
     Word(String),
     Pipe,
     Semi,
-    And,    // &&
-    Or,     // ||
-    RedirectOut,     // >
-    RedirectAppend,  // >>
-    RedirectIn,      // <
-    RedirectHere,    // <<
+    And,               // &&
+    Or,                // ||
+    RedirectOut,       // >
+    RedirectAppend,    // >>
+    RedirectIn,        // <
+    RedirectHere,      // <<
     RedirectHereStrip, // <<-
-    RedirectErr,     // 2>
+    RedirectErr,       // 2>
     RedirectErrAppend, // 2>>
-    RedirectAll,     // &>
-    Ampersand,       // & (background)
-    LParen, RParen,
-    LBrace, RBrace,
-    DoubleBracket,     // [[
-    DoubleBracketClose,// ]]
-    DoubleParen,       // ((
-    DoubleParenClose,  // ))
-    HereString,        // <<<
-    Clobber,           // >|
-    RedirectReadWrite, // <>
+    RedirectAll,       // &>
+    Ampersand,         // & (background)
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    DoubleBracket,      // [[
+    DoubleBracketClose, // ]]
+    DoubleParen,        // ((
+    DoubleParenClose,   // ))
+    HereString,         // <<<
+    Clobber,            // >|
+    RedirectReadWrite,  // <>
     Newline,
 }
 
@@ -40,103 +42,213 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
     while i < len {
         match chars[i] {
-            ' ' | '\t' => { i += 1; }
-            '\n' => { tokens.push(Token::Newline); i += 1; }
-            '\\' if i + 1 < len && chars[i + 1] == '\n' => { i += 2; }
+            ' ' | '\t' => {
+                i += 1;
+            }
+            '\n' => {
+                tokens.push(Token::Newline);
+                i += 1;
+            }
+            '\\' if i + 1 < len && chars[i + 1] == '\n' => {
+                i += 2;
+            }
             '\\' if i + 1 < len => {
                 i += 1;
                 let mut w = String::new();
                 w.push(chars[i]);
                 i += 1;
                 while i < len && !is_delimiter(chars[i]) {
-                    if chars[i] == '\\' && i + 1 < len { i += 1; w.push(chars[i]); }
-                    else { w.push(chars[i]); }
+                    if chars[i] == '\\' && i + 1 < len {
+                        i += 1;
+                        w.push(chars[i]);
+                    } else {
+                        w.push(chars[i]);
+                    }
                     i += 1;
                 }
                 tokens.push(Token::Word(w));
             }
-            '#' => { while i < len && chars[i] != '\n' { i += 1; } }
+            '#' => {
+                while i < len && chars[i] != '\n' {
+                    i += 1;
+                }
+            }
             '\'' => {
                 i += 1;
                 let mut w = String::new();
-                while i < len && chars[i] != '\'' { w.push(chars[i]); i += 1; }
-                if i < len { i += 1; }
+                while i < len && chars[i] != '\'' {
+                    w.push(chars[i]);
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
                 tokens.push(Token::Word(w));
             }
             '"' => {
                 i += 1;
                 let mut w = String::new();
                 while i < len && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < len { i += 1; w.push(chars[i]); }
-                    else { w.push(chars[i]); }
+                    if chars[i] == '\\' && i + 1 < len {
+                        i += 1;
+                        w.push(chars[i]);
+                    } else {
+                        w.push(chars[i]);
+                    }
                     i += 1;
                 }
-                if i < len { i += 1; }
+                if i < len {
+                    i += 1;
+                }
                 tokens.push(Token::Word(w));
             }
-            '|' => { if i + 1 < len && chars[i + 1] == '|' { tokens.push(Token::Or); i += 2; } else { tokens.push(Token::Pipe); i += 1; } }
-            '&' => {
-                if i + 1 < len && chars[i + 1] == '>' { tokens.push(Token::RedirectAll); i += 2; }
-                else if i + 1 < len && chars[i + 1] == '&' { tokens.push(Token::And); i += 2; }
-                else { tokens.push(Token::Ampersand); i += 1; }
+            '|' => {
+                if i + 1 < len && chars[i + 1] == '|' {
+                    tokens.push(Token::Or);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Pipe);
+                    i += 1;
+                }
             }
-            ';' => { tokens.push(Token::Semi); i += 1; }
+            '&' => {
+                if i + 1 < len && chars[i + 1] == '>' {
+                    tokens.push(Token::RedirectAll);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '&' {
+                    tokens.push(Token::And);
+                    i += 2;
+                } else {
+                    tokens.push(Token::Ampersand);
+                    i += 1;
+                }
+            }
+            ';' => {
+                tokens.push(Token::Semi);
+                i += 1;
+            }
             '(' => {
-                if i + 1 < len && chars[i + 1] == '(' { tokens.push(Token::DoubleParen); i += 2; }
-                else { tokens.push(Token::LParen); i += 1; }
+                if i + 1 < len && chars[i + 1] == '(' {
+                    tokens.push(Token::DoubleParen);
+                    i += 2;
+                } else {
+                    tokens.push(Token::LParen);
+                    i += 1;
+                }
             }
             ')' => {
-                if i + 1 < len && chars[i + 1] == ')' { tokens.push(Token::DoubleParenClose); i += 2; }
-                else { tokens.push(Token::RParen); i += 1; }
+                if i + 1 < len && chars[i + 1] == ')' {
+                    tokens.push(Token::DoubleParenClose);
+                    i += 2;
+                } else {
+                    tokens.push(Token::RParen);
+                    i += 1;
+                }
             }
-            '{' => { tokens.push(Token::LBrace); i += 1; }
-            '}' => { tokens.push(Token::RBrace); i += 1; }
+            '{' => {
+                tokens.push(Token::LBrace);
+                i += 1;
+            }
+            '}' => {
+                tokens.push(Token::RBrace);
+                i += 1;
+            }
             '[' => {
-                if i + 1 < len && chars[i + 1] == '[' { tokens.push(Token::DoubleBracket); i += 2; }
-                else { let mut w = String::new(); w.push('['); i += 1; tokens.push(Token::Word(w)); }
+                if i + 1 < len && chars[i + 1] == '[' {
+                    tokens.push(Token::DoubleBracket);
+                    i += 2;
+                } else {
+                    let mut w = String::new();
+                    w.push('[');
+                    i += 1;
+                    tokens.push(Token::Word(w));
+                }
             }
             ']' => {
-                if i + 1 < len && chars[i + 1] == ']' { tokens.push(Token::DoubleBracketClose); i += 2; }
-                else { let mut w = String::new(); w.push(']'); i += 1; tokens.push(Token::Word(w)); }
+                if i + 1 < len && chars[i + 1] == ']' {
+                    tokens.push(Token::DoubleBracketClose);
+                    i += 2;
+                } else {
+                    let mut w = String::new();
+                    w.push(']');
+                    i += 1;
+                    tokens.push(Token::Word(w));
+                }
             }
             '>' => {
-                if i + 1 < len && chars[i + 1] == '|' { tokens.push(Token::Clobber); i += 2; }
-                else if i + 1 < len && chars[i + 1] == '>' { tokens.push(Token::RedirectAppend); i += 2; }
-                else { tokens.push(Token::RedirectOut); i += 1; }
+                if i + 1 < len && chars[i + 1] == '|' {
+                    tokens.push(Token::Clobber);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '>' {
+                    tokens.push(Token::RedirectAppend);
+                    i += 2;
+                } else {
+                    tokens.push(Token::RedirectOut);
+                    i += 1;
+                }
             }
             '<' => {
-                if i + 2 < len && chars[i + 1] == '<' && chars[i + 2] == '<' { tokens.push(Token::HereString); i += 3; }
-                else if i + 1 < len && chars[i + 1] == '<' && i + 2 < len && chars[i + 2] == '-' { tokens.push(Token::RedirectHereStrip); i += 3; }
-                else if i + 1 < len && chars[i + 1] == '<' { tokens.push(Token::RedirectHere); i += 2; }
-                else if i + 1 < len && chars[i + 1] == '>' { tokens.push(Token::RedirectReadWrite); i += 2; }
-                else { tokens.push(Token::RedirectIn); i += 1; }
+                if i + 2 < len && chars[i + 1] == '<' && chars[i + 2] == '<' {
+                    tokens.push(Token::HereString);
+                    i += 3;
+                } else if i + 1 < len && chars[i + 1] == '<' && i + 2 < len && chars[i + 2] == '-' {
+                    tokens.push(Token::RedirectHereStrip);
+                    i += 3;
+                } else if i + 1 < len && chars[i + 1] == '<' {
+                    tokens.push(Token::RedirectHere);
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '>' {
+                    tokens.push(Token::RedirectReadWrite);
+                    i += 2;
+                } else {
+                    tokens.push(Token::RedirectIn);
+                    i += 1;
+                }
             }
             '2' if i + 1 < len && chars[i + 1] == '>' => {
                 if i + 2 < len && chars[i + 2] == '&' {
                     let mut target = String::from("2>&");
                     i += 3;
-                    while i < len && (chars[i].is_ascii_digit() || chars[i] == '-') { target.push(chars[i]); i += 1; }
+                    while i < len && (chars[i].is_ascii_digit() || chars[i] == '-') {
+                        target.push(chars[i]);
+                        i += 1;
+                    }
                     tokens.push(Token::Word(target));
-                } else if i + 2 < len && chars[i + 2] == '>' { tokens.push(Token::RedirectErrAppend); i += 3; }
-                else { tokens.push(Token::RedirectErr); i += 2; }
+                } else if i + 2 < len && chars[i + 2] == '>' {
+                    tokens.push(Token::RedirectErrAppend);
+                    i += 3;
+                } else {
+                    tokens.push(Token::RedirectErr);
+                    i += 2;
+                }
             }
             '`' => {
                 i += 1;
                 let mut cmd = String::new();
                 while i < len && chars[i] != '`' {
-                    if chars[i] == '\\' && i + 1 < len { i += 1; cmd.push(chars[i]); }
-                    else { cmd.push(chars[i]); }
+                    if chars[i] == '\\' && i + 1 < len {
+                        i += 1;
+                        cmd.push(chars[i]);
+                    } else {
+                        cmd.push(chars[i]);
+                    }
                     i += 1;
                 }
-                if i < len { i += 1; }
+                if i < len {
+                    i += 1;
+                }
                 tokens.push(Token::Word(cmd));
             }
             _ => {
                 let mut w = String::new();
                 let mut in_dquote = false;
                 let mut in_squote = false;
-                if !in_squote && !in_dquote && i + 1 < len && (chars[i] == '*' || chars[i] == '+' || chars[i] == '@' || chars[i] == '!')
-                    && chars[i + 1] == '(' {
+                if !in_squote
+                    && !in_dquote
+                    && i + 1 < len
+                    && (chars[i] == '*' || chars[i] == '+' || chars[i] == '@' || chars[i] == '!')
+                    && chars[i + 1] == '('
+                {
                     let opener = chars[i];
                     i += 2;
                     let mut depth = 1;
@@ -144,25 +256,58 @@ pub fn tokenize(input: &str) -> Vec<Token> {
                     w.push('(');
                     while i < len && depth > 0 {
                         let c = chars[i];
-                        if c == '(' { depth += 1; w.push(c); i += 1; }
-                        else if c == ')' { depth -= 1; if depth > 0 { w.push(c); } i += 1; }
-                        else if c == '\\' && i + 1 < len { i += 1; w.push(chars[i]); i += 1; }
-                        else { w.push(c); i += 1; }
+                        if c == '(' {
+                            depth += 1;
+                            w.push(c);
+                            i += 1;
+                        } else if c == ')' {
+                            depth -= 1;
+                            if depth > 0 {
+                                w.push(c);
+                            }
+                            i += 1;
+                        } else if c == '\\' && i + 1 < len {
+                            i += 1;
+                            w.push(chars[i]);
+                            i += 1;
+                        } else {
+                            w.push(c);
+                            i += 1;
+                        }
                     }
-                    if !w.is_empty() { tokens.push(Token::Word(w)); }
+                    if !w.is_empty() {
+                        tokens.push(Token::Word(w));
+                    }
                 } else {
-                while i < len {
-                    let c = chars[i];
-                    if c == '\'' && !in_dquote { in_squote = !in_squote; i += 1; continue; }
-                    if c == '"' && !in_squote { in_dquote = !in_dquote; i += 1; continue; }
-                    if !in_squote && !in_dquote {
-                        if is_delimiter(c) { break; }
-                        if c == '\\' && i + 1 < len { i += 1; w.push(chars[i]); i += 1; continue; }
+                    while i < len {
+                        let c = chars[i];
+                        if c == '\'' && !in_dquote {
+                            in_squote = !in_squote;
+                            i += 1;
+                            continue;
+                        }
+                        if c == '"' && !in_squote {
+                            in_dquote = !in_dquote;
+                            i += 1;
+                            continue;
+                        }
+                        if !in_squote && !in_dquote {
+                            if is_delimiter(c) {
+                                break;
+                            }
+                            if c == '\\' && i + 1 < len {
+                                i += 1;
+                                w.push(chars[i]);
+                                i += 1;
+                                continue;
+                            }
+                        }
+                        w.push(c);
+                        i += 1;
                     }
-                    w.push(c);
-                    i += 1;
-                }
-                if !w.is_empty() { tokens.push(Token::Word(w)); }
+                    if !w.is_empty() {
+                        tokens.push(Token::Word(w));
+                    }
                 }
             }
         }
@@ -171,7 +316,10 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 }
 
 fn is_delimiter(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n' | '|' | ';' | '&' | '>' | '<' | '(' | ')' | '{' | '}')
+    matches!(
+        c,
+        ' ' | '\t' | '\n' | '|' | ';' | '&' | '>' | '<' | '(' | ')' | '{' | '}'
+    )
 }
 
 // ============================================================================
@@ -181,19 +329,27 @@ fn is_delimiter(c: char) -> bool {
 pub fn expand_globs(args: &[String]) -> Vec<String> {
     let mut result = Vec::new();
     for arg in args {
-        if arg.starts_with("@(") || arg.starts_with("+(") || arg.starts_with("*(") || arg.starts_with("!(") {
+        if arg.starts_with("@(")
+            || arg.starts_with("+(")
+            || arg.starts_with("*(")
+            || arg.starts_with("!(")
+        {
             let expanded = expand_extglob(arg);
             if expanded.is_empty() {
                 result.push(arg.clone());
             } else {
-                for m in expanded { result.push(m); }
+                for m in expanded {
+                    result.push(m);
+                }
             }
         } else if arg.contains('*') || arg.contains('?') || arg.contains('[') {
             let matches = glob_expand(arg);
             if matches.is_empty() {
                 result.push(arg.clone());
             } else {
-                for m in matches { result.push(m); }
+                for m in matches {
+                    result.push(m);
+                }
             }
         } else {
             result.push(arg.clone());
@@ -204,30 +360,52 @@ pub fn expand_globs(args: &[String]) -> Vec<String> {
 
 fn parse_extglob(pattern: &str) -> Option<(char, Vec<String>)> {
     let bytes = pattern.as_bytes();
-    if bytes.len() < 3 { return None; }
+    if bytes.len() < 3 {
+        return None;
+    }
     let op = bytes[0] as char;
-    if !matches!(op, '@' | '+' | '*' | '!') || bytes[1] != b'(' { return None; }
+    if !matches!(op, '@' | '+' | '*' | '!') || bytes[1] != b'(' {
+        return None;
+    }
     let mut depth = 1;
     let mut i = 2;
     while i < bytes.len() && depth > 0 {
-        if bytes[i] == b'(' { depth += 1; }
-        else if bytes[i] == b')' { depth -= 1; }
+        if bytes[i] == b'(' {
+            depth += 1;
+        } else if bytes[i] == b')' {
+            depth -= 1;
+        }
         i += 1;
     }
-    if depth != 0 { return None; }
+    if depth != 0 {
+        return None;
+    }
     let content = &pattern[2..i - 1];
     let mut alternatives = Vec::new();
     let mut current = String::new();
     let mut d = 0;
     for c in content.chars() {
         match c {
-            '(' => { d += 1; current.push(c); }
-            ')' => { d -= 1; current.push(c); }
-            '|' if d == 0 => { alternatives.push(current.clone()); current.clear(); }
-            _ => { current.push(c); }
+            '(' => {
+                d += 1;
+                current.push(c);
+            }
+            ')' => {
+                d -= 1;
+                current.push(c);
+            }
+            '|' if d == 0 => {
+                alternatives.push(current.clone());
+                current.clear();
+            }
+            _ => {
+                current.push(c);
+            }
         }
     }
-    if !current.is_empty() { alternatives.push(current); }
+    if !current.is_empty() {
+        alternatives.push(current);
+    }
     Some((op, alternatives))
 }
 
@@ -239,7 +417,9 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                 for alt in &alternatives {
                     if alt.contains('*') || alt.contains('?') || alt.contains('[') {
                         let m = glob_expand(alt);
-                        for x in m { result.push(x); }
+                        for x in m {
+                            result.push(x);
+                        }
                     } else {
                         result.push(alt.clone());
                     }
@@ -249,7 +429,9 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                 for alt in &alternatives {
                     if alt.contains('*') || alt.contains('?') || alt.contains('[') {
                         let m = glob_expand(alt);
-                        for x in m { result.push(x); }
+                        for x in m {
+                            result.push(x);
+                        }
                     } else {
                         result.push(alt.clone());
                     }
@@ -260,7 +442,9 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                 for alt in &alternatives {
                     if alt.contains('*') || alt.contains('?') || alt.contains('[') {
                         let m = glob_expand(alt);
-                        for x in m { excluded.push(x); }
+                        for x in m {
+                            excluded.push(x);
+                        }
                     } else {
                         excluded.push(alt.clone());
                     }
@@ -268,22 +452,12 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                 let mut buf = [0u8; 8192];
                 if let Ok(fd) = sc::sys_open(".", 0) {
                     if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-                        let mut offset = 0;
-                        while offset < n {
-                            let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                            let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                            if name_len > 0 {
-                                let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                                if let Ok(name) = core::str::from_utf8(name_bytes) {
-                                    let name = name.trim_end_matches('\0');
-                                    if name != "." && name != ".." && !excluded.contains(&name.to_string()) {
-                                        result.push(name.to_string());
-                                    }
-                                }
+                        sc::for_each_dirent64(&buf, n, |name, _| {
+                            if name != "." && name != ".." && !excluded.contains(&name.to_string())
+                            {
+                                result.push(name.to_string());
                             }
-                            if rec_len == 0 { break; }
-                            offset += rec_len;
-                        }
+                        });
                     }
                     let _ = sc::sys_close(fd);
                 }
@@ -292,7 +466,9 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                 for alt in &alternatives {
                     if alt.contains('*') || alt.contains('?') || alt.contains('[') {
                         let m = glob_expand(alt);
-                        for x in &m { result.push(x.clone()); }
+                        for x in &m {
+                            result.push(x.clone());
+                        }
                         if !m.is_empty() {
                             let mut expanded = true;
                             while expanded {
@@ -305,21 +481,27 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                                             let m = glob_expand(&candidate);
                                             if !m.is_empty() {
                                                 for x in m {
-                                                    if !result.contains(&x) && !new_matches.contains(&x) {
+                                                    if !result.contains(&x)
+                                                        && !new_matches.contains(&x)
+                                                    {
                                                         new_matches.push(x.clone());
                                                         expanded = true;
                                                     }
                                                 }
                                             }
                                         } else {
-                                            if !result.contains(&candidate) && !new_matches.contains(&candidate) {
+                                            if !result.contains(&candidate)
+                                                && !new_matches.contains(&candidate)
+                                            {
                                                 new_matches.push(candidate.clone());
                                                 expanded = true;
                                             }
                                         }
                                     }
                                 }
-                                for x in new_matches { result.push(x); }
+                                for x in new_matches {
+                                    result.push(x);
+                                }
                             }
                         }
                     } else {
@@ -331,11 +513,15 @@ fn expand_extglob(pattern: &str) -> Vec<String> {
                             let mut new_items = Vec::new();
                             for item in &current {
                                 let candidate = format!("{}/{}", item, alt);
-                                if !current.contains(&candidate) && !new_items.contains(&candidate) {
+                                if !current.contains(&candidate) && !new_items.contains(&candidate)
+                                {
                                     new_items.push(candidate);
                                 }
                             }
-                            for x in new_items { current.push(x.clone()); result.push(x); }
+                            for x in new_items {
+                                current.push(x.clone());
+                                result.push(x);
+                            }
                         }
                     }
                 }
@@ -362,22 +548,11 @@ fn glob_expand(pattern: &str) -> Vec<String> {
     let mut buf = [0u8; 8192];
     if let Ok(fd) = sc::sys_open(prefix.trim_end_matches('/'), 0) {
         if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-            let mut offset = 0;
-            while offset < n {
-                let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                if name_len > 0 {
-                    let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        let name = name.trim_end_matches('\0');
-                        if name != "." && name != ".." && glob_match(name, file_pattern) {
-                            matches.push(format!("{}{}", prefix, name));
-                        }
-                    }
+            sc::for_each_dirent64(&buf, n, |name, _| {
+                if name != "." && name != ".." && glob_match(name, file_pattern) {
+                    matches.push(format!("{}{}", prefix, name));
                 }
-                if rec_len == 0 { break; }
-                offset += rec_len;
-            }
+            });
         }
         let _ = sc::sys_close(fd);
     }
@@ -397,41 +572,33 @@ fn glob_expand_recursive(pattern: &str) -> Vec<String> {
     } else {
         return glob_expand(pattern);
     };
-    let base = if prefix.is_empty() { "." } else { prefix.trim_end_matches('/') };
+    let base = if prefix.is_empty() {
+        "."
+    } else {
+        prefix.trim_end_matches('/')
+    };
     let mut stack = Vec::new();
     stack.push(base.to_string());
     let mut buf = [0u8; 8192];
     while let Some(dir) = stack.pop() {
         if let Ok(fd) = sc::sys_open(&dir, 0) {
             if let Ok(n) = sc::sys_getdents64(fd, &mut buf) {
-                let mut offset = 0;
-                while offset < n {
-                    let rec_len = u16::from_le_bytes([buf[offset + 8], buf[offset + 9]]) as usize;
-                    let name_len = u16::from_le_bytes([buf[offset + 10], buf[offset + 11]]) as usize;
-                    let d_type = buf[offset + 16];
-                    if name_len > 0 {
-                        let name_bytes = &buf[offset + 18..offset + 18 + name_len];
-                        if let Ok(name) = core::str::from_utf8(name_bytes) {
-                            let name = name.trim_end_matches('\0');
-                            if name != "." && name != ".." {
-                                let full_path = if dir == "." {
-                                    name.to_string()
-                                } else {
-                                    format!("{}/{}", dir, name)
-                                };
-                                let is_dir = d_type == 4;
-                                if !suffix.is_empty() && !is_dir && glob_match(name, suffix) {
-                                    matches.push(full_path.clone());
-                                }
-                                if is_dir {
-                                    stack.push(full_path);
-                                }
-                            }
+                sc::for_each_dirent64(&buf, n, |name, d_type| {
+                    if name != "." && name != ".." {
+                        let full_path = if dir == "." {
+                            name.to_string()
+                        } else {
+                            format!("{}/{}", dir, name)
+                        };
+                        let is_dir = d_type == sc::DT_DIR;
+                        if !suffix.is_empty() && !is_dir && glob_match(name, suffix) {
+                            matches.push(full_path.clone());
+                        }
+                        if is_dir {
+                            stack.push(full_path);
                         }
                     }
-                    if rec_len == 0 { break; }
-                    offset += rec_len;
-                }
+                });
             }
             let _ = sc::sys_close(fd);
         }
@@ -448,37 +615,60 @@ fn glob_match(name: &str, pattern: &str) -> bool {
 }
 
 fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
-    if pi == pat.len() { return ni == name.len(); }
+    if pi == pat.len() {
+        return ni == name.len();
+    }
     if pat[pi] == '*' {
         if pi + 1 < pat.len() && pat[pi + 1] == '*' && (pi + 2 >= pat.len() || pat[pi + 2] == '/') {
-            let next_pat = if pi + 2 < pat.len() && pat[pi + 2] == '/' { pi + 3 } else { pi + 2 };
+            let next_pat = if pi + 2 < pat.len() && pat[pi + 2] == '/' {
+                pi + 3
+            } else {
+                pi + 2
+            };
             for skip in 0..=name.len() - ni {
-                if glob_match_inner(name, pat, ni + skip, next_pat) { return true; }
+                if glob_match_inner(name, pat, ni + skip, next_pat) {
+                    return true;
+                }
             }
             return false;
         }
         for skip in 0..=name.len() - ni {
-            if glob_match_inner(name, pat, ni + skip, pi + 1) { return true; }
+            if glob_match_inner(name, pat, ni + skip, pi + 1) {
+                return true;
+            }
         }
         return false;
     }
-    if pat[pi] == '?' { return ni < name.len() && glob_match_inner(name, pat, ni + 1, pi + 1); }
+    if pat[pi] == '?' {
+        return ni < name.len() && glob_match_inner(name, pat, ni + 1, pi + 1);
+    }
     if pat[pi] == '[' {
         let mut j = pi + 1;
         let mut negate = false;
-        if j < pat.len() && pat[j] == '^' { negate = true; j += 1; }
-        if j < pat.len() && pat[j] == ']' { j += 1; }
+        if j < pat.len() && pat[j] == '^' {
+            negate = true;
+            j += 1;
+        }
+        if j < pat.len() && pat[j] == ']' {
+            j += 1;
+        }
         let mut found = false;
         while j < pat.len() && pat[j] != ']' {
             if j + 2 < pat.len() && pat[j + 1] == '-' {
-                if ni < name.len() && name[ni] >= pat[j] && name[ni] <= pat[j + 2] { found = true; }
+                if ni < name.len() && name[ni] >= pat[j] && name[ni] <= pat[j + 2] {
+                    found = true;
+                }
                 j += 3;
             } else {
-                if ni < name.len() && name[ni] == pat[j] { found = true; }
+                if ni < name.len() && name[ni] == pat[j] {
+                    found = true;
+                }
                 j += 1;
             }
         }
-        if found == negate { return false; }
+        if found == negate {
+            return false;
+        }
         return ni < name.len() && glob_match_inner(name, pat, ni + 1, j + 1);
     }
     ni < name.len() && name[ni] == pat[pi] && glob_match_inner(name, pat, ni + 1, pi + 1)
@@ -498,7 +688,9 @@ pub fn expand_braces(input: &str) -> String {
                 let items: Vec<&str> = brace_content.split(',').collect();
                 let mut result = String::new();
                 for (i, item) in items.iter().enumerate() {
-                    if i > 0 { result.push(' '); }
+                    if i > 0 {
+                        result.push(' ');
+                    }
                     result.push_str(before);
                     result.push_str(item);
                     result.push_str(after);
@@ -513,7 +705,9 @@ pub fn expand_braces(input: &str) -> String {
                     let mut first = true;
                     if s <= e {
                         for i in s..=e {
-                            if !first { result.push(' '); }
+                            if !first {
+                                result.push(' ');
+                            }
                             result.push_str(before);
                             result.push_str(&format!("{}", i));
                             result.push_str(after);
@@ -521,7 +715,9 @@ pub fn expand_braces(input: &str) -> String {
                         }
                     } else {
                         for i in (e..=s).rev() {
-                            if !first { result.push(' '); }
+                            if !first {
+                                result.push(' ');
+                            }
                             result.push_str(before);
                             result.push_str(&format!("{}", i));
                             result.push_str(after);
@@ -543,13 +739,17 @@ pub fn expand_braces(input: &str) -> String {
 pub fn read_heredoc(delimiter: &str, strip_tabs: bool) -> String {
     let mut content = String::new();
     loop {
-        let Some(line) = crate::read_line("", None) else { break; };
+        let Some(line) = crate::read_line("", None) else {
+            break;
+        };
         let trimmed = if strip_tabs {
             line.trim_start_matches('\t').to_string()
         } else {
             line
         };
-        if trimmed.trim() == delimiter { break; }
+        if trimmed.trim() == delimiter {
+            break;
+        }
         content.push_str(&trimmed);
         content.push('\n');
     }
@@ -580,37 +780,85 @@ pub fn parse_simple(tokens: &[Token]) -> Vec<ParsedCommand> {
     let mut commands = Vec::new();
     let mut current = ParsedCommand {
         argv: Vec::new(),
-        redirect_out: None, redirect_append: None,
-        redirect_in: None, redirect_err: None,
-        redirect_err_append: None, redirect_readwrite: None,
+        redirect_out: None,
+        redirect_append: None,
+        redirect_in: None,
+        redirect_err: None,
+        redirect_err_append: None,
+        redirect_readwrite: None,
         here_doc: None,
-        here_doc_strip: false, here_string: None,
-        background: false, clobber: false,
+        here_doc_strip: false,
+        here_string: None,
+        background: false,
+        clobber: false,
     };
     let mut i = 0;
     while i < tokens.len() {
         match &tokens[i] {
-            Token::Word(w) => { current.argv.push(w.clone()); }
+            Token::Word(w) => {
+                current.argv.push(w.clone());
+            }
             Token::Pipe | Token::Semi | Token::And | Token::Or | Token::Newline => {
-                if !current.argv.is_empty() || current.redirect_out.is_some() || current.redirect_in.is_some() || current.here_doc.is_some() || current.here_string.is_some() {
+                if !current.argv.is_empty()
+                    || current.redirect_out.is_some()
+                    || current.redirect_in.is_some()
+                    || current.here_doc.is_some()
+                    || current.here_string.is_some()
+                {
                     commands.push(current.clone());
                 }
                 current = ParsedCommand {
                     argv: Vec::new(),
-                    redirect_out: None, redirect_append: None,
-                    redirect_in: None, redirect_err: None,
-                    redirect_err_append: None, redirect_readwrite: None,
+                    redirect_out: None,
+                    redirect_append: None,
+                    redirect_in: None,
+                    redirect_err: None,
+                    redirect_err_append: None,
+                    redirect_readwrite: None,
                     here_doc: None,
-                    here_doc_strip: false, here_string: None,
-                    background: false, clobber: false,
+                    here_doc_strip: false,
+                    here_string: None,
+                    background: false,
+                    clobber: false,
                 };
             }
-            Token::RedirectOut => { if let Some(Token::Word(f)) = tokens.get(i + 1) { current.redirect_out = Some(f.clone()); i += 1; } }
-            Token::RedirectAppend => { if let Some(Token::Word(f)) = tokens.get(i + 1) { current.redirect_append = Some(f.clone()); i += 1; } }
-            Token::RedirectIn => { if let Some(Token::Word(f)) = tokens.get(i + 1) { current.redirect_in = Some(f.clone()); i += 1; } }
-            Token::RedirectErr => { if let Some(Token::Word(f)) = tokens.get(i + 1) { current.redirect_err = Some(f.clone()); i += 1; } }
-            Token::RedirectErrAppend => { if let Some(Token::Word(f)) = tokens.get(i + 1) { current.redirect_err_append = Some(f.clone()); i += 1; } }
-            Token::RedirectAll => { if let Some(Token::Word(f)) = tokens.get(i + 1) { current.redirect_out = Some(f.clone()); current.redirect_err = Some(f.clone()); i += 1; } }
+            Token::RedirectOut => {
+                if let Some(Token::Word(f)) = tokens.get(i + 1) {
+                    current.redirect_out = Some(f.clone());
+                    i += 1;
+                }
+            }
+            Token::RedirectAppend => {
+                if let Some(Token::Word(f)) = tokens.get(i + 1) {
+                    current.redirect_append = Some(f.clone());
+                    i += 1;
+                }
+            }
+            Token::RedirectIn => {
+                if let Some(Token::Word(f)) = tokens.get(i + 1) {
+                    current.redirect_in = Some(f.clone());
+                    i += 1;
+                }
+            }
+            Token::RedirectErr => {
+                if let Some(Token::Word(f)) = tokens.get(i + 1) {
+                    current.redirect_err = Some(f.clone());
+                    i += 1;
+                }
+            }
+            Token::RedirectErrAppend => {
+                if let Some(Token::Word(f)) = tokens.get(i + 1) {
+                    current.redirect_err_append = Some(f.clone());
+                    i += 1;
+                }
+            }
+            Token::RedirectAll => {
+                if let Some(Token::Word(f)) = tokens.get(i + 1) {
+                    current.redirect_out = Some(f.clone());
+                    current.redirect_err = Some(f.clone());
+                    i += 1;
+                }
+            }
             Token::RedirectHere => {
                 if let Some(Token::Word(delimiter)) = tokens.get(i + 1) {
                     let content = read_heredoc(delimiter, false);
@@ -645,21 +893,37 @@ pub fn parse_simple(tokens: &[Token]) -> Vec<ParsedCommand> {
                     i += 1;
                 }
             }
-            Token::DoubleBracket | Token::DoubleBracketClose | Token::DoubleParen | Token::DoubleParenClose => {
+            Token::DoubleBracket
+            | Token::DoubleBracketClose
+            | Token::DoubleParen
+            | Token::DoubleParenClose => {
                 let cmd_str = collect_compound(tokens, i);
                 current.argv.push(cmd_str.0);
                 i = cmd_str.1;
             }
-            Token::Ampersand => { current.background = true; }
+            Token::Ampersand => {
+                current.background = true;
+            }
             Token::LParen => {
                 let mut depth = 1;
                 let mut subshell_cmd = String::new();
                 i += 1;
                 while i < tokens.len() && depth > 0 {
                     match &tokens[i] {
-                        Token::LParen => { depth += 1; subshell_cmd.push('('); }
-                        Token::RParen => { depth -= 1; if depth > 0 { subshell_cmd.push(')'); } }
-                        Token::Word(w) => { subshell_cmd.push_str(w); subshell_cmd.push(' '); }
+                        Token::LParen => {
+                            depth += 1;
+                            subshell_cmd.push('(');
+                        }
+                        Token::RParen => {
+                            depth -= 1;
+                            if depth > 0 {
+                                subshell_cmd.push(')');
+                            }
+                        }
+                        Token::Word(w) => {
+                            subshell_cmd.push_str(w);
+                            subshell_cmd.push(' ');
+                        }
                         Token::Pipe => subshell_cmd.push('|'),
                         Token::Semi => subshell_cmd.push_str("; "),
                         Token::And => subshell_cmd.push_str("&& "),
@@ -680,9 +944,20 @@ pub fn parse_simple(tokens: &[Token]) -> Vec<ParsedCommand> {
                 i += 1;
                 while i < tokens.len() && depth > 0 {
                     match &tokens[i] {
-                        Token::LBrace => { depth += 1; group_cmd.push('{'); }
-                        Token::RBrace => { depth -= 1; if depth > 0 { group_cmd.push('}'); } }
-                        Token::Word(w) => { group_cmd.push_str(w); group_cmd.push(' '); }
+                        Token::LBrace => {
+                            depth += 1;
+                            group_cmd.push('{');
+                        }
+                        Token::RBrace => {
+                            depth -= 1;
+                            if depth > 0 {
+                                group_cmd.push('}');
+                            }
+                        }
+                        Token::Word(w) => {
+                            group_cmd.push_str(w);
+                            group_cmd.push(' ');
+                        }
                         Token::Pipe => group_cmd.push('|'),
                         Token::Semi => group_cmd.push_str("; "),
                         Token::And => group_cmd.push_str("&& "),
@@ -701,7 +976,12 @@ pub fn parse_simple(tokens: &[Token]) -> Vec<ParsedCommand> {
         }
         i += 1;
     }
-    if !current.argv.is_empty() || current.redirect_out.is_some() || current.redirect_in.is_some() || current.here_doc.is_some() || current.here_string.is_some() {
+    if !current.argv.is_empty()
+        || current.redirect_out.is_some()
+        || current.redirect_in.is_some()
+        || current.here_doc.is_some()
+        || current.here_string.is_some()
+    {
         commands.push(current);
     }
     commands
@@ -712,17 +992,40 @@ fn collect_compound(tokens: &[Token], start: usize) -> (String, usize) {
     let mut result = String::new();
     let mut i = start + 1;
     match &tokens[start] {
-        Token::DoubleBracket => { result.push_str("[[ "); }
-        Token::DoubleParen => { result.push_str("(( "); }
+        Token::DoubleBracket => {
+            result.push_str("[[ ");
+        }
+        Token::DoubleParen => {
+            result.push_str("(( ");
+        }
         _ => {}
     }
     while i < tokens.len() && depth > 0 {
         match &tokens[i] {
-            Token::DoubleBracket => { depth += 1; result.push_str("[[ "); }
-            Token::DoubleBracketClose => { depth -= 1; if depth > 0 { result.push_str("]] "); } }
-            Token::DoubleParen => { depth += 1; result.push_str("(( "); }
-            Token::DoubleParenClose => { depth -= 1; if depth > 0 { result.push_str(")) "); } }
-            Token::Word(w) => { result.push_str(w); result.push(' '); }
+            Token::DoubleBracket => {
+                depth += 1;
+                result.push_str("[[ ");
+            }
+            Token::DoubleBracketClose => {
+                depth -= 1;
+                if depth > 0 {
+                    result.push_str("]] ");
+                }
+            }
+            Token::DoubleParen => {
+                depth += 1;
+                result.push_str("(( ");
+            }
+            Token::DoubleParenClose => {
+                depth -= 1;
+                if depth > 0 {
+                    result.push_str(")) ");
+                }
+            }
+            Token::Word(w) => {
+                result.push_str(w);
+                result.push(' ');
+            }
             Token::Pipe => result.push('|'),
             Token::Semi => result.push_str("; "),
             Token::And => result.push_str("&& "),
@@ -739,6 +1042,8 @@ fn collect_compound(tokens: &[Token], start: usize) -> (String, usize) {
         Token::DoubleParen => "))",
         _ => "",
     };
-    if !closing.is_empty() { result.push_str(closing); }
+    if !closing.is_empty() {
+        result.push_str(closing);
+    }
     (result, i)
 }

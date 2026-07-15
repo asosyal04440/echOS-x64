@@ -591,10 +591,8 @@ impl ZswapManager {
     }
 }
 
-lazy_static::lazy_static! {
-    /// Global zswap yöneticisi
-    pub static ref ZSWAP_MANAGER: ZswapManager = ZswapManager::new();
-}
+/// Global zswap yöneticisi
+pub static ZSWAP_MANAGER: spin::Lazy<ZswapManager> = spin::Lazy::new(|| ZswapManager::new());
 
 // ============================================================================
 // ZRAM (SIKIŞTIRILMIŞ RAM DİSKİ)

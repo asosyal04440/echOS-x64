@@ -45,6 +45,7 @@
 
 use super::ip::{IpProtocol, Ipv4Packet};
 use super::ipv6::{Ipv6Header, Ipv6NextHeader, Ipv6Packet};
+use core::sync::atomic::Ordering;
 use super::socket::SocketAddr;
 use super::{allocate_socket_id, socket::AddressFamily, IpAddr, Ipv4Addr, NetError, Port};
 use alloc::boxed::Box;
@@ -313,7 +314,7 @@ impl UdpSocket {
 //   3. rx_buffer'a ekle
 
 /// Tüm aktif UDP soketleri: soket_id -> UdpSocket
-static UDP_SOCKETS: Mutex<BTreeMap<u32, Box<UdpSocket>>> = Mutex::new(BTreeMap::new());
+pub static UDP_SOCKETS: Mutex<BTreeMap<u32, Box<UdpSocket>>> = Mutex::new(BTreeMap::new());
 /// Port -> soket kimliği eşleşmesi (gelen paket yönlendirme için)
 static UDP_BINDINGS: Mutex<BTreeMap<(AddressFamily, Port), u32>> = Mutex::new(BTreeMap::new());
 
@@ -394,7 +395,11 @@ pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
 pub fn send_to(socket_id: u32, data: &[u8], dst: SocketAddr) -> Result<usize, NetError> {
     let mut socks = UDP_SOCKETS.lock();
     let sock = socks.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
-    sock.send_to(data, dst)
+    let result = sock.send_to(data, dst);
+    if result.is_ok() {
+        super::NET_COUNTERS.udp.out_datagrams.fetch_add(1, Ordering::Relaxed);
+    }
+    result
 }
 
 /// Belirtilen soketten datagram al (bağlayan + veri)
@@ -402,6 +407,13 @@ pub fn recv_from(socket_id: u32, buf: &mut [u8]) -> Result<(usize, SocketAddr), 
     let mut socks = UDP_SOCKETS.lock();
     let sock = socks.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
     sock.recv_from(buf)
+}
+
+/// recvmmsg/sendmmsg uyumlu "into" varyantı — `&mut Vec<u8>` tampon alır
+pub fn recv_from_into(socket_id: u32, buf: &mut Vec<u8>) -> Result<(usize, SocketAddr), NetError> {
+    let mut socks = UDP_SOCKETS.lock();
+    let sock = socks.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
+    sock.recv_from(buf.as_mut_slice())
 }
 
 /// UDP soketini kapat ve port bağlamasını temizle
@@ -435,6 +447,7 @@ pub fn get_all_sockets() -> Vec<UdpSocket> {
 ///     -> Soketi bul ve rx_buffer'a ekle
 /// ```
 pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
+    super::NET_COUNTERS.udp.in_datagrams.fetch_add(1, Ordering::Relaxed);
     // ── Checksum doğrulaması ──
     // Checksum 0 değilse (yani hesaplanmışsa) doğrula; geçersizse paketi düşür.
     if !verify_checksum(
@@ -443,6 +456,7 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
         ip_packet.payload,
     ) {
         crate::serial_println!("[UDP] Checksum verification failed, dropping packet");
+        super::NET_COUNTERS.udp.in_errors.fetch_add(1, Ordering::Relaxed);
         return Err(NetError::ChecksumError);
     }
 
@@ -456,25 +470,28 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     // Hedef porta kayıtlı soketi bul
     let bindings = UDP_BINDINGS.lock();
     if let Some(&socket_id) = bindings.get(&(AddressFamily::IPV4, udp_header.dst_port)) {
-        drop(bindings); // Kilidi serbest bırak (deadlock önlemi)
+        drop(bindings);
 
         let mut socks = UDP_SOCKETS.lock();
         if let Some(sock) = socks.get_mut(&socket_id) {
-            // Veriyi soketin alıcı tamponuna ekle
             sock.rx_buffer.push((src, data.to_vec()));
         }
+    } else {
+        super::NET_COUNTERS.udp.no_ports.fetch_add(1, Ordering::Relaxed);
     }
 
     Ok(())
 }
 
 pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
+    super::NET_COUNTERS.udp.in_datagrams.fetch_add(1, Ordering::Relaxed);
     if !verify_checksum_v6(
         ip_packet.header.src,
         ip_packet.header.dst,
         &ip_packet.payload,
     ) {
         crate::serial_println!("[UDPv6] Checksum verification failed, dropping packet");
+        super::NET_COUNTERS.udp.in_errors.fetch_add(1, Ordering::Relaxed);
         return Err(NetError::ChecksumError);
     }
 
@@ -490,6 +507,8 @@ pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
         if let Some(sock) = socks.get_mut(&socket_id) {
             sock.rx_buffer.push((src, data.to_vec()));
         }
+    } else {
+        super::NET_COUNTERS.udp.no_ports.fetch_add(1, Ordering::Relaxed);
     }
 
     Ok(())

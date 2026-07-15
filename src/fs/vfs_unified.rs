@@ -297,7 +297,8 @@ impl VfsUnified {
         source: &str,
         flags: VfsMountFlags,
     ) -> Result<(), &'static str> {
-        let readonly = flags.noexec && flags.nosuid; // virtual_fs default
+        let default_matrix = Self::build_feature_matrix(fs_type, false);
+        let readonly = (flags.noexec && flags.nosuid) || !default_matrix.write;
         self.mount_with_readonly(mount_point, fs_type, source, flags, readonly)
     }
 
@@ -948,6 +949,15 @@ impl VfsUnified {
         let path_hash = hash_path(&normalized_path);
         if let Some(cached) = page_cache::find_page(path_hash, 0) {
             return Ok(cached.data);
+        }
+
+        if let Some(entry) = self.resolve_fs(&normalized_path) {
+            if matches!(
+                entry.fs_type,
+                VfsFsType::DevFs | VfsFsType::TmpFs | VfsFsType::Xfs
+            ) {
+                return self.read_bytes_direct(&normalized_path);
+            }
         }
 
         // Resolve path with symlink following + dcache caching

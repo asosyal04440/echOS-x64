@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
-use alloc::string::{String, ToString};
 use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use spin::Mutex;
 
@@ -33,31 +33,95 @@ pub struct ShellOpts {
 impl ShellOpts {
     pub const fn new() -> Self {
         Self {
-            allexport: false, braceexpand: true, errexit: false, exec: true,
-            hashall: true, histexpand: true, ignoreeof: false, monitor: true,
-            noclobber: false, noglob: false, nounset: false, pipefail: false,
-            posix: true, verbose: false, xtrace: false, vi: false, emacs: false,
+            allexport: false,
+            braceexpand: true,
+            errexit: false,
+            exec: true,
+            hashall: true,
+            histexpand: true,
+            ignoreeof: false,
+            monitor: true,
+            noclobber: false,
+            noglob: false,
+            nounset: false,
+            pipefail: false,
+            posix: true,
+            verbose: false,
+            xtrace: false,
+            vi: false,
+            emacs: false,
         }
     }
     pub fn set_by_name(&mut self, name: &str, val: bool) -> bool {
         match name {
-            "allexport" => { self.allexport = val; true }
-            "braceexpand" => { self.braceexpand = val; true }
-            "errexit" | "e" => { self.errexit = val; true }
-            "exec" | "n" => { self.exec = val; true }
-            "hashall" | "h" => { self.hashall = val; true }
-            "histexpand" | "H" => { self.histexpand = val; true }
-            "ignoreeof" => { self.ignoreeof = val; true }
-            "monitor" | "m" => { self.monitor = val; true }
-            "noclobber" | "C" => { self.noclobber = val; true }
-            "noglob" | "f" => { self.noglob = val; true }
-            "nounset" | "u" => { self.nounset = val; true }
-            "pipefail" => { self.pipefail = val; true }
-            "posix" => { self.posix = val; true }
-            "verbose" | "v" => { self.verbose = val; true }
-            "xtrace" | "x" => { self.xtrace = val; true }
-            "vi" => { self.vi = val; true }
-            "emacs" => { self.emacs = val; true }
+            "allexport" => {
+                self.allexport = val;
+                true
+            }
+            "braceexpand" => {
+                self.braceexpand = val;
+                true
+            }
+            "errexit" | "e" => {
+                self.errexit = val;
+                true
+            }
+            "exec" | "n" => {
+                self.exec = val;
+                true
+            }
+            "hashall" | "h" => {
+                self.hashall = val;
+                true
+            }
+            "histexpand" | "H" => {
+                self.histexpand = val;
+                true
+            }
+            "ignoreeof" => {
+                self.ignoreeof = val;
+                true
+            }
+            "monitor" | "m" => {
+                self.monitor = val;
+                true
+            }
+            "noclobber" | "C" => {
+                self.noclobber = val;
+                true
+            }
+            "noglob" | "f" => {
+                self.noglob = val;
+                true
+            }
+            "nounset" | "u" => {
+                self.nounset = val;
+                true
+            }
+            "pipefail" => {
+                self.pipefail = val;
+                true
+            }
+            "posix" => {
+                self.posix = val;
+                true
+            }
+            "verbose" | "v" => {
+                self.verbose = val;
+                true
+            }
+            "xtrace" | "x" => {
+                self.xtrace = val;
+                true
+            }
+            "vi" => {
+                self.vi = val;
+                true
+            }
+            "emacs" => {
+                self.emacs = val;
+                true
+            }
             _ => false,
         }
     }
@@ -85,17 +149,39 @@ impl ShellOpts {
     }
     pub fn to_flags_string(&self) -> String {
         let mut s = String::new();
-        if self.allexport { s.push('a'); }
-        if self.errexit { s.push('e'); }
-        if self.noglob { s.push('f'); }
-        if self.hashall { s.push('h'); }
-        if self.histexpand { s.push('H'); }
-        if self.monitor { s.push('m'); }
-        if self.noclobber { s.push('C'); }
-        if self.nounset { s.push('u'); }
-        if self.verbose { s.push('v'); }
-        if self.xtrace { s.push('x'); }
-        if s.is_empty() { s.push_str("himxB"); }
+        if self.allexport {
+            s.push('a');
+        }
+        if self.errexit {
+            s.push('e');
+        }
+        if self.noglob {
+            s.push('f');
+        }
+        if self.hashall {
+            s.push('h');
+        }
+        if self.histexpand {
+            s.push('H');
+        }
+        if self.monitor {
+            s.push('m');
+        }
+        if self.noclobber {
+            s.push('C');
+        }
+        if self.nounset {
+            s.push('u');
+        }
+        if self.verbose {
+            s.push('v');
+        }
+        if self.xtrace {
+            s.push('x');
+        }
+        if s.is_empty() {
+            s.push_str("himxB");
+        }
         s
     }
 }
@@ -124,12 +210,17 @@ impl ShellEnv {
         self.arrays.lock().get(name).map_or(0, |v| v.len())
     }
     pub fn array_get(&self, name: &str, index: usize) -> Option<String> {
-        self.arrays.lock().get(name).and_then(|v| v.get(index).cloned())
+        self.arrays
+            .lock()
+            .get(name)
+            .and_then(|v| v.get(index).cloned())
     }
     pub fn array_set(&self, name: &str, index: usize, value: &str) {
         let mut arrays = self.arrays.lock();
         let arr = arrays.entry(name.to_string()).or_insert_with(Vec::new);
-        if index >= arr.len() { arr.resize(index + 1, String::new()); }
+        if index >= arr.len() {
+            arr.resize(index + 1, String::new());
+        }
         arr[index] = value.to_string();
     }
     pub fn array_push(&self, name: &str, value: &str) {
@@ -139,23 +230,35 @@ impl ShellEnv {
     }
     pub fn set_pipestatus(&self, statuses: &[i32]) {
         let arr: Vec<String> = statuses.iter().map(|s| format!("{}", s)).collect();
-        self.arrays.lock().insert(String::from("PIPESTATUS"), arr.clone());
+        self.arrays
+            .lock()
+            .insert(String::from("PIPESTATUS"), arr.clone());
         // Also set scalar to last element for $PIPESTATUS without index
         if let Some(last) = arr.last() {
-            self.vars.lock().insert(String::from("PIPESTATUS"), last.clone());
+            self.vars
+                .lock()
+                .insert(String::from("PIPESTATUS"), last.clone());
         }
     }
 
     pub fn set_bash_rematch(&self, matches: Vec<String>) {
-        self.arrays.lock().insert(String::from("BASH_REMATCH"), matches.clone());
+        self.arrays
+            .lock()
+            .insert(String::from("BASH_REMATCH"), matches.clone());
         // Also set scalar to first match (BASH_REMATCH[0]) for $BASH_REMATCH without index
         if let Some(first) = matches.first() {
-            self.vars.lock().insert(String::from("BASH_REMATCH"), first.clone());
+            self.vars
+                .lock()
+                .insert(String::from("BASH_REMATCH"), first.clone());
         }
     }
 
     pub fn get_pipestatus(&self) -> Vec<String> {
-        self.arrays.lock().get("PIPESTATUS").cloned().unwrap_or_default()
+        self.arrays
+            .lock()
+            .get("PIPESTATUS")
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub fn array_slice(&self, name: &str, offset: usize, length: Option<usize>) -> Vec<String> {
@@ -172,7 +275,11 @@ impl ShellEnv {
         }
     }
     pub fn list_arrays(&self) -> Vec<(String, Vec<String>)> {
-        self.arrays.lock().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        self.arrays
+            .lock()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
     }
     pub fn set(&mut self, key: &str, value: &str) {
         self.vars.lock().insert(key.to_string(), value.to_string());
@@ -184,7 +291,11 @@ impl ShellEnv {
         self.vars.lock().remove(key);
     }
     pub fn list(&self) -> Vec<(String, String)> {
-        self.vars.lock().iter().map(|(k, v): (&String, &String)| (k.clone(), v.clone())).collect()
+        self.vars
+            .lock()
+            .iter()
+            .map(|(k, v): (&String, &String)| (k.clone(), v.clone()))
+            .collect()
     }
 
     pub fn expand(&self, input: &str) -> String {
@@ -223,7 +334,9 @@ impl ShellEnv {
                     result.push_str(&format!("{}", crate::shell_syscall::sys_getpid()));
                 } else if chars[i] == '!' {
                     i += 1;
-                    if let Some(bg) = self.get("_bg_pid") { result.push_str(&bg); }
+                    if let Some(bg) = self.get("_bg_pid") {
+                        result.push_str(&bg);
+                    }
                 } else if chars[i] == '@' || chars[i] == '*' {
                     i += 1;
                     // $@ ve $* — tüm pozisyonel parametreleri boşlukla birleştirerek genişlet
@@ -238,7 +351,10 @@ impl ShellEnv {
                     i += 1;
                     let mut count = 0u32;
                     let mut idx = 1u32;
-                    while self.get(&format!("{}", idx)).is_some() { count += 1; idx += 1; }
+                    while self.get(&format!("{}", idx)).is_some() {
+                        count += 1;
+                        idx += 1;
+                    }
                     result.push_str(&format!("{}", count));
                 } else if chars[i] == '-' {
                     i += 1;
@@ -246,8 +362,11 @@ impl ShellEnv {
                     result.push_str(&opts);
                 } else if chars[i] == '0' {
                     i += 1;
-                    if let Some(name) = self.get("_shell_name") { result.push_str(&name); }
-                    else { result.push_str("echshell"); }
+                    if let Some(name) = self.get("_shell_name") {
+                        result.push_str(&name);
+                    } else {
+                        result.push_str("echshell");
+                    }
                 } else if matches_special_var(&chars, i, "EPOCHSECONDS") {
                     i += "EPOCHSECONDS".len();
                     let ts = crate::shell_syscall::sys_time();
@@ -259,12 +378,16 @@ impl ShellEnv {
                 } else if matches_special_var(&chars, i, "RANDOM") {
                     i += "RANDOM".len();
                     let ts = crate::shell_syscall::sys_time();
-                    let rand_val = ((ts as u32).wrapping_mul(1103515245).wrapping_add(12345) >> 16) & 0x7FFF;
+                    let rand_val =
+                        ((ts as u32).wrapping_mul(1103515245).wrapping_add(12345) >> 16) & 0x7FFF;
                     result.push_str(&format!("{}", rand_val));
                 } else if matches_special_var(&chars, i, "LINENO") {
                     i += "LINENO".len();
-                    if let Some(lineno) = self.get("LINENO") { result.push_str(&lineno); }
-                    else { result.push_str("1"); }
+                    if let Some(lineno) = self.get("LINENO") {
+                        result.push_str(&lineno);
+                    } else {
+                        result.push_str("1");
+                    }
                 } else if matches_special_var(&chars, i, "HOSTNAME") {
                     i += "HOSTNAME".len();
                     let mut buf = [0u8; 256];
@@ -276,25 +399,39 @@ impl ShellEnv {
                                 result.push_str("echos");
                             }
                         }
-                        Err(_) => { result.push_str("echos"); }
+                        Err(_) => {
+                            result.push_str("echos");
+                        }
                     }
                 } else if chars[i].is_ascii_digit() {
                     let mut name = String::new();
-                    while i < len && chars[i].is_ascii_digit() { name.push(chars[i]); i += 1; }
-                    if let Some(val) = self.get(&name) { result.push_str(&val); }
+                    while i < len && chars[i].is_ascii_digit() {
+                        name.push(chars[i]);
+                        i += 1;
+                    }
+                    if let Some(val) = self.get(&name) {
+                        result.push_str(&val);
+                    }
                 } else if chars[i].is_alphabetic() || chars[i] == '_' {
                     let mut name = String::new();
                     while i < len && (chars[i].is_alphanumeric() || chars[i] == '_') {
-                        name.push(chars[i]); i += 1;
+                        name.push(chars[i]);
+                        i += 1;
                     }
                     if name.ends_with('[') {
                         name.pop();
                         let mut index = String::new();
-                        while i < len && chars[i] != ']' { index.push(chars[i]); i += 1; }
-                        if i < len { i += 1; }
+                        while i < len && chars[i] != ']' {
+                            index.push(chars[i]);
+                            i += 1;
+                        }
+                        if i < len {
+                            i += 1;
+                        }
                         if index == "@" || index == "*" {
                             if let Some(arr) = self.get_array(&name) {
-                                let expanded: Vec<String> = arr.iter().map(|v| self.expand(v)).collect();
+                                let expanded: Vec<String> =
+                                    arr.iter().map(|v| self.expand(v)).collect();
                                 result.push_str(&expanded.join(" "));
                             }
                         } else if index == "#" {
@@ -303,7 +440,8 @@ impl ShellEnv {
                             if self.get_array(&name).is_some() {
                                 let offset: usize = idx.parse().unwrap_or(0);
                                 let slice = self.array_slice(&name, offset, None);
-                                let expanded: Vec<String> = slice.iter().map(|v| self.expand(v)).collect();
+                                let expanded: Vec<String> =
+                                    slice.iter().map(|v| self.expand(v)).collect();
                                 result.push_str(&expanded.join(" "));
                             }
                         } else if let Ok(idx) = index.parse::<usize>() {
@@ -312,18 +450,26 @@ impl ShellEnv {
                             }
                         }
                     } else {
-                        if let Some(val) = self.get(&name) { result.push_str(&val); }
+                        if let Some(val) = self.get(&name) {
+                            result.push_str(&val);
+                        }
                     }
                 }
-            } else if chars[i] == '~' && (i == 0 || (i > 0 && chars[i-1] == '=' || chars[i-1] == ':')) {
+            } else if chars[i] == '~'
+                && (i == 0 || (i > 0 && chars[i - 1] == '=' || chars[i - 1] == ':'))
+            {
                 i += 1;
                 let mut user = String::new();
                 while i < len && chars[i] != '/' && chars[i] != ' ' && chars[i] != '\t' {
-                    user.push(chars[i]); i += 1;
+                    user.push(chars[i]);
+                    i += 1;
                 }
                 if user.is_empty() {
-                    if let Some(home) = self.get("HOME") { result.push_str(&home); }
-                    else { result.push('/'); }
+                    if let Some(home) = self.get("HOME") {
+                        result.push_str(&home);
+                    } else {
+                        result.push('/');
+                    }
                 } else {
                     result.push_str(&format!("/home/{}", user));
                 }
@@ -343,7 +489,12 @@ impl ShellEnv {
             *i += 1;
         }
         let mut param = String::new();
-        while *i < chars.len() && !matches!(chars[*i], '}' | ':' | '-' | '+' | '=' | '?' | '#' | '%' | '/' | '[') {
+        while *i < chars.len()
+            && !matches!(
+                chars[*i],
+                '}' | ':' | '-' | '+' | '=' | '?' | '#' | '%' | '/' | '['
+            )
+        {
             param.push(chars[*i]);
             *i += 1;
         }
@@ -382,20 +533,26 @@ impl ShellEnv {
             let c2 = chars[*i + 1];
             if c1 == '^' && c2 == '^' {
                 *i += 2;
-                if *i < chars.len() && chars[*i] == '}' { *i += 1; }
+                if *i < chars.len() && chars[*i] == '}' {
+                    *i += 1;
+                }
                 let val = self.get(&param).unwrap_or_default();
                 return val.to_uppercase();
             }
             if c1 == ',' && c2 == ',' {
                 *i += 2;
-                if *i < chars.len() && chars[*i] == '}' { *i += 1; }
+                if *i < chars.len() && chars[*i] == '}' {
+                    *i += 1;
+                }
                 let val = self.get(&param).unwrap_or_default();
                 return val.to_lowercase();
             }
             if c1 == '@' {
                 let modifier = c2;
                 *i += 2;
-                if *i < chars.len() && chars[*i] == '}' { *i += 1; }
+                if *i < chars.len() && chars[*i] == '}' {
+                    *i += 1;
+                }
                 let val = self.get(&param).unwrap_or_default();
                 match modifier {
                     'Q' => {
@@ -456,9 +613,16 @@ impl ShellEnv {
         if op == '[' {
             *i += 1;
             let mut index = String::new();
-            while *i < chars.len() && chars[*i] != ']' { index.push(chars[*i]); *i += 1; }
-            if *i < chars.len() { *i += 1; }
-            if *i < chars.len() && chars[*i] == '}' { *i += 1; }
+            while *i < chars.len() && chars[*i] != ']' {
+                index.push(chars[*i]);
+                *i += 1;
+            }
+            if *i < chars.len() {
+                *i += 1;
+            }
+            if *i < chars.len() && chars[*i] == '}' {
+                *i += 1;
+            }
             if index == "@" || index == "*" {
                 if let Some(arr) = self.get_array(&param) {
                     let expanded: Vec<String> = arr.iter().map(|v| self.expand(v)).collect();
@@ -484,15 +648,30 @@ impl ShellEnv {
         if op == '/' {
             *i += 1;
             let mut all_matches = false;
-            if *i < chars.len() && chars[*i] == '/' { all_matches = true; *i += 1; }
+            if *i < chars.len() && chars[*i] == '/' {
+                all_matches = true;
+                *i += 1;
+            }
             let mut pattern = String::new();
-            while *i < chars.len() && chars[*i] != '/' && chars[*i] != '}' { pattern.push(chars[*i]); *i += 1; }
+            while *i < chars.len() && chars[*i] != '/' && chars[*i] != '}' {
+                pattern.push(chars[*i]);
+                *i += 1;
+            }
             let mut replacement = String::new();
-            if *i < chars.len() && chars[*i] == '/' { *i += 1; }
-            while *i < chars.len() && chars[*i] != '}' { replacement.push(chars[*i]); *i += 1; }
-            if *i < chars.len() { *i += 1; }
+            if *i < chars.len() && chars[*i] == '/' {
+                *i += 1;
+            }
+            while *i < chars.len() && chars[*i] != '}' {
+                replacement.push(chars[*i]);
+                *i += 1;
+            }
+            if *i < chars.len() {
+                *i += 1;
+            }
             let val = self.get(&param).unwrap_or_default();
-            if pattern.is_empty() { return val; }
+            if pattern.is_empty() {
+                return val;
+            }
             if all_matches {
                 let pattern = self.expand(&pattern);
                 let replacement = self.expand(&replacement);
@@ -505,7 +684,9 @@ impl ShellEnv {
         }
 
         let has_colon = *i + 1 < chars.len() && chars[*i + 1] == ':';
-        if has_colon { *i += 1; }
+        if has_colon {
+            *i += 1;
+        }
 
         let mut greedy = false;
         if *i + 1 < chars.len() && chars[*i + 1] == op {
@@ -519,9 +700,22 @@ impl ShellEnv {
         let mut depth = 1u32;
         while *i < chars.len() && depth > 0 {
             match chars[*i] {
-                '{' => { depth += 1; word.push('{'); *i += 1; }
-                '}' => { depth -= 1; if depth > 0 { word.push('}'); } *i += 1; }
-                _ => { word.push(chars[*i]); *i += 1; }
+                '{' => {
+                    depth += 1;
+                    word.push('{');
+                    *i += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if depth > 0 {
+                        word.push('}');
+                    }
+                    *i += 1;
+                }
+                _ => {
+                    word.push(chars[*i]);
+                    *i += 1;
+                }
             }
         }
         let word = self.expand(&word);
@@ -541,25 +735,38 @@ impl ShellEnv {
 
         match op {
             '-' => {
-                if !is_set || (has_colon && is_null) { word } else { val }
+                if !is_set || (has_colon && is_null) {
+                    word
+                } else {
+                    val
+                }
             }
             '=' => {
                 if !is_set || (has_colon && is_null) {
                     self.vars.lock().insert(param.clone(), word.clone());
                     word
-                } else { val }
+                } else {
+                    val
+                }
             }
             '?' => {
                 if !is_set || (has_colon && is_null) {
-                    let msg = if word.is_empty() { format!("{}: parameter null or not set", param) }
-                    else { format!("{}: {}", param, word) };
+                    let msg = if word.is_empty() {
+                        format!("{}: parameter null or not set", param)
+                    } else {
+                        format!("{}: {}", param, word)
+                    };
                     crate::eprintln_fn(&msg);
                     crate::shell_syscall::sys_exit(1);
                 }
                 val
             }
             '+' => {
-                if !is_set || (has_colon && is_null) { String::new() } else { word }
+                if !is_set || (has_colon && is_null) {
+                    String::new()
+                } else {
+                    word
+                }
             }
             '#' => {
                 if param.is_empty() {
@@ -574,25 +781,33 @@ impl ShellEnv {
                 if param == "#" || param == "*" {
                     return format!("{}", self.count_positional());
                 }
-                if word.is_empty() { return val; }
+                if word.is_empty() {
+                    return val;
+                }
                 remove_prefix(&val, &word, greedy)
             }
             ':' => {
                 let parts: Vec<&str> = word.splitn(2, ':').collect();
                 let offset: usize = parts[0].parse().unwrap_or(0);
-                let length: usize = if parts.len() > 1 { parts[1].parse().unwrap_or(val.len()) } else { val.len() };
+                let length: usize = if parts.len() > 1 {
+                    parts[1].parse().unwrap_or(val.len())
+                } else {
+                    val.len()
+                };
                 let chars_vec: Vec<char> = val.chars().collect();
-                if offset >= chars_vec.len() { return String::new(); }
+                if offset >= chars_vec.len() {
+                    return String::new();
+                }
                 let end = core::cmp::min(offset + length, chars_vec.len());
                 chars_vec[offset..end].iter().collect()
             }
             '%' => {
-                if word.is_empty() { return val; }
+                if word.is_empty() {
+                    return val;
+                }
                 remove_suffix(&val, &word, greedy)
             }
-            _ => {
-                val
-            }
+            _ => val,
         }
     }
 
@@ -601,9 +816,17 @@ impl ShellEnv {
         let mut i = start;
         let mut expr = String::new();
         while i < chars.len() && depth > 0 {
-            if chars[i] == '(' { depth += 1; expr.push('('); }
-            else if chars[i] == ')' { depth -= 1; if depth > 1 { expr.push(')'); } }
-            else { expr.push(chars[i]); }
+            if chars[i] == '(' {
+                depth += 1;
+                expr.push('(');
+            } else if chars[i] == ')' {
+                depth -= 1;
+                if depth > 1 {
+                    expr.push(')');
+                }
+            } else {
+                expr.push(chars[i]);
+            }
             i += 1;
         }
         let result = crate::scripting::eval_arithmetic(&expr);
@@ -615,9 +838,17 @@ impl ShellEnv {
         let mut i = start;
         let mut cmd = String::new();
         while i < chars.len() && depth > 0 {
-            if chars[i] == '(' { depth += 1; cmd.push('('); }
-            else if chars[i] == ')' { depth -= 1; if depth > 0 { cmd.push(')'); } }
-            else { cmd.push(chars[i]); }
+            if chars[i] == '(' {
+                depth += 1;
+                cmd.push('(');
+            } else if chars[i] == ')' {
+                depth -= 1;
+                if depth > 0 {
+                    cmd.push(')');
+                }
+            } else {
+                cmd.push(chars[i]);
+            }
             i += 1;
         }
         (cmd, i)
@@ -626,7 +857,10 @@ impl ShellEnv {
     fn count_positional(&self) -> u32 {
         let mut count = 0u32;
         let mut idx = 1u32;
-        while self.get(&format!("{}", idx)).is_some() { count += 1; idx += 1; }
+        while self.get(&format!("{}", idx)).is_some() {
+            count += 1;
+            idx += 1;
+        }
         count
     }
 }
@@ -659,7 +893,9 @@ fn replace_first(val: &str, pattern: &str, replacement: &str) -> String {
 
 fn replace_all_fn(val: &str, pattern: &str, replacement: &str) -> String {
     let val_str = val.to_string();
-    if pattern.is_empty() { return val_str; }
+    if pattern.is_empty() {
+        return val_str;
+    }
     let mut result = String::new();
     let mut last = 0;
     while let Some(pos) = val_str[last..].find(pattern) {
@@ -715,20 +951,31 @@ fn glob_match_slice(name: &[char], pattern: &[char]) -> bool {
 }
 
 fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
-    if pi == pat.len() { return ni == name.len(); }
+    if pi == pat.len() {
+        return ni == name.len();
+    }
     // extglob: ?(p1|p2), *(p1|p2), +(p1|p2), @(p1|p2), !(p1|p2)
-    if pi + 1 < pat.len() && pat[pi + 1] == '('
-        && matches!(pat[pi], '?' | '*' | '+' | '@' | '!') {
+    if pi + 1 < pat.len() && pat[pi + 1] == '(' && matches!(pat[pi], '?' | '*' | '+' | '@' | '!') {
         let ext_op = pat[pi];
         let list_start = pi + 2;
         let mut depth = 1u32;
         let mut j = list_start;
         while j < pat.len() && depth > 0 {
-            match pat[j] { '(' => depth += 1, ')' => depth -= 1, _ => {} }
-            if depth > 0 { j += 1; }
+            match pat[j] {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                j += 1;
+            }
         }
         let list_end = j;
-        let after_paren = if list_end < pat.len() { list_end + 1 } else { list_end };
+        let after_paren = if list_end < pat.len() {
+            list_end + 1
+        } else {
+            list_end
+        };
         // Split alternatives by '|' at depth 0
         let mut alts: Vec<(usize, usize)> = Vec::new();
         let mut seg_start = list_start;
@@ -736,31 +983,51 @@ fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
         let mut inner_depth = 0i32;
         while k < list_end {
             match pat[k] {
-                '(' => { inner_depth += 1; k += 1; }
-                ')' => { inner_depth -= 1; k += 1; }
-                '|' if inner_depth == 0 => { alts.push((seg_start, k)); k += 1; seg_start = k; }
-                _ => { k += 1; }
+                '(' => {
+                    inner_depth += 1;
+                    k += 1;
+                }
+                ')' => {
+                    inner_depth -= 1;
+                    k += 1;
+                }
+                '|' if inner_depth == 0 => {
+                    alts.push((seg_start, k));
+                    k += 1;
+                    seg_start = k;
+                }
+                _ => {
+                    k += 1;
+                }
             }
         }
         alts.push((seg_start, list_end));
         match ext_op {
             '?' => {
-                if glob_match_inner(name, pat, ni, after_paren) { return true; }
+                if glob_match_inner(name, pat, ni, after_paren) {
+                    return true;
+                }
                 for &(s, e) in &alts {
                     let alt = &pat[s..e];
                     let mut combined = Vec::new();
                     combined.extend_from_slice(alt);
                     combined.extend_from_slice(&pat[after_paren..]);
-                    if glob_match_inner(name, &combined, ni, 0) { return true; }
+                    if glob_match_inner(name, &combined, ni, 0) {
+                        return true;
+                    }
                 }
                 return false;
             }
             '*' => {
-                if glob_match_inner(name, pat, ni, after_paren) { return true; }
+                if glob_match_inner(name, pat, ni, after_paren) {
+                    return true;
+                }
                 for pos in ni..name.len() {
                     for &(s, e) in &alts {
                         let alt = &pat[s..e];
-                        if alt.is_empty() { continue; }
+                        if alt.is_empty() {
+                            continue;
+                        }
                         let mut alt_combined = alt.to_vec();
                         let mut rest: Vec<char> = pat[pi..].to_vec();
                         alt_combined.append(&mut rest);
@@ -776,14 +1043,18 @@ fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
             '+' => {
                 for &(s, e) in &alts {
                     let alt = &pat[s..e];
-                    if alt.is_empty() { continue; }
+                    if alt.is_empty() {
+                        continue;
+                    }
                     let mut alt_combined = alt.to_vec();
                     alt_combined.extend_from_slice(&pat[after_paren..]);
-                    if glob_match_inner(name, &alt_combined, ni, 0) { return true; }
-                    let star_pat: Vec<char> = alt.iter()
-                        .chain(pat[pi..].iter())
-                        .copied().collect();
-                    if glob_match_inner(name, &star_pat, ni, 0) { return true; }
+                    if glob_match_inner(name, &alt_combined, ni, 0) {
+                        return true;
+                    }
+                    let star_pat: Vec<char> = alt.iter().chain(pat[pi..].iter()).copied().collect();
+                    if glob_match_inner(name, &star_pat, ni, 0) {
+                        return true;
+                    }
                 }
                 return false;
             }
@@ -793,7 +1064,9 @@ fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
                     let mut combined = Vec::new();
                     combined.extend_from_slice(alt);
                     combined.extend_from_slice(&pat[after_paren..]);
-                    if glob_match_inner(name, &combined, ni, 0) { return true; }
+                    if glob_match_inner(name, &combined, ni, 0) {
+                        return true;
+                    }
                 }
                 return false;
             }
@@ -803,7 +1076,9 @@ fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
                     let mut combined = Vec::new();
                     combined.extend_from_slice(alt);
                     combined.extend_from_slice(&pat[after_paren..]);
-                    if glob_match_inner(name, &combined, ni, 0) { return false; }
+                    if glob_match_inner(name, &combined, ni, 0) {
+                        return false;
+                    }
                 }
                 return glob_match_inner(name, pat, ni, after_paren);
             }
@@ -812,27 +1087,42 @@ fn glob_match_inner(name: &[char], pat: &[char], ni: usize, pi: usize) -> bool {
     }
     if pat[pi] == '*' {
         for skip in 0..=name.len() - ni {
-            if glob_match_inner(name, pat, ni + skip, pi + 1) { return true; }
+            if glob_match_inner(name, pat, ni + skip, pi + 1) {
+                return true;
+            }
         }
         return false;
     }
-    if pat[pi] == '?' { return ni < name.len() && glob_match_inner(name, pat, ni + 1, pi + 1); }
+    if pat[pi] == '?' {
+        return ni < name.len() && glob_match_inner(name, pat, ni + 1, pi + 1);
+    }
     if pat[pi] == '[' {
         let mut j = pi + 1;
         let mut negate = false;
-        if j < pat.len() && pat[j] == '^' { negate = true; j += 1; }
-        if j < pat.len() && pat[j] == ']' { j += 1; }
+        if j < pat.len() && pat[j] == '^' {
+            negate = true;
+            j += 1;
+        }
+        if j < pat.len() && pat[j] == ']' {
+            j += 1;
+        }
         let mut found = false;
         while j < pat.len() && pat[j] != ']' {
             if j + 2 < pat.len() && pat[j + 1] == '-' {
-                if ni < name.len() && name[ni] >= pat[j] && name[ni] <= pat[j + 2] { found = true; }
+                if ni < name.len() && name[ni] >= pat[j] && name[ni] <= pat[j + 2] {
+                    found = true;
+                }
                 j += 3;
             } else {
-                if ni < name.len() && name[ni] == pat[j] { found = true; }
+                if ni < name.len() && name[ni] == pat[j] {
+                    found = true;
+                }
                 j += 1;
             }
         }
-        if found == negate { return false; }
+        if found == negate {
+            return false;
+        }
         return ni < name.len() && glob_match_inner(name, pat, ni + 1, j + 1);
     }
     ni < name.len() && name[ni] == pat[pi] && glob_match_inner(name, pat, ni + 1, pi + 1)

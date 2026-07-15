@@ -11,9 +11,7 @@ use super::super::super::services::{
     ShellResponse, StoreCommand, StoreResponse,
 };
 
-lazy_static! {
-    static ref SERVICE_IPC: ServiceIpcManager = ServiceIpcManager::new();
-}
+static SERVICE_IPC: spin::Lazy<ServiceIpcManager> = spin::Lazy::new(|| ServiceIpcManager::new());
 
 pub fn init() {
     SERVICE_IPC.bind_runtime_endpoints();
