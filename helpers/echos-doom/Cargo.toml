@@ -1,0 +1,12 @@
+[package]
+name = "echos-doom"
+version = "0.1.0"
+edition = "2021"
+description = "echOS Doom game engine port — doomgeneric-based"
+license = "MIT"
+
+[dependencies]
+spin = "0.9.4"
+
+[lib]
+test = true

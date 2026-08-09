@@ -73,6 +73,8 @@ pub mod doh;
 pub mod dot;
 pub mod dscp;
 pub mod ebpf;
+pub mod ebpf_maps;
+pub mod tc_bpf;
 pub mod ecmp;
 pub mod ethernet;
 pub mod ethtool;

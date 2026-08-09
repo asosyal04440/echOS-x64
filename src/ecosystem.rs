@@ -887,6 +887,10 @@ impl EcosystemCoordinator {
     pub fn bootstrap_isolation(&mut self) {
         crate::ironshim_bridge::init_ironshim_bridge();
         self.ironshim_ready = true;
+        // Valkyrie-V init is already called from security::init() during boot.
+        // The AtomicBool guard inside init_valkyrie() makes this call
+        // idempotent — it will return Ok(()) if already initialized,
+        // or Err(NotAvailable) if the valkyrie feature is not compiled in.
         self.valkyrie_ready = crate::valkyrie_virt::init_valkyrie().is_ok();
     }
 
@@ -926,6 +930,19 @@ impl EcosystemCoordinator {
         let plan = self.plan_for(SubsystemTarget::Win32, risk);
         self.enforce_plan(plan)?;
         let pe = load_pe(image)?;
+
+        // Valkyrie-V: stream the guest binary into a new bridge VM.
+        // The bridge handle is registered with the tick driver, so the
+        // state machine (Fetching→Validating→Loading→Launching→Running)
+        // is automatically polled every ~10 ms by the scheduler.
+        if self.valkyrie_ready {
+            let _handle = crate::valkyrie_virt::load_guest_vm(
+                image,
+                4,   // 4 vCPUs
+                256, // 256 MiB guest RAM
+                [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+            );
+        }
         let translated_modules = self
             .dll_translation
             .iter()

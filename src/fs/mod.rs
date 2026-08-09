@@ -145,6 +145,7 @@ use lazy_static::lazy_static;
 use rcore_fs::vfs::{FileSystem, FileType, FsInfo, INode, Metadata, PollStatus, Timespec};
 use spin::Mutex;
 
+use alloc::rc::Rc;
 use crate::fs::dcache::{Dcache, Dentry};
 
 lazy_static! {
@@ -152,18 +153,16 @@ lazy_static! {
 }
 
 /// Dentry cache'de lookup yapar, miss durumunda f2fs backend ile doldurur.
-pub fn vfs_dcache_resolve(parent_ino: u64, name: &str) -> Option<Dentry> {
+pub fn vfs_dcache_resolve(parent_ino: u64, name: &str) -> Option<Rc<Dentry>> {
     let mut cache = VFS_DCACHE.lock();
     if let Some(d) = cache.lookup(parent_ino, name) {
         return Some(d);
     }
     drop(cache);
 
-    // Miss: f2fs ile path resolution yap
     let path = if parent_ino == 0 {
         format!("/{}", name)
     } else {
-        // parent ino'dan parent path bul — simplified: name'i parent path'e ekle
         String::from(name)
     };
     match crate::fs::f2fs::open_entry(&path) {
@@ -180,8 +179,8 @@ pub fn vfs_dcache_resolve(parent_ino: u64, name: &str) -> Option<Dentry> {
                 generation: 0,
             };
             let mut cache = VFS_DCACHE.lock();
-            cache.alloc(dentry.clone());
-            Some(dentry)
+            let rc = cache.alloc(dentry);
+            Some(rc)
         }
         Err(_) => None,
     }
@@ -189,7 +188,7 @@ pub fn vfs_dcache_resolve(parent_ino: u64, name: &str) -> Option<Dentry> {
 
 /// Path'i "/a/b/c" şeklinde parçalara ayırır, her component için dcache'den lookup yapar.
 /// Başarısız olan component için f2fs backend'e gider, sonucu dcache'e ekler.
-pub fn vfs_dcache_resolve_full(path: &str) -> Option<Dentry> {
+pub fn vfs_dcache_resolve_full(path: &str) -> Option<Rc<Dentry>> {
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
         return None;

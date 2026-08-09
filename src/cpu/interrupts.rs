@@ -56,6 +56,7 @@ fn keyboard_interrupt_logic(_frame: KernelTrapFrameView) {
 
 #[cfg(any(target_os = "none", target_os = "uefi"))]
 pub extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = crate::cpu::local::KernelGsGuard::from_interrupted_cs(stack_frame.code_segment);
     timer_interrupt_logic(KernelTrapFrameView::from(&stack_frame));
 }
 
@@ -66,6 +67,7 @@ pub fn timer_interrupt_handler_host() {
 
 #[cfg(any(target_os = "none", target_os = "uefi"))]
 pub extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = crate::cpu::local::KernelGsGuard::from_interrupted_cs(stack_frame.code_segment);
     keyboard_interrupt_logic(KernelTrapFrameView::from(&stack_frame));
 }
 

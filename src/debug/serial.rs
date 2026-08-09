@@ -1,7 +1,7 @@
-//! # echOS Basit Seri Port (Emergency Serial)
+//! # echOS Acil Seri Port (Emergency Serial)
 //!
 //! Kernel panic veya kilitlenme durumlarında kullanılmak üzere
-//! interrupt gerektirmeyen, doğrudan port erişimi sağlayan basit sürücü.
+//! interrupt gerektirmeyen, doğrudan port erişimi sağlayan acil tanı sürücüsü.
 //! Normal loglama için `serial/uart.rs` tercih edilmelidir.
 
 use core::fmt;
@@ -78,7 +78,11 @@ pub fn trace_raw(args: fmt::Arguments) {
     // Güvenli değil ama panic sırasında kilitlenme olmamalı.
     // Her çağrıda yeni port oluşturuyoruz (stateless).
     let mut s = unsafe { SimpleSerial::new(0x3F8) };
-    let _ = s.write_fmt(args);
+    if s.write_fmt(args).is_err() {
+        // SimpleSerial::write_str is currently infallible; retain an explicit
+        // diagnostic if that contract changes.
+        s.force_write_str("!");
+    }
 }
 
 impl fmt::Write for SimpleSerial {

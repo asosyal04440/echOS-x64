@@ -23,6 +23,7 @@ BOOT_FLAG_SUSPEND_RESUME_SMOKE = 1 << 1
 BOOT_FLAG_FS_SMOKE_TEST = 1 << 2
 BOOT_FLAG_SHELL_SMOKE_TEST = 1 << 3
 BOOT_FLAG_SHELL_COMMAND_TEST = 1 << 4
+BOOT_FLAG_BOOT_TESTS = 1 << 5
 
 SLOT_IDS = {
     "none": 0,
@@ -776,6 +777,7 @@ def build_boot_control(
     fs_smoke_test: bool = False,
     shell_smoke_test: bool = False,
     shell_command_test: bool = False,
+    boot_tests: bool = False,
 ) -> bytes:
     active = SLOT_IDS[active_slot]
     pending = SLOT_IDS[pending_slot]
@@ -804,6 +806,8 @@ def build_boot_control(
         boot_flags |= BOOT_FLAG_SHELL_SMOKE_TEST
     if shell_command_test:
         boot_flags |= BOOT_FLAG_SHELL_COMMAND_TEST
+    if boot_tests:
+        boot_flags |= BOOT_FLAG_BOOT_TESTS
     blob[48] = boot_flags
     struct.pack_into("<I", blob, 128, 0)
     crc = zlib.crc32(blob) & 0xFFFFFFFF
@@ -825,6 +829,7 @@ def main() -> None:
     parser.add_argument("--fs-smoke-test", action="store_true")
     parser.add_argument("--shell-smoke-test", action="store_true")
     parser.add_argument("--shell-command-test", action="store_true")
+    parser.add_argument("--boot-tests", action="store_true")
     parser.add_argument("--update-smoke-request-url")
     parser.add_argument("--pe-smoke-bundle", type=Path)
     parser.add_argument("--bundle", action="append", type=Path, default=[])
@@ -844,6 +849,7 @@ def main() -> None:
             args.fs_smoke_test,
             args.shell_smoke_test or args.shell_command_test,
             args.shell_command_test,
+            args.boot_tests,
         )
     pe_smoke_bundle = args.pe_smoke_bundle.read_bytes() if args.pe_smoke_bundle else None
     curated_bundles = [path.read_bytes() for path in args.bundle]
@@ -958,6 +964,7 @@ def main() -> None:
             "fs_smoke_test": args.fs_smoke_test,
             "shell_smoke_test": args.shell_smoke_test or args.shell_command_test,
             "shell_command_test": args.shell_command_test,
+            "boot_tests": args.boot_tests,
             "update_smoke_request_url": args.update_smoke_request_url,
             "pe_smoke_bundle": str(args.pe_smoke_bundle) if args.pe_smoke_bundle else None,
             "bundles": [str(path) for path in args.bundle],

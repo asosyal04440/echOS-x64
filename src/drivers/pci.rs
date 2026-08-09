@@ -543,7 +543,8 @@ fn msi_message_address(apic_id: u32) -> u64 {
 
 /// MSI mesaj verisini oluşturur: interrupt vektör numarasını 16-bit olarak döner.
 fn msi_message_data(vector: u8) -> u16 {
-    vector as u16
+    // Bits 7:0 = Vector, Bits 10:8 = Delivery Mode (000=Fixed), Bit 13 = Trigger (0=Edge)
+    vector as u16 | 0x0000
 }
 
 /// Tek vektör için MSI konfigürasyonu yapar.
@@ -571,6 +572,7 @@ pub fn configure_msi(bus: u8, device: u8, function: u8, vector: u8, apic_id: u32
     let mut command = read_config_word(bus, device, function, 0x04);
     command |= 1 << 10;
     write_config_word(bus, device, function, 0x04, command);
+    crate::interrupts::msi_register_device(vector, bus, device, function);
     true
 }
 
@@ -624,6 +626,9 @@ pub fn configure_msi_multi(
     let mut command = read_config_word(bus, device, function, 0x04);
     command |= 1 << 10;
     write_config_word(bus, device, function, 0x04, command);
+    for &vector in vectors {
+        crate::interrupts::msi_register_device(vector, bus, device, function);
+    }
     true
 }
 
@@ -683,6 +688,7 @@ pub fn configure_msix(
     let mut command = read_config_word(bus, device, function, 0x04);
     command |= 1 << 10;
     write_config_word(bus, device, function, 0x04, command);
+    crate::interrupts::msi_register_device(vector, bus, device, function);
     true
 }
 
@@ -750,6 +756,130 @@ pub fn configure_msix_table(
     let mut command = read_config_word(bus, device, function, 0x04);
     command |= 1 << 10;
     write_config_word(bus, device, function, 0x04, command);
+    for &vector in vectors {
+        crate::interrupts::msi_register_device(vector, bus, device, function);
+    }
+    true
+}
+
+/// MSI adres alanındaki hedef APIC ID'yi değiştir (runtime affinity).
+pub fn set_msi_affinity(bus: u8, device: u8, function: u8, vector: u8, apic_id: u32) -> bool {
+    let caps = read_capabilities(bus, device, function);
+    if !caps.has_msi || caps.msi_offset == 0 {
+        return false;
+    }
+    let offset = caps.msi_offset as u16;
+    let mut control = read_config_word(bus, device, function, offset + 2);
+    // Disable MSI (bit0=0) during update to prevent race
+    write_config_word(bus, device, function, offset + 2, control & !1);
+    core::sync::atomic::spin_loop_hint();
+    let is_64 = (control & (1 << 7)) != 0;
+    let address = msi_message_address(apic_id);
+    let data = msi_message_data(vector);
+    write_config_dword(bus, device, function, offset + 4, address as u32);
+    if is_64 {
+        write_config_dword(bus, device, function, offset + 8, (address >> 32) as u32);
+    }
+    let data_offset = if is_64 { offset + 12 } else { offset + 8 };
+    write_config_word(bus, device, function, data_offset, data);
+    control = read_config_word(bus, device, function, offset + 2);
+    // Re-enable MSI (bit0=1)
+    write_config_word(bus, device, function, offset + 2, control | 1);
+    true
+}
+
+/// MSI-X tablo girişine yeni hedef APIC ID yazar (runtime affinity).
+pub fn set_msix_affinity(
+    bus: u8,
+    device: u8,
+    function: u8,
+    table_index: u16,
+    vector: u8,
+    apic_id: u32,
+) -> bool {
+    let caps = read_capabilities(bus, device, function);
+    if !caps.has_msix || caps.msix_offset == 0 {
+        return false;
+    }
+    let msix = match read_msix(bus, device, function) {
+        Some(m) => m,
+        None => return false,
+    };
+    let bar = match read_bar_mmio(bus, device, function, msix.table_bar) {
+        Some(b) => b,
+        None => return false,
+    };
+    let mapped = crate::memory::map_mmio(bar.base, bar.size as usize);
+    let base = if mapped.is_null() {
+        crate::memory::active_physical_offset() + bar.base
+    } else {
+        mapped as u64
+    };
+    let entry_addr = base + msix.table_offset as u64 + (table_index as u64) * 16;
+    let address = msi_message_address(apic_id);
+    let data = msi_message_data(vector);
+    unsafe {
+        write_volatile((entry_addr + 12) as *mut u32, 1);
+        core::sync::atomic::spin_loop_hint();
+        write_volatile(entry_addr as *mut u32, address as u32);
+        write_volatile((entry_addr + 4) as *mut u32, (address >> 32) as u32);
+        write_volatile((entry_addr + 8) as *mut u32, data as u32);
+        write_volatile((entry_addr + 12) as *mut u32, 0);
+    }
+    true
+}
+
+/// MSI mask/unmask (bit0 = MSI Enable).
+pub fn msi_set_mask(bus: u8, device: u8, function: u8, masked: bool) -> bool {
+    let caps = read_capabilities(bus, device, function);
+    if !caps.has_msi || caps.msi_offset == 0 {
+        return false;
+    }
+    let offset = caps.msi_offset as u16;
+    let control = read_config_word(bus, device, function, offset + 2);
+    if masked {
+        write_config_word(bus, device, function, offset + 2, control & !1);
+    } else {
+        write_config_word(bus, device, function, offset + 2, control | 1);
+    }
+    true
+}
+
+/// MSI-X table girişinin mask bitini değiştirir.
+pub fn msix_set_mask_entry(
+    bus: u8,
+    device: u8,
+    function: u8,
+    table_index: u16,
+    masked: bool,
+) -> bool {
+    let caps = read_capabilities(bus, device, function);
+    if !caps.has_msix || caps.msix_offset == 0 {
+        return false;
+    }
+    let msix = match read_msix(bus, device, function) {
+        Some(m) => m,
+        None => return false,
+    };
+    let bar = match read_bar_mmio(bus, device, function, msix.table_bar) {
+        Some(b) => b,
+        None => return false,
+    };
+    let mapped = crate::memory::map_mmio(bar.base, bar.size as usize);
+    let base = if mapped.is_null() {
+        crate::memory::active_physical_offset() + bar.base
+    } else {
+        mapped as u64
+    };
+    let entry_addr = base + msix.table_offset as u64 + (table_index as u64) * 16;
+    unsafe {
+        let vec_ctrl = read_volatile((entry_addr + 12) as *const u32);
+        if masked {
+            write_volatile((entry_addr + 12) as *mut u32, vec_ctrl | 1);
+        } else {
+            write_volatile((entry_addr + 12) as *mut u32, vec_ctrl & !1);
+        }
+    }
     true
 }
 

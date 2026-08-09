@@ -18,6 +18,7 @@ pub mod s3_resume;
 pub mod smp_state;
 
 pub mod ap;
+pub mod local;
 
 /// ACPI (Advanced Configuration and Power Interface) desteği
 pub mod acpi;

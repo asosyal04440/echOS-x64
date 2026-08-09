@@ -1,397 +1,333 @@
 # echOS-x64
 
-**echOS-x64; Rust `no_std` ile geliştirilen, UEFI, Multiboot2, Limine, SMP zamanlayıcı, bellek yönetimi, dosya sistemleri, ağ yığını ve GUI/compositor araştırmasına odaklanan x86-64 işletim sistemi çekirdeğidir.**
+**Rust ile yazılmış, `no_std` x86-64 işletim sistemi çekirdeği araştırma ve geliştirme platformu.**
+
+echOS, firmware devrinden başlayıp CPU ve kesme durumuna, belleğe, zamanlayıcıya,
+sürücülere, depolamaya, ağa ve yerel grafik oturumuna kadar uzanan tek bir kod
+ağacı üzerinde çalışır. Amaç, bu katmanları hazır servisler olarak tüketmek yerine
+birlikte inceleyebilmek, değiştirebilmek ve doğrulayabilmektir.
 
 [English README](README.md) · [Teknik rapor](echOS_teknik_rapor.pdf) · [Derleme ve çalıştırma](#derleme)
 
 <div align="center">
 
-```
+```text
  ███████╗ ██████╗██╗  ██╗ ██████╗ ███████╗    ██╗  ██╗ ██████╗ ██╗  ██╗
  ██╔════╝██╔════╝██║  ██║██╔═══██╗██╔════╝    ╚██╗██╔╝██╔════╝ ██║  ██║
- █████╗  ██║     ███████║██║   ██║███████╗     ╚███╔╝ ███████╗ ███████║
+ █████╗  ██║     ███████║██║   ██║███████╗     ╚███╔╝ ███████╗██║  ██║
  ██╔══╝  ██║     ██╔══██║██║   ██║╚════██║     ██╔██╗ ██╔═══██╗╚════██║
  ███████╗╚██████╗██║  ██║╚██████╔╝███████║    ██╔╝ ██╗╚██████╔╝     ██║
  ╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚═╝  ╚═╝ ╚═════╝      ╚═╝
 ```
 
-**Rust `no_std` x86-64 işletim sistemi araştırma çekirdeği.**
-
-[![CI: Simics Zero-Tolerance](https://img.shields.io/badge/CI-Simics%20Zero--Tolerance-blueviolet?style=flat-square&logo=github-actions)](/.github/workflows/simics-zero-tolerance.yml)
-[![Rust: nightly](https://img.shields.io/badge/Rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
-[![Hedef: x86_64-unknown-none](https://img.shields.io/badge/hedef-x86__64--unknown--none-lightgrey?style=flat-square)]()
-[![Lisans: AGPL-3.0](https://img.shields.io/badge/lisans-AGPL--3.0-green?style=flat-square)](LICENSE)
-[![no_std](https://img.shields.io/badge/no__std-✓-blue?style=flat-square)]()
-[![Boot: UEFI](https://img.shields.io/badge/boot-UEFI%20%7C%20Multiboot2%20%7C%20Limine-informational?style=flat-square)]()
+[![Rust](https://img.shields.io/badge/Rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
+[![Hedef](https://img.shields.io/badge/hedef-x86__64--unknown--none-lightgrey?style=flat-square)]()
+[![no_std](https://img.shields.io/badge/no__std-evet-blue?style=flat-square)]()
+[![Boot](https://img.shields.io/badge/boot-UEFI%20%7C%20Limine%20%7C%20Multiboot2-informational?style=flat-square)]()
+[![Lisans](https://img.shields.io/badge/lisans-AGPL--3.0--only-green?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-## İçindekiler
+## Kısaca
 
-1. [Genel Bakış](#genel-bakış)
-2. [Mimari](#mimari)
-3. [Mevcut Durum](#mevcut-durum)
-4. [Phase 6 Dosya Sistemi ve Depolama](#phase-6-dosya-sistemi-ve-depolama)
-5. [Modül Ağacı](#modül-ağacı)
-6. [Derleme](#derleme)
-7. [Çalıştırma](#çalıştırma)
-8. [CI — Simics Sıfır Tolerans Kapısı](#ci--simics-sıfır-tolerans-kapısı)
-9. [Teknik Rapor](#teknik-rapor)
-10. [Üçüncü Taraf Bileşenler](#üçüncü-taraf-bileşenler)
-11. [Lisans](#lisans)
+| Başlık | Mevcut proje yapısı |
+|---|---|
+| Dil | Kernel yollarında Rust ve `no_std` |
+| Mimari | x86-64 |
+| Önyükleme | UEFI, Limine, Multiboot2 |
+| Çalıştırma | QEMU/OVMF, Limine BIOS smoke, Multiboot2 smoke, Intel Simics iş akışları |
+| Ana alanlar | CPU, kesmeler, bellek, zamanlayıcı, depolama, ağ, sürücüler, güvenlik |
+| Grafik | Framebuffer grafikleri ve Velvet Gloves yerel oturumu/compositor'ı |
+| Durum | Aktif araştırma ve mühendislik geliştirmesi |
+| Lisans | echOS proje kodu için AGPL-3.0-only |
 
----
+echOS bir Linux dağıtımı değildir ve bitmiş bir masaüstü işletim sistemi olarak
+sunulmaz. Bazı alt sistemler test ve boot kapılarıyla doğrulanırken bazıları aktif
+geliştirme aşamasındadır. Aşağıdaki durum tabloları bu ayrımı açıkça gösterir.
 
-## Genel Bakış
+## echOS neden var?
 
-**echOS-x64**, Rust `no_std` ile geliştirilen x86-64 işletim sistemi araştırma çekirdeğidir. Mevcut public repo; boot akışı, çekirdek mimarisi, bellek/zamanlayıcı/sürücü deneyleri, v1 için test kapılı dosya sistemi/depolama katmanı, host-side araçlar ve yeniden üretilebilir yerel doğrulama yollarına odaklanır.
+Birçok işletim sistemi projesi tek bir katmanı öne çıkarıp geri kalanını hazır
+olarak alır. echOS ise katmanları birlikte görülebilecek kadar yakın tutar. Boot
+bağlamındaki bir değişiklikten bellek yöneticisine, zamanlayıcıya, sürücü sınırına,
+dosya sistemine ve grafik oturumuna kadar olan zincir aynı kod ağacında izlenebilir.
 
-Bu README bilinçli olarak konservatiftir: `✅` somut implementasyonu veya repo workflow'u bu ağaçta görünen alanı, `⏳` ise aktif geliştirme, kısmi entegrasyon, hedefe bağlı destek veya daha güçlü doğrulama bekleyen alanı gösterir.
+Projenin mühendislik yaklaşımı şunlara dayanır:
 
----
+- sahiplik ve hata sınırlarını açıkça tanımlamak;
+- kernel yollarında `no_std`, host tarafında ise gerektiği kadar doğrulama kullanmak;
+- çekişmenin önemli olduğu yerlerde lock-free veya per-CPU yapıları tercih etmek;
+- uydurma register davranışı yerine gerçek donanım sözleşmelerine dayanmak;
+- neyin doğrulandığını test, smoke ve gate çıktılarıyla göstermek.
 
 ## Mimari
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                       KULLANICI ALANI (gelecek)                      │
-│         POSIX API │ Win32 API │ ELF Yükleyici │ PE Yükleyici │ VDSO  │
-├──────────────────────────────────────────────────────────────────────┤
-│                        SİSTEM ÇAĞRISI ARAYÜZÜ                        │
-├────────────┬─────────────┬──────────────┬───────────────────────────┤
-│ ZAMANLAYIC │   BELLEK    │  DOSYA SİS.  │          AĞ               │
-│  CFS/RT/DL │  PMM + VMM  │ VFS+ext4/F2FS│  smoltcp destekli yığın   │
-│  SMP/AP    │  Allocator  │ imaj araçları│  protokol deneyleri       │
-│  Work-Steal│  paging     │ validasyon   │  paket/cihaz bağlantısı   │
-├────────────┴─────────────┴──────────────┴───────────────────────────┤
-│                          ÇEKİRDEK KATMAN                             │
-│   GDT │ IDT │ APIC │ IOAPIC │ IRQ Domains │ Softirq │ RCU │ Preempt │
-├──────────────────────────────────────────────────────────────────────┤
-│                          SÜRÜCÜ KATMANI                              │
-│  NVMe │ ATA │ VirtIO │ PCI │ USB (HID/CDC/MSD) │ PS/2 │ Ses │ BT   │
-├──────────────────────────────────────────────────────────────────────┤
-│                         DONANIM (x86-64)                             │
-│        UEFI Firmware │ ACPI Tabloları │ TSC │ RDRAND │ AES-NI │ AVX │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    B["UEFI / Limine / Multiboot2"] --> P["Platform katmanı\nACPI · CPU · APIC · kesmeler"]
+    P --> K["Kernel çekirdeği\nbellek · zamanlayıcı · syscall · IPC"]
+    K --> D["Sürücüler ve depolama\nPCI · VirtIO · NVMe · VFS"]
+    K --> N["Ağ\npaket, taşıma ve protokol yolları"]
+    K --> R["Runtime ve uyumluluk\nprocess · POSIX · Win32 · IronShim"]
+    R --> G["Velvet Gloves\nframebuffer masaüstü oturumu ve compositor"]
+    D --> G
 ```
 
-**Önyükleme akışı:**
+### Önyükleme yolları
 
-```
-UEFI/Multiboot2/Limine
-        │
-        ▼
-  UEFI Girişi (uefi_main)  ──VEYA──  Limine Girişi  ──VEYA──  Multiboot2 Girişi
-        │
-        ▼
-  GOP Framebuffer başlatma  →  Açılış ekranı
-        │
-        ▼
-  ACPI ayrıştırma  →  APIC / IOMMU başlatma  →  SMP AP bringup yolu
-        │
-        ▼
-  PMM + Sayfalama  →  TLSF Heap  →  Güvenlik (SMEP/SMAP/NX)  →  TPM Güvenli Önyükleme
-        │
-        ▼
-  Sürücüler (PCI / NVMe / VirtIO / USB)  →  Dosya sistemi bağlama
-        │
-        ▼
-  Ağ deneyleri  →  GUI/compositor deneyleri  →  kabuk/araçlar
-```
+Depoda ortak kernel faz modeline bağlanan üç boot adapter'ı bulunur:
 
----
+1. UEFI girişi ve GOP framebuffer kurulumu;
+2. bare-metal yolu için native Limine handoff;
+3. legacy ISO yolu için Multiboot2 handoff.
 
-## Mevcut Durum
+Adapter'lar üç ayrı kernel yerine ortak CPU, bellek, kesme, sürücü ve servis
+başlatma yollarına bağlanır. Her yolun handoff marker'larını ve temel fazlarını
+kontrol eden yerel script'ler depoda bulunur.
 
-| Alan | Durum | Not |
-|------|-------|-----|
-| Rust `no_std` çekirdek crate'i | ✅ | Ana çekirdek kodu Rust ve bare-metal hedeflere ayrılmış durumda. |
-| UEFI build hedefi | ✅ | `x86_64-unknown-uefi` build yolu ve `.efi` artifact'i dokümante edildi. |
-| QEMU/OVMF çalıştırma yolu | ✅ | `run_qemu.ps1` yerel smoke-run giriş noktasıdır. |
-| Paylaşılabilir UEFI VM ISO | ✅ | `scripts/build_vm_iso.ps1`, `build/appliance/echOS-uefi.iso` üretir. |
-| AGPL-3.0 proje lisansı | ✅ | Kök `LICENSE`, manifest metadata ve README rozeti aynı lisansı gösterir. |
-| Simics gate araçları | ✅ | Gate script'leri ve log/verdict yolları repo workflow'una dahil. |
-| Limine / Multiboot2 yolları | ⏳ | Kodda ve dokümanda var; public çalıştırma yolu olarak UEFI birincil. |
-| SMP / AP bring-up | ⏳ | Aktif çekirdek yolu; VirtualBox smoke profili bilinçli olarak tek vCPU. |
-| Bellek yönetimi | ⏳ | PMM, paging ve allocator işleri ağaçta var; daha güçlü public proof coverage gerekiyor. |
-| Zamanlayıcı | ⏳ | CFS/RT/deadline/work-stealing çalışmaları ağaçta; uçtan uca workload doğrulaması sürüyor. |
-| Dosya sistemi/depolama katmanı | ✅ | Phase 6 v1 kapısı; unified VFS, ext4, F2FS, FAT32/exFAT, loopback, notification, package/seed, crash, fsck/oracle esinli ve corrupt-image corpus'ları için geçiyor. |
-| Ağ | ⏳ | smoltcp destekli çalışma ağaçta; protokol matrisi tamamlanmış gibi sunulmuyor. |
-| GUI/compositor | ⏳ | Framebuffer, grafik ve UI deneyleri ağaçta; bitmiş masaüstü ortamı değil. |
-| Win32/POSIX/IronShim uyumluluğu | ⏳ | Uyumluluk çalışmaları var; public destek deneysel kabul edilmeli. |
-| Donanım sürücü yüzeyi | ⏳ | VirtIO/PCI/depolama/giriş/görüntü işleri aktif; bare-metal donanım kapsamı hedefe göre değişir. |
+### Kernel ve platform katmanı
 
----
+Platform tarafında ACPI keşfi, GDT/IDT kurulumu, Local APIC ve IO-APIC yönetimi,
+kesme yönlendirme, CPU-local durum, SMP başlatma, sayfalama, fiziksel frame tahsisi,
+heap tahsisi, preemption, RCU tarzı yayınlama ve mimariye özgü güvenlik kontrolleri
+yer alır.
 
-## Phase 6 Dosya Sistemi ve Depolama
+### Depolama ve dosya sistemi
 
-Phase 6, echOS v1 için mevcut dosya sistemi/depolama temelidir. Burada iddia Linux/Windows/FreeBSD ile birebir eşitlik değil; test kapılarından geçen, sınırları açık ve fail-closed çalışan bir v1 sözleşmesidir.
+Dosya sistemi çalışması unified VFS ve açık backend sözleşmeleri etrafında
+kuruludur. Mevcut ağaçta ext4, F2FS, FAT32, exFAT, salt-okunur image yolları,
+sanal dosya sistemleri ve NTFS, XFS, Btrfs için sınır çalışmaları bulunur.
+Desteklenmeyen işlemlerin açıkça hata vermesi hedeflenir; başarı kodu dönmesi,
+tek başına durability veya recovery semantiğinin var olduğu anlamına gelmez.
 
-### v1 kapsamı
+### Ağ ve sürücüler
 
-| Katman | Durum | Sözleşme |
-|--------|-------|----------|
-| Unified VFS | ✅ | Mount routing, path normalization, backend dispatch, stabil unsupported-operation hataları ve POSIX'e bakan read/write/stat/truncate/rename tarzı yüzeyler. |
-| ext4 | ✅ | Read/write, metadata mutation, journal entegrasyonu, feature gate ve VFS wiring içeren ana disk dosya sistemi adayı. |
-| F2FS | ✅ | Checkpoint/recovery odaklı yolları, read/write/truncate/rename/fsync/fdatasync kapsamı ve dürüst feature gate'leri olan flash odaklı dosya sistemi adayı. |
-| FAT32 | ✅ | Read/write/create/mkdir/rename/truncate yolları ve açık durability sınırları olan taşınabilir-medya backend'i. |
-| exFAT | ✅ | Read/write/create/mkdir/unlink/truncate, entry-set güvenli rename, checksum refresh ve riskli entry-set resize gerektiğinde fail-closed davranış. |
-| EROFS/SquashFS | ✅ | Salt-okunur seed/package image adayları. |
-| tmpfs/devfs/procfs/sysfs tarzı FS'ler | ✅ | Unsupported operasyonları açıkça hata dönen sanal dosya sistemi yüzeyleri. |
-| NTFS/XFS/Btrfs | ⏳ | Read/gate ve unsupported-boundary çalışması var; v1 için write parity iddiası yok. |
+Ağ tarafında paket ve taşıma protokolü deneyleri; sürücü tarafında PCI, VirtIO,
+depolama, giriş, görüntü, ses, USB, IOMMU ve ilgili destek yolları bulunur.
+Donanım kapsamı hedefe ve emulator profiline göre değişir. Bir sürücü modülünün
+varlığı, tek başına üretim donanım desteği iddiası değildir.
 
-### Doğrulama kanıtı
+### Velvet Gloves
 
-Phase 6 kapı çalıştırıcısı:
+Velvet Gloves, echOS'un yerel grafik oturumu ve compositor çalışmasıdır.
+Geleneksel bir masaüstü yığını yerine framebuffer ve kernel sahipli oturum yolu
+üzerinden ilerler. `src/gfx/` ve `src/gui/` altında masaüstü oturum durumu,
+pencere ve workspace davranışı, launcher ve uygulama yüzeyleri, giriş işleme,
+damage takibi, metin/UI çizimi ve ilgili shell davranışları bulunur.
 
-```powershell
-.\scripts\phase6_fs_gate.ps1 -SkipFullTests
-```
+Velvet Gloves gerçek ve entegre bir alt sistemdir; ancak bitmiş bir masaüstü ortamı
+veya hazır bir Wayland/X11 uygulaması olarak sunulmaz. Geliştirme sürmektedir.
 
-Bu README güncellemesinden önce geçen yerel doğrulamalar:
+## Mevcut durum
 
-- `cargo check --target x86_64-pc-windows-msvc --lib -q`
-- `.\scripts\phase6_fs_gate.ps1 -SkipFullTests`
-- `cargo test --target x86_64-pc-windows-msvc --test regression_suite -q`
-- `cargo test --target x86_64-pc-windows-msvc --tests -q`
+| Alan | Durum | Anlamı |
+|---|---|---|
+| Boot adapter'ları | Ağaçta mevcut | UEFI, Limine ve Multiboot2 yolları ortak kernel faz modeline bağlanır; yerel runner veya smoke yolu vardır. |
+| CPU, kesmeler ve bellek | Aktif | Ana implementasyonlar mevcut; hedefe özgü ve worst-case doğrulama sürüyor. |
+| Zamanlayıcı ve concurrency | Aktif | CFS/RT/deadline, work-stealing, RCU ve per-CPU çalışmalar ağaçta; uçtan uca workload kanıtı büyüyor. |
+| Dosya sistemi ve depolama | Test kapılı | Phase 6 runner'ları ve corpus'lar ilan edilen v1 sözleşmelerini kapsar; tam dış sistem eşitliği iddia edilmez. |
+| Ağ | Aktif | Protokol ve cihaz yolları aşamalı geliştiriliyor; tam protokol matrisi kapanmış değil. |
+| GUI ve Velvet Gloves | Deneysel | Yerel compositor/oturum kernel ağacına entegredir ve aktif geliştirme altındadır. |
+| POSIX/Win32/IronShim | Deneysel | Uyumluluk yüzeyleri vardır; geniş uygulama uyumluluğu sözü değildir. |
+| Simics doğrulaması | Kullanılabilir | Depoda donanım odaklı gate workflow'u vardır; uyumlu Simics ortamı gerekir. |
 
-Phase 6 kapısı şu alanları kapsar:
-
-- xfstests esinli corpus
-- crash consistency corpus
-- fsck/oracle esinli corpus
-- corrupt image hardening
-- backend feature gate'leri
-- loopback davranışı
-- notification davranışı
-- path ve VFS sözleşmeleri
-- package/seed state modeli
-
-### Sınırlar
-
-- Desteklenmeyen dosya sistemi özellikleri fail-closed davranmalıdır; fake success dönmemelidir.
-- `fsync`/`fdatasync` yalnızca backend'in gerçek durability yolu varsa başarılı döner.
-- FAT32/exFAT v1 için kullanışlı taşınabilir-medya dosya sistemleridir; journal'lı crash-recovery dosya sistemleri değildir.
-- Linux/Windows/FreeBSD ile tam dosya sistemi eşitliği iddia edilmez. Gerçek donanım soak testleri, daha geniş power-loss replay, uzun fuzzing ve daha büyük external oracle karşılaştırmaları sonraki hardening işleridir.
-
----
-
-## Modül Ağacı
-
-```
-src/
-├── main.rs              # Çekirdek giriş noktası (UEFI / Limine / Multiboot2)
-├── lib.rs               # Crate kökü, modül bildirimleri
-│
-├── boot/                # Önyükleme protokol işleyicileri, BootInfo çıkarma
-├── acpi/                # ACPI tablo ayrıştırma, AML yorumlayıcı, MADT, GPE
-├── apic/                # Local APIC, IO-APIC
-├── cpu/                 # SMP AP başlatma, TSC, NUMA, mikrokod, sanallaştırma
-├── gdt.rs               # Global Tanımlayıcı Tablosu
-├── interrupts/          # IDT, PIC, IRQ chip, IRQ etki alanları, softirq, yeniden eşleme
-│
-├── memory/              # PMM, sayfalama, TLSF ayrıştırıcı, OOM, THP, zswap
-├── allocator/           # Bump, bağlı liste, TLSF, yığın ayrıştırıcıları
-│
-├── task/                # CFS, RT, Deadline, Ghost zamanlayıcı, SMP iş çalma
-├── preempt.rs           # Önalım kontrolü (preempt_disable / enable)
-├── rcu.rs               # Read-Copy-Update
-├── atomic_ops.rs        # Mimariye özgü atomik işlemler
-├── memory_barriers.rs   # SMP bellek engelleri (smp_mb / rmb / wmb)
-│
-├── fs/                  # Unified VFS, ext4+journal, F2FS, FAT32/exFAT, NTFS/XFS/Btrfs gate'leri
-├── net/                 # TCP/UDP, TLS 1.3, QUIC, WireGuard, IPSec, HTTP/2
-├── drivers/             # NVMe, ATA, VirtIO, PCI, USB, ses, BT, IOMMU
-│
-├── security/            # SMEP/SMAP, TPM, Güvenli Önyükleme, MAC, seccomp, denetim
-├── crypto/              # AES-NI, SHA, Blake3, ChaCha20, Ed25519, Argon2
-├── fault/               # Hata enjeksiyonu, monitörler, checkpoint'ler, kurtarma
-│
-├── gui/                 # Pencere yöneticisi, masaüstü, dock, spotlight, uygulamalar
-├── gfx/                 # Tile compositor, SIMD harmanlama, GAL
-├── gop/                 # UEFI GOP framebuffer
-├── font/                # VGA bitmap font
-│
-├── ipc/                 # Kanallar, mesajlar
-├── tty/                 # TTY katmanı, PTY, ANSI, hat disiplini
-├── serial/              # UART hata ayıklama çıktısı
-├── shell/               # Etkileşimli kabuk, betikleme, satır editörü
-├── syscall.rs           # Sistem çağrısı dağıtıcısı
-│
-├── posix/               # POSIX uyumluluğu (pipe, msgq, semaphore, dlopen)
-├── linux_glue.rs        # Linux çekirdek ABI uyumluluk katmanı
-├── elf.rs               # ELF ikili dosya yükleyici
-├── pe_loader.rs         # PE/COFF ikili dosya yükleyici
-├── win32.rs             # Win32 API öykünmesi
-├── ironshim_bridge.rs   # IronShim Windows sürücü köprüsü
-├── vdso.rs              # Sanal DSO
-├── virt.rs              # VMX/SVM sanallaştırma
-└── gpu3d.rs             # 3D GPU API deneyleri
-```
-
----
+Bir revizyon için asıl kanıt, o revizyonda üretilmiş test, smoke ve gate çıktısıdır.
+README bir komutun mevcut olduğunu anlatır; çalıştırılmamış komutu başarılı ilan etmez.
 
 ## Derleme
 
-### Ön Koşullar
+### Ön koşullar
 
-- **Rust nightly** — `rust-toolchain.toml` aracılığıyla otomatik yönetilir
-- **LLVM / lld** bağlayıcı
-- QEMU (yerel test için) veya Intel Simics (CI kapısı için)
+- Windows PowerShell;
+- eksik bir araç varsa ilk çalıştırmada internet bağlantısı ve `winget`;
+- Windows bir paket kurulumu için isterse yönetici izni;
+- Simics gate'i çalıştırılacaksa uyumlu Intel Simics kurulumu.
+
+Normal QEMU runner'ı yerel araç zincirinin geri kalanını kendisi hazırlar. Rustup'ı,
+gerekli Rust hedeflerini, QEMU'yu, OVMF'yi, Python'ı ve host linker'ını kontrol eder;
+eksik Windows paketlerini `winget` üzerinden kurar. Temiz bir checkout'ta önceden
+üretilmiş EFI dosyası, appliance diski veya OVMF değişken deposu bulunması gerekmez.
+Donanım sanallaştırması zorunlu değildir: runner varsa WHPX kullanır, yoksa TCG'ye
+düşer.
+
+Ortamda paket kurulumu yasaksa Rustup, QEMU/OVMF ve gerekli host linker'ını elle kurup
+`-SkipBootstrap` ile çalıştırın. Script eksik bileşeni açıkça bildirir; sessizce
+eksik kurulumla devam etmez.
+
+Yeni bir Rust kurulumu için:
 
 ```bash
-# Rust'ı yükle (gerekiyorsa)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Gerekli hedefleri ekle (araç zinciri dosyası bunu otomatik yapar)
 rustup target add x86_64-unknown-none x86_64-unknown-uefi
 ```
 
-### UEFI Derlemesi (birincil hedef)
+Host tarafı kütüphane kontrolü:
 
-```bash
+```powershell
+cargo check --target x86_64-pc-windows-msvc --lib -q
+```
+
+UEFI release derlemesi:
+
+```powershell
 cargo build --target x86_64-unknown-uefi --release
-# Çıktı: target/x86_64-unknown-uefi/release/ech_os.efi
+# target/x86_64-unknown-uefi/release/ech_os.efi
 ```
 
-### Bare-metal Derlemesi (Limine/Multiboot2)
+Bare-metal release derlemesi:
 
-```bash
+```powershell
 cargo build --target x86_64-unknown-none --release
-# Çıktı: target/x86_64-unknown-none/release/ech_os
+# target/x86_64-unknown-none/release/ech_os
 ```
 
----
+Bare-metal linker, `ECHOS_KERNEL_LINKER` üzerinden seçilebilir. Limine runner'ı
+uygun olduğunda depodaki Limine linker yapılandırmasını kullanır.
 
-## Çalıştırma
+## Çalıştırma ve doğrulama
 
-### QEMU (UEFI — OVMF)
+### QEMU/OVMF
 
 ```powershell
 .\run_qemu.ps1
 ```
 
-### Paylaşılabilir UEFI VM ISO
+İlk çalıştırma için önerilen komut budur. Varsayılan olarak UEFI yolunu seçer; kernel
+EFI dosyasını ve host tarafındaki appliance builder'ını derler, `build/appliance/`
+altında raw GPT appliance üretir, disposable OVMF değişken deposu oluşturur, GUI'yi
+açar ve QEMU ile seri loglarını `logs/` altında tutar. Aynı komut, girdiler değişmediyse
+Cargo çıktılarını ve güncel üretilmiş artifact'leri yeniden kullanarak tekrar çalışır.
+
+Kullanışlı seçenekler:
+
+```powershell
+.\run_qemu.ps1 -Headless
+.\run_qemu.ps1 -Headless -BootTests
+.\run_qemu.ps1 -Profile debug -Accel tcg
+.\run_qemu.ps1 -SkipBootstrap
+```
+
+`-SkipBootstrap`, otomatik paket kurulumunu kapatır ve araç zinciri zaten hazırlanmış
+makineler içindir. `-Mode iso` açıkça seçilen legacy Multiboot2 yoludur; ağaçta eski
+bir ISO bulunduğu için otomatik olarak seçilmez.
+
+### Limine BIOS smoke
+
+```powershell
+.\scripts\run_limine_bios_smoke.ps1 -Profile debug
+```
+
+### Multiboot2 smoke
+
+```powershell
+.\scripts\run_multiboot2_smoke.ps1
+```
+
+Legacy `multiboot_iso/` yolu Multiboot2 workflow'u için tutulur.
+`multiboot_iso/boot/ech_os` üretilmiş kernel imajıdır; boot yapılandırması ise
+boot-media kurulumunun parçasıdır.
+
+### UEFI VM appliance
 
 ```powershell
 .\scripts\build_vm_iso.ps1
-# Çıktı: build\appliance\echOS-uefi.iso
+# build/appliance/echOS-uefi.iso
 ```
 
-Bu ISO, UEFI/OVMF kullanan VM'lerde optik medya olarak takılır. Legacy BIOS
-önyükleme bu artifact'in sözleşmesi değildir; VirtualBox/VMware/QEMU tarafında
-EFI/UEFI firmware seçilmelidir.
-
-VirtualBox test profili: `Other/Unknown (64-bit)`, EFI açık, CPU sayısı `1`,
-boot sırası disk/optik medya. Mevcut VirtualBox 7.2.x profilinde AP bring-up
-ikinci vCPU üzerinde TSS yükleme sırasında triple fault ürettiği için SMP
-VirtualBox smoke'ta kapalı tutulur; QEMU/Simics SMP doğrulaması ayrı kapıdır.
-
-Ya da manuel olarak:
-
-```bash
-qemu-system-x86_64 \
-  -bios ovmf/OVMF.fd \
-  -drive format=raw,file=fat:rw:esp/ \
-  -m 512M \
-  -serial stdio \
-  -device virtio-net-pci \
-  -device virtio-blk-pci,drive=disk0 \
-  -drive id=disk0,file=disk.img,if=none,format=raw
-```
-
-### Intel Simics
+### Dosya sistemi kapısı
 
 ```powershell
-# Simics GUI'yi başlat
+.\scripts\phase6_fs_gate.ps1 -SkipFullTests
+```
+
+### Secure Boot ve TPM smoke
+
+```powershell
+.\scripts\run_secure_boot_qemu_smoke.ps1 -Phase auto -BuildProfile debug -QemuProfile fast
+```
+
+Bu yol, dokümante edilen Windows workflow'unda Secure OVMF, disposable variable
+store ve WSL `swtpm` kullanır. Secure Boot anahtarları ve enrollment dosyaları yerel
+test malzemesidir; özel anahtarlar GitHub'a hiçbir koşulda yüklenmemelidir.
+
+### Simics kapısı
+
+```powershell
 .\run_simics.ps1
-
-# Ya da başsız kapı çalıştırma
+# veya
 Simics\echos-simics\bin\run-gate.bat
 ```
 
-### Eski Multiboot2 ISO
+Kapı; boot/kesme/giriş, syscall/güvenlik, dosya sistemi/ağ, performans ve IronShim
+stres eksenlerini raporlar. Her sonuç, onu üreten revizyon ve simulator ortamıyla
+birlikte değerlendirilmelidir.
 
-```bash
-# ISO önceden oluşturulmuş:
-multiboot_iso/boot/ech_os
+## Testler ve benchmark'lar
 
-qemu-system-x86_64 -cdrom echos.iso -m 512M -serial stdio
+Bare-metal hedefi host test runtime'ı sağlamadığı için host testleri MSVC hedefiyle
+çalıştırılır:
+
+```powershell
+cargo test --target x86_64-pc-windows-msvc --lib -q
+cargo test --target x86_64-pc-windows-msvc --tests -q
 ```
 
----
+Nightly benchmark'ları `Cargo.toml` içinde tanımlıdır; bellek, zamanlayıcı, dosya
+sistemi, ağ ve address-space yollarını kapsar. Bir benchmark çalıştırmadan önce
+gerekli feature ve target sözleşmesini kontrol edin.
 
-## CI — Simics Sıfır Tolerans Kapısı
+## Depo yapısı
 
-`main` / `master` dallarını hedefleyen her çekme isteği, Intel Simics simülatörü üzerinde çalışan **beş eksenli donanım kapısı** tarafından engellenir.
-
-### Kapı eksenleri
-
-| Eksen | Açıklama |
-|-------|----------|
-| `boot_irq_input` | Temiz UEFI önyükleme, kesme işleme, klavye/fare girişi |
-| `syscall_security` | Sistem çağrısı ABI doğruluğu + SMEP/SMAP zorlaması |
-| `fs_network` | Dosya sistemi okuma/yazma bütünlüğü + ağ bağlantısı |
-| `performance` | Önyükleme süresi, zamanlayıcı gecikmesi, bellek verimi kıyaslamaları |
-| `extreme_ironshim` | IronShim Windows sürücü yük testi |
-
-### Kurallar
-
-- **Tek bir FAIL → `çıkış kodu 2` → birleştirme engeli.**
-- Kapı günlükleri: `Simics/echos-simics/targets/echos/logs/gate_run_<zaman_damgası>.log`
-- Makine tarafından okunabilir karar: `Simics/echos-simics/targets/echos/logs/gate_verdict_<zaman_damgası>.json`
-
-### Manuel kapı çalıştırma
-
-```bat
-Simics\echos-simics\bin\run-gate.bat
+```text
+src/                 kernel, platform, alt sistemler, GUI, uyumluluk
+helpers/             workspace helper crate'leri
+echshell/            user-mode shell bileşeni
+third_party/         vendored veya yerel olarak sabitlenmiş upstream bileşenler
+scripts/             build, smoke, gate ve doğrulama runner'ları
+tests/               host ve alt sistem corpus testleri
+Simics/              simulator projesi ve gate entegrasyonu
+multiboot_iso/       legacy Multiboot2 boot-media yolu
+docs/                mimari, doğrulama ve mühendislik kayıtları
 ```
 
-### CI iş akışı
+Üretilmiş build çıktıları kaynak ağacını tanımlamaz. Özellikle `target/`, üretilmiş
+ISO ağaçları, Secure Boot özel anahtarları ve disposable VM/TPM durumları commit
+edilmemelidir. `artifacts/secure_boot/`, `limine_iso/`, `limine_iso_extract/` ve
+`minimal_iso/` yalnızca açıkça incelenmiş bir release artifact'i gerekiyorsa
+paylaşılmalıdır.
 
-```yaml
-# .github/workflows/simics-zero-tolerance.yml
-# Runner etiketi: [self-hosted, windows, simics]
-```
+## echOS üzerinde çalışmak
 
-Sonuçtan bağımsız olarak her kapı çalıştırmasından sonra yapıtlar (günlükler + seri yakalama) yüklenir.
+Bir alt sistemi değiştirmeden önce en yakın mimari veya doğrulama dokümanını okuyun,
+çalışma ağacını kontrol edin ve değişikliği tutarlı bir sınır içinde tutun.
+Donanım odaklı çalışmalarda kararı destekleyen specification ve referans sürümünü
+kaydedin. Davranış değiştiğinde ilgili test veya smoke yolunu da güncelleyin.
 
----
+En değerli katkı; sınırı belli, hata davranışı açık ve sonucu bir komutla
+gösterilebilen küçük ve yeniden üretilebilir bir değişikliktir.
 
-## Teknik Rapor
+## Üçüncü taraf kod ve lisans
 
-İç tasarım kararlarını, alt sistem mimarisini ve kıyaslamaları kapsayan ayrıntılı teknik rapor şu dosyada mevcuttur:
+Kök proje **AGPL-3.0-only** lisanslıdır; ayrıntılar için [`LICENSE`](LICENSE)
+dosyasına bakın. Üçüncü taraf bileşenler kendi upstream lisanslarını korur.
+Yeniden dağıtım öncesinde her `third_party/` veya helper crate içindeki manifest ve
+lisans dosyalarını kontrol edin.
 
-```
-echOS_teknik_rapor.pdf
-```
-
----
-
-## Üçüncü Taraf Bileşenler
-
-| Bileşen | Konum | Lisans |
-|---------|-------|--------|
-| `virtio-drivers` | `third_party/virtio-drivers` | MIT / Apache-2.0 |
-| `core_io` | `third_party/core_io` | MIT |
-| `ironshim-rs` | `third_party/ironshim-rs` | gizli |
-| `smoltcp` | crates.io | MIT / Apache-2.0 |
-| `rcore-fs` | git alt modülü | MIT |
-
----
+Depoda VirtIO desteği, `smoltcp`, dosya sistemi yardımcıları, metin/rendering
+destekleri ve yerel workspace crate'leri gibi bileşenler bulunur. Bunların ağaçta
+yer alması kök projenin lisansını değiştirmez ve upstream bildirimlerinin korunması
+gereğini ortadan kaldırmaz.
 
 ## Lisans
 
-echOS-x64 proje kodu **GNU Affero General Public License v3.0 only** kapsamında dağıtılır — ayrıntılar için [`LICENSE`](LICENSE) dosyasına bakınız.
-
-Üçüncü taraf bileşenler yukarıdaki tabloda ve vendored manifestlerde belirtilen kendi upstream lisanslarını korur.
+echOS proje kodu **GNU Affero General Public License v3.0 only** kapsamında
+dağıtılır. Üçüncü taraf bileşenler kendi upstream lisanslarını korur.
 
 ---
 
 <div align="center">
 
-*echOS — çünkü bir işletim sistemini anlamanın en iyi yolu onu inşa etmektir.*
+*echOS — ilginç kısımları görünür tutan bir kernel projesi.*
 
 </div>

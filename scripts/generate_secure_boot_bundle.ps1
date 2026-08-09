@@ -10,24 +10,51 @@ $ErrorActionPreference = "Stop"
 
 function Require-Tool {
     param([string]$Name)
-    $tool = Get-Command $Name -ErrorAction SilentlyContinue
-    if (-not $tool) {
-        throw "Required tool '$Name' not found in PATH."
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if ($wsl) {
+        $wslTool = & $wsl.Source -e sh -lc "command -v $Name" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $wslTool) {
+            return [pscustomobject]@{
+                FilePath = $wsl.Source
+                Prefix = @("-e", $Name)
+                Wsl = $true
+            }
+        }
     }
-    $tool.Source
+    $tool = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($tool) {
+        return [pscustomobject]@{
+            FilePath = $tool.Source
+            Prefix = @()
+            Wsl = $false
+        }
+    }
+    throw "Required tool '$Name' not found in native PATH or WSL."
 }
 
 function Invoke-Checked {
-    param([string]$ToolPath, [string[]]$Arguments)
-    & $ToolPath @Arguments
+    param($Tool, [string[]]$Arguments)
+    $toolArgs = @()
+    foreach ($argument in $Arguments) {
+        if ($Tool.Wsl -and $argument -match '^[A-Za-z]:\\') {
+            $converted = & wsl.exe -e wslpath -a -u -- $argument 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "WSL path conversion failed: $argument"
+            }
+            $toolArgs += ($converted | Select-Object -Last 1).ToString().Trim()
+        } else {
+            $toolArgs += $argument
+        }
+    }
+    & $Tool.FilePath @($Tool.Prefix + $toolArgs)
     if ($LASTEXITCODE -ne 0) {
-        throw "Command failed ($LASTEXITCODE): $ToolPath $($Arguments -join ' ')"
+        throw "Command failed ($LASTEXITCODE): $($Tool.FilePath) $($Arguments -join ' ')"
     }
 }
 
 function New-X509Pair {
     param(
-        [string]$OpenSsl,
+        $OpenSsl,
         [string]$Name,
         [string]$Cn,
         [string]$OutDir,
@@ -54,20 +81,24 @@ function New-X509Pair {
 
 function New-EfiAuthSet {
     param(
-        [string]$CertToEsl,
-        [string]$SignEsl,
+        $CertToEsl,
+        $SignEsl,
         [string]$VariableName,
         [string]$OwnerGuid,
         [string]$SignerKey,
         [string]$SignerCert,
         [string]$PayloadCert,
-        [string]$OutDir
+        [string]$OutDir,
+        [switch]$Append
     )
 
     $esl = Join-Path $OutDir "$VariableName.esl"
     $auth = Join-Path $OutDir "$VariableName.auth"
     Invoke-Checked $CertToEsl @("-g", $OwnerGuid, $PayloadCert, $esl)
-    Invoke-Checked $SignEsl @("-k", $SignerKey, "-c", $SignerCert, $VariableName, $esl, $auth)
+    $signArgs = @()
+    if ($Append) { $signArgs += "-a" }
+    $signArgs += @("-k", $SignerKey, "-c", $SignerCert, $VariableName, $esl, $auth)
+    Invoke-Checked $SignEsl $signArgs
     [pscustomobject]@{
         Esl = $esl
         Auth = $auth
@@ -89,8 +120,21 @@ $dbx = New-X509Pair $openssl "dbx-bootstrap" "$CommonNamePrefix Revocation Boots
 
 $pkAuth = New-EfiAuthSet $certToEsl $signEsl "PK" $ownerGuid $pk.Key $pk.Cert $pk.Cert $resolvedOut
 $kekAuth = New-EfiAuthSet $certToEsl $signEsl "KEK" $ownerGuid $pk.Key $pk.Cert $kek.Cert $resolvedOut
-$dbAuth = New-EfiAuthSet $certToEsl $signEsl "db" $ownerGuid $kek.Key $kek.Cert $db.Cert $resolvedOut
-$dbxAuth = New-EfiAuthSet $certToEsl $signEsl "dbx" $ownerGuid $kek.Key $kek.Cert $dbx.Cert $resolvedOut
+$dbAuth = New-EfiAuthSet $certToEsl $signEsl "db" $ownerGuid $kek.Key $kek.Cert $db.Cert $resolvedOut -Append
+$dbxAuth = New-EfiAuthSet $certToEsl $signEsl "dbx" $ownerGuid $kek.Key $kek.Cert $dbx.Cert $resolvedOut -Append
+
+# Setup Mode'da ilk db/dbx değişkeni için append olmayan authenticated update
+# gerekir; User Mode'daki sonraki güncellemeler için yukarıdaki -Append paketleri
+# korunur. İki paket aynı ESL içeriğini kullanır, yalnızca SetVariable akışı
+# farklıdır.
+$dbSetupAuth = Join-Path $resolvedOut "db-setup.auth"
+$dbxSetupAuth = Join-Path $resolvedOut "dbx-setup.auth"
+Invoke-Checked $signEsl @(
+    "-k", $kek.Key, "-c", $kek.Cert, "db", (Join-Path $resolvedOut "db.esl"), $dbSetupAuth
+)
+Invoke-Checked $signEsl @(
+    "-k", $kek.Key, "-c", $kek.Cert, "dbx", (Join-Path $resolvedOut "dbx.esl"), $dbxSetupAuth
+)
 
 $manifest = [ordered]@{
     owner_guid = $ownerGuid
@@ -121,6 +165,7 @@ Files:
 - KEK.auth / KEK.esl
 - db.auth / db.esl
 - dbx.auth / dbx.esl
+- db-setup.auth / dbx-setup.auth (Setup Mode replacement updates)
 - PK.crt|key, KEK.crt|key, db.crt|key, dbx-bootstrap.crt|key
 
 Suggested order:

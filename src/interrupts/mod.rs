@@ -82,9 +82,17 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::arch::x86_64::_rdtsc;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use spin::Mutex;
 use x86_64::structures::idt::InterruptDescriptorTable;
+
+#[cfg(not(target_os = "windows"))]
+#[inline(always)]
+fn enter_kernel_gs(
+    stack_frame: &x86_64::structures::idt::InterruptStackFrame,
+) -> crate::cpu::local::KernelGsGuard {
+    crate::cpu::local::KernelGsGuard::from_interrupted_cs(stack_frame.code_segment)
+}
 
 // ============================================================================
 // IDT YAPISI — Global ve per-CPU durum değişkenleri
@@ -100,9 +108,14 @@ use x86_64::structures::idt::InterruptDescriptorTable;
 
 static USE_IOAPIC: AtomicBool = AtomicBool::new(false);
 static INIT_STATE: AtomicU8 = AtomicU8::new(0);
+/// APIC error handler initialized flag
+static APIC_ERROR_INIT: AtomicBool = AtomicBool::new(false);
+/// NMI nesting depth (per-CPU) — Intel SDM §6.7.1: NMI masking
+static NMI_NESTING_DEPTH: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
 pub const IPI_TLB_VECTOR: u8 = 0xF1;
+const APIC_ERROR_VECTOR: u8 = 0xF2;
 const SPURIOUS_VECTOR: u8 = 0xFF;
-const MSI_VECTOR_START: u8 = 48;
+pub const MSI_VECTOR_START: u8 = 48;
 const MSI_VECTOR_END: u8 = 0xEF;
 const IRQ_LOG_CAP: usize = 1024;
 const DEFAULT_STORM_LIMIT: u64 = 500;
@@ -184,6 +197,74 @@ fn sync_threaded_shadow(vector: u8, handler: Option<IrqHandler>) {
 static PCI_IRQ_POLICY: AtomicU8 = AtomicU8::new(PciInterruptPolicy::MsiPreferred as u8);
 static IRQ_STORM_LIMIT: AtomicU64 = AtomicU64::new(DEFAULT_STORM_LIMIT);
 static IRQ_WATCHDOG_INTERVAL: AtomicU64 = AtomicU64::new(DEFAULT_IRQ_WATCHDOG_INTERVAL);
+
+// ============================================================================
+// MSI DEVICE MAP — MSI vektör → PCI aygıt eşleşmesi
+//
+// Her MSI/MSI-X vektörünün hangi PCI aygıta ait olduğunu tutar.
+// MsiChip mask/unmask/affinity işlemleri için kullanılır.
+//
+// Packed format: valid=bit31, msix_flag=bit30, bus=23:16, dev=15:11, func=10:8,
+//                msix_table_index=7:0 (yalnızca msix_flag=1 iken anlamlı)
+// ============================================================================
+const MSI_MAP_ENTRIES: usize = (MSI_VECTOR_END - MSI_VECTOR_START + 1) as usize;
+
+static MSI_DEVICE_MAP: [AtomicU32; MSI_MAP_ENTRIES] =
+    [const { AtomicU32::new(0) }; MSI_MAP_ENTRIES];
+
+fn msi_pack_bdf(bus: u8, device: u8, function: u8) -> u32 {
+    (1u32 << 31) | ((bus as u32) << 16) | ((device as u32) << 11) | ((function as u32) << 8)
+}
+fn msi_pack_msix(bus: u8, device: u8, function: u8, table_index: u16) -> u32 {
+    (1u32 << 31)
+        | (1u32 << 30)
+        | ((bus as u32) << 16)
+        | ((device as u32) << 11)
+        | ((function as u32) << 8)
+        | (table_index as u32 & 0xFF)
+}
+fn msi_unpack(packed: u32) -> Option<(u8, u8, u8, bool, u16)> {
+    if packed & (1u32 << 31) == 0 {
+        return None;
+    }
+    let is_msix = (packed >> 30) & 1 == 1;
+    Some((
+        ((packed >> 16) & 0xFF) as u8,
+        ((packed >> 11) & 0x1F) as u8,
+        ((packed >> 8) & 0x07) as u8,
+        is_msix,
+        (packed & 0xFF) as u16,
+    ))
+}
+
+/// MSI vektörü için PCI BDF kaydı (configure_msi* tarafından çağrılır).
+pub fn msi_register_device(vector: u8, bus: u8, device: u8, function: u8) {
+    let idx = (vector as usize).wrapping_sub(MSI_VECTOR_START as usize);
+    if idx < MSI_MAP_ENTRIES {
+        MSI_DEVICE_MAP[idx].store(msi_pack_bdf(bus, device, function), Ordering::Release);
+    }
+}
+/// MSI-X vektörü için PCI BDF + table_index kaydı.
+pub fn msi_register_device_msix(vector: u8, bus: u8, device: u8, function: u8, table_index: u16) {
+    let idx = (vector as usize).wrapping_sub(MSI_VECTOR_START as usize);
+    if idx < MSI_MAP_ENTRIES {
+        MSI_DEVICE_MAP[idx].store(
+            msi_pack_msix(bus, device, function, table_index),
+            Ordering::Release,
+        );
+    }
+}
+
+/// MSI vektörü için PCI aygıt sorgula.
+pub fn msi_lookup_device(vector: u8) -> Option<(u8, u8, u8, bool, u16)> {
+    let idx = (vector as usize).wrapping_sub(MSI_VECTOR_START as usize);
+    if idx >= MSI_MAP_ENTRIES {
+        return None;
+    }
+    let packed = MSI_DEVICE_MAP[idx].load(Ordering::Acquire);
+    msi_unpack(packed)
+}
+
 static IRQ_LATENCY_WARN_CYCLES: AtomicU64 = AtomicU64::new(DEFAULT_IRQ_LATENCY_WARN_CYCLES);
 static IRQ_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
 static IRQ_DYNAMIC_FLOW_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -336,18 +417,24 @@ pub fn init_idt_for_cpu(cpu_id: u32) -> &'static InterruptDescriptorTable {
 }
 
 pub fn prepare_idt_for_cpu(cpu_id: u32) {
-    let _ = init_idt_for_cpu(cpu_id);
+    let _idt = init_idt_for_cpu(cpu_id);
 }
 
 /// Interrupt sistemini başlatır.
 /// IDT'yi yükler ve PIC'i yapılandırır.
 pub fn init() {
+    crate::serial_println!("[W3] interrupts init_global begin");
     init_global_once();
+    crate::serial_println!("[W3] interrupts init_global complete");
     init_per_cpu();
+    crate::serial_println!("[W3] interrupts init_per_cpu complete");
     start_irq_worker();
+    crate::serial_println!("[W3] interrupts irq worker complete");
     // Softirq + IRQ chip subsystem başlat
     softirq::init();
+    crate::serial_println!("[W3] interrupts softirq complete");
     irq_chip::init();
+    crate::serial_println!("[W3] interrupts irq chip complete");
 }
 
 pub fn init_per_cpu() {
@@ -367,11 +454,14 @@ pub fn reload_bsp_idt_after_resume() {
 }
 
 pub fn enable_ioapic() -> bool {
+    crate::serial_println!("[W3] enable_ioapic acpi begin");
     if !crate::acpi::init() {
         crate::serial_println!("ACPI init failed");
         return false;
     }
+    crate::serial_println!("[W3] enable_ioapic acpi complete");
     let apic_info = crate::acpi::get_apic_info();
+    crate::serial_println!("[W3] enable_ioapic apic info");
     if apic_info.io_apics.is_empty() {
         crate::serial_println!("IOAPIC not found");
         return false;
@@ -380,11 +470,13 @@ pub fn enable_ioapic() -> bool {
         crate::serial_println!("LAPIC init failed");
         return false;
     }
+    crate::serial_println!("[W3] enable_ioapic lapic complete");
     let bsp = crate::cpu::CPU_INFO.lock().bsp_apic_id as u8;
     if !crate::apic::ioapic::init(&apic_info, bsp) {
         crate::serial_println!("IOAPIC init failed");
         return false;
     }
+    crate::serial_println!("[W3] enable_ioapic ioapic complete");
     USE_IOAPIC.store(true, Ordering::Release);
     unsafe {
         crate::drivers::apic::disable_pic();
@@ -413,7 +505,14 @@ pub fn request_irq(vector: u8, handler: IrqHandler, flags: u64) -> bool {
         if chains[vector as usize].is_none() {
             chains[vector as usize] = Some(Vec::new());
         }
-        chains[vector as usize].as_mut().unwrap().push(handler);
+        let Some(chain) = chains[vector as usize].as_mut() else {
+            crate::serial_println!(
+                "[IRQ_POLICY] shared handler chain allocation failed vector={}",
+                vector
+            );
+            return false;
+        };
+        chain.push(handler);
         // İlk handler'ı primary olarak kaydet
         let mut primary = IRQ_HANDLERS.lock();
         if primary[vector as usize].is_none() {
@@ -481,6 +580,9 @@ pub fn set_irq_affinity_mask(vector: u8, mask: u64) {
     if vector >= 32 && vector <= 47 && ioapic_enabled() {
         let apic_id = select_apic_id_for_vector(vector);
         crate::apic::ioapic::set_irq_affinity(vector - 32, apic_id as u8);
+    }
+    if vector >= MSI_VECTOR_START {
+        rebalance_msi_vector(vector);
     }
 }
 
@@ -790,15 +892,30 @@ fn dump_registers(stack_frame: &InterruptStackFrame) {
     crate::serial_println!("CPU STATE: {:#?}", regs);
 }
 
-/// Sıfıra bölme hatası (Divide by Zero)
+/// Sıfıra bölme hatası (Divide by Zero) — user mode'da task öldür, kernel'de recover
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn divide_error_handler(stack_frame: InterruptStackFrame) {
-    panic!("EXCEPTION: DIVIDE ERROR\n{:#?}", stack_frame);
+    let _gs_guard = enter_kernel_gs(&stack_frame);
+    let cs = stack_frame.code_segment;
+    if (cs & 3) == 3 {
+        user_fault_exit(
+            "DIVIDE_ERROR",
+            stack_frame.instruction_pointer.as_u64(),
+            None,
+            None,
+        );
+    }
+    kernel_fault_exit(
+        "DIVIDE_ERROR (#DE)",
+        &stack_frame,
+        format_args!("{:#?}", stack_frame),
+    );
 }
 
 /// Debug breakpoint (INT 3)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn breakpoint_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     crate::serial_println!("EXCEPTION: BREAKPOINT\n{:#?}", stack_frame);
 }
 
@@ -838,6 +955,30 @@ fn user_fault_exit(kind: &str, rip: u64, addr: Option<u64>, code: Option<u64>) {
     crate::task::scheduler::exit(1);
 }
 
+/// Kernel-mode fault recovery — interrupt context'te panic, task context'te task öldür
+///
+/// Double Fault (#DF) ve Machine Check (#MC) için kullanılmaz — onlar doğrudan panic!()
+fn kernel_fault_exit(name: &str, stack_frame: &InterruptStackFrame, args: core::fmt::Arguments) {
+    let rip = stack_frame.instruction_pointer.as_u64();
+    let in_irq = crate::preempt::in_interrupt();
+    let context = crate::preempt::get_interrupt_context();
+    dump_registers(stack_frame);
+    crate::serial_println!(
+        "KERNEL FAULT: {} RIP={:#x} irq={} context={:?}",
+        name,
+        rip,
+        in_irq,
+        context
+    );
+    crate::serial_println!("{}", args);
+    if in_irq {
+        crate::serial_println!("[KFAULT] Unrecoverable — in interrupt context, panicking");
+        panic!("KERNEL FAULT: {} (interrupt context)", name);
+    }
+    crate::serial_println!("[KFAULT] Recovering — terminating current task");
+    crate::task::scheduler::exit(1);
+}
+
 /// Sayfa hatası (Page Fault)
 /// User mode'da oluşursa task sonlandırılır, kernel mode'da panic.
 #[cfg(not(target_os = "windows"))]
@@ -845,6 +986,7 @@ extern "x86-interrupt" fn page_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: PageFaultErrorCode,
 ) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     unsafe {
         crate::serial::uart::SERIAL1.force_unlock();
         // Debugcon: 'P' = page fault handler entered
@@ -903,8 +1045,11 @@ extern "x86-interrupt" fn page_fault_handler(
         crate::serial_println!("Accessed Address: {:?}", Cr2::read());
         crate::serial_println!("Error Code: {:?}", error_code);
         crate::serial_println!("{:#?}", stack_frame);
-        dump_registers(&stack_frame);
-        panic!("Page fault");
+        kernel_fault_exit(
+            "PAGE_FAULT (#PF)",
+            &stack_frame,
+            format_args!("ADDR={:#x} err={:?}", Cr2::read().as_u64(), error_code),
+        );
     }
 }
 
@@ -914,6 +1059,7 @@ extern "x86-interrupt" fn double_fault_handler(
     stack_frame: InterruptStackFrame,
     _error_code: u64,
 ) -> ! {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     unsafe {
         crate::serial::uart::SERIAL1.force_unlock();
         // Debugcon: 'D' = double fault handler entered
@@ -929,6 +1075,7 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     unsafe {
         crate::serial::uart::SERIAL1.force_unlock();
         // Debugcon: 'G' = #GP handler entered
@@ -937,17 +1084,13 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         let rip = stack_frame.instruction_pointer.as_u64();
-        crate::serial_println!(
-            "[RING3_GP] RIP={:#x} err={:#x}",
-            rip,
-            error_code
-        );
+        crate::serial_println!("[RING3_GP] RIP={:#x} err={:#x}", rip, error_code);
         user_fault_exit("GENERAL_PROTECTION_FAULT", rip, None, Some(error_code));
     } else {
-        dump_registers(&stack_frame);
-        panic!(
-            "EXCEPTION: GENERAL PROTECTION FAULT (code: {})\n{:#?}",
-            error_code, stack_frame
+        kernel_fault_exit(
+            "GENERAL_PROTECTION_FAULT (#GP)",
+            &stack_frame,
+            format_args!("err={:#x}", error_code),
         );
     }
 }
@@ -955,27 +1098,79 @@ extern "x86-interrupt" fn general_protection_fault_handler(
 /// Geçersiz opcode hatası (#UD)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFrame) {
-    unsafe { crate::serial::uart::SERIAL1.force_unlock(); }
+    let _gs_guard = enter_kernel_gs(&stack_frame);
+    unsafe {
+        crate::serial::uart::SERIAL1.force_unlock();
+    }
     let rip = stack_frame.instruction_pointer.as_u64();
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         crate::debug_diag!("[SHELL_TEST] User #UD at RIP={:#x}", rip);
         user_fault_exit("INVALID_OPCODE", rip, None, None);
     }
-    crate::serial_println!("EXCEPTION: INVALID OPCODE (#UD) at RIP={:#x}", rip);
-    crate::serial_println!("{:#?}", stack_frame);
-    panic!("Invalid Opcode");
+    kernel_fault_exit(
+        "INVALID_OPCODE (#UD)",
+        &stack_frame,
+        format_args!("RIP={:#x}", rip),
+    );
 }
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn nmi_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = crate::cpu::local::KernelGsGuard::paranoid();
+    let cpu_id = crate::cpu::smp::current_cpu_id() as usize;
+    // NMI nesting prevention (Intel SDM §6.7.1):
+    // NMI, IF kapalıyken gelir. Eğer 2. bir NMI aynı anda gelirse
+    // nesting derinliği artar. 3+ derinlik = çift hata riski.
+    let depth = NMI_NESTING_DEPTH[cpu_id].fetch_add(1, Ordering::Relaxed) + 1;
+    if depth >= 3 {
+        crate::serial_println!(
+            "[NMI] CRITICAL: nested depth={} on CPU {} — possible triple fault",
+            depth,
+            cpu_id
+        );
+        // Triple fault risk — donanım reset
+        unsafe {
+            core::arch::asm!("int3", options(nomem, nostack));
+        }
+    }
     record_irq(2);
     dispatch_irq(2);
+    NMI_NESTING_DEPTH[cpu_id].store(0, Ordering::Relaxed);
+}
+
+/// APIC internal error handler — Intel SDM §10.5.3
+/// APIC'in kendi iç hatalarını bildirdiği vektördür.
+/// LVT Error Register (0x370) tarafından programlanır.
+#[cfg(not(target_os = "windows"))]
+extern "x86-interrupt" fn apic_error_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
+    let esr = crate::apic::lapic::read_reg(0x280); // APIC ESR register
+    record_irq(APIC_ERROR_VECTOR);
+    crate::serial_println!("[APIC_ERR] Internal error: ESR={:#010x}", esr);
+    // Clear error by writing ESR
+    crate::apic::lapic::write_reg(0x280, 0);
+    crate::apic::lapic::eoi();
 }
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(SPURIOUS_VECTOR);
+    // Minimal boot path'te (BSP_INIT_COMPLETE=false) AP'lerde spurious
+    // interrupt gelirse mutlaka EOI gönder — aksi halde AP kitlenir.
+    // Intel SDM §10.9: Spurious interrupt için EOI gerekli DEĞİLDİR
+    // (APIC bu vektör için ISR bitini set etmez), ama bazı donanımlar
+    // EOI bekler. Güvenlik için EOI gönder.
+    if USE_IOAPIC.load(Ordering::Acquire) {
+        crate::apic::lapic::eoi();
+    } else {
+        // PIC modunda: spurious için EOI gerekmez (PIC internal),
+        // ama uyumluluk için gönder.
+        unsafe {
+            pic::PICS.lock().notify_end_of_interrupt(SPURIOUS_VECTOR);
+        }
+    }
 }
 
 // ============================================================================
@@ -1033,6 +1228,7 @@ pub fn mark_bsp_init_complete() {
 ///  10. TSC-deadline modunda sonraki timer deadline'ını arm et
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     if crate::cpu::smp::panic_stop_requested() {
         crate::cpu::smp::panic_stop_this_cpu();
     }
@@ -1064,10 +1260,9 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
         crate::interrupts::softirq::raise_softirq(crate::interrupts::softirq::SoftirqVec::Timer);
         crate::interrupts::softirq::raise_softirq(crate::interrupts::softirq::SoftirqVec::Rcu);
 
-        // vDSO'ya yeni zamanı yaz (1 tick = 10ms sayarak)
-        let seconds_since_boot = ticks / 100;
-        let nsec_since_boot = (ticks % 100) * 10_000_000;
-        crate::vdso::update_time(seconds_since_boot, nsec_since_boot);
+        // vDSO'ya yeni zamanı yaz (1 tick = 10ms)
+        let ns_since_boot = ticks.saturating_mul(10_000_000);
+        crate::vdso::update_time(ns_since_boot);
 
         if needs_eoi {
             irq_eoi(32);
@@ -1098,6 +1293,7 @@ extern "x86-interrupt" fn timer_interrupt_handler(stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn tlb_shootdown_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     tlb::flush_all();
     crate::cpu::smp::notify_tlb_shootdown_ack();
     crate::apic::lapic::eoi();
@@ -1120,6 +1316,7 @@ lazy_static::lazy_static! {
 /// Scancode'u decode eder ve input queue'ya ekler.
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     use x86_64::instructions::port::Port;
 
     let mut port = Port::new(0x60);
@@ -1148,6 +1345,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStac
 /// Raw byte'ı input queue'ya ekler (Fast-Path).
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     use crate::drivers::input::InputEvent;
     use x86_64::instructions::port::Port;
 
@@ -1220,6 +1418,7 @@ fn build_idt() -> InterruptDescriptorTable {
     idt[62].set_handler_fn(irq30_interrupt_handler);
     idt[63].set_handler_fn(irq31_interrupt_handler);
     idt[IPI_TLB_VECTOR as usize].set_handler_fn(tlb_shootdown_handler);
+    idt[APIC_ERROR_VECTOR as usize].set_handler_fn(apic_error_handler);
     idt[SPURIOUS_VECTOR as usize].set_handler_fn(spurious_interrupt_handler);
 
     // ================================================================
@@ -1254,16 +1453,16 @@ fn init_global_once() {
         INIT_STATE.store(2, Ordering::Release);
         return;
     }
+    crate::serial_println!("[W3] interrupts vector init");
     VECTOR_ALLOCATOR.lock().init();
-    #[cfg(not(target_os = "uefi"))]
+    crate::serial_println!("[W3] interrupts vector complete");
+    #[cfg(all(not(target_os = "uefi"), not(target_os = "windows")))]
     {
-        if enable_ioapic() {
-            crate::apic::ioapic::enable_irq(0);
-            crate::apic::ioapic::enable_irq(1);
-            crate::apic::ioapic::enable_irq(12);
-        } else {
-            pic::init();
-        }
+        // BIOS adapters parse CPU ACPI/MADT in the following AcpiInit phase.
+        // Enabling the IOAPIC here would re-enter the ACPI crate before that
+        // ownership handover; keep the IDT phase deterministic on the PIC and
+        // let the later platform phase upgrade the interrupt route when safe.
+        pic::init();
     }
     #[cfg(target_os = "uefi")]
     {
@@ -1274,6 +1473,17 @@ fn init_global_once() {
         } else {
             pic::init();
         }
+    }
+    // APIC error LVT'yi programla (Intel SDM §10.5.3)
+    // LVT Error Register (0x370) → vector + mask=0 (unmasked)
+    if USE_IOAPIC.load(Ordering::Acquire) {
+        let lvt_err = crate::apic::lapic::read_reg(0x370);
+        crate::apic::lapic::write_reg(0x370, (lvt_err & !0x1FF) | APIC_ERROR_VECTOR as u32);
+        APIC_ERROR_INIT.store(true, Ordering::Release);
+        crate::serial_println!(
+            "[IRQ] APIC error handler armed at vector {:#x}",
+            APIC_ERROR_VECTOR
+        );
     }
     INIT_STATE.store(2, Ordering::Release);
 }
@@ -1406,6 +1616,16 @@ fn dispatch_irq(vector: u8) -> bool {
     if threaded_ptr != 0 {
         enqueue_threaded_irq(vector);
     }
+
+    if flow == IrqFlow::Edge && vector >= 32 && vector <= 47 {
+        let cnt = IRQ_COUNTS[vector as usize].load(Ordering::Relaxed);
+        if (cnt & 255) == 0 {
+            if !crate::apic::ioapic::set_irq_affinity_rr(vector - 32) {
+                crate::serial_println!("[IRQ_POLICY] affinity update failed vector={}", vector);
+            }
+        }
+    }
+
     flow != IrqFlow::FastEoi
 }
 
@@ -1552,6 +1772,31 @@ fn try_rebalance_vector(vector: u8, ticks: u64) {
         let apic_id = select_apic_id_for_vector(vector);
         crate::apic::ioapic::set_irq_affinity(vector - 32, apic_id as u8);
     }
+    if vector >= MSI_VECTOR_START {
+        rebalance_msi_vector(vector);
+    }
+}
+
+fn rebalance_msi_vector(vector: u8) {
+    let (bus, device, function, is_msix, table_index) = match msi_lookup_device(vector) {
+        Some(v) => v,
+        None => return,
+    };
+    let apic_id = crate::apic::ioapic::next_round_robin_apic_id() as u32;
+    if is_msix {
+        crate::drivers::pci::set_msix_affinity(bus, device, function, table_index, vector, apic_id);
+    } else {
+        crate::drivers::pci::set_msi_affinity(bus, device, function, vector, apic_id);
+    }
+    crate::serial_println!(
+        "[MSI] vektör {} → BDF {}.{}.{} CPU APIC {} (round-robin, {})",
+        vector,
+        bus,
+        device,
+        function,
+        apic_id,
+        if is_msix { "MSI-X" } else { "MSI" }
+    );
 }
 
 fn try_adjust_flow(vector: u8, ticks: u64, stormed: bool, latency_warned: bool) {
@@ -1764,6 +2009,7 @@ impl VectorAllocator {
             self.used[v] = true;
         }
         self.used[IPI_TLB_VECTOR as usize] = true;
+        self.used[APIC_ERROR_VECTOR as usize] = true;
         self.used[SPURIOUS_VECTOR as usize] = true;
         for v in 32..=47 {
             self.used[v] = true;
@@ -1818,6 +2064,7 @@ impl VectorAllocator {
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq2_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(34);
     let needs_eoi = dispatch_irq(34);
     if needs_eoi {
@@ -1827,6 +2074,7 @@ extern "x86-interrupt" fn irq2_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq3_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(35);
     let needs_eoi = dispatch_irq(35);
     if needs_eoi {
@@ -1836,6 +2084,7 @@ extern "x86-interrupt" fn irq3_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq4_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(36);
     let needs_eoi = dispatch_irq(36);
     if needs_eoi {
@@ -1845,6 +2094,7 @@ extern "x86-interrupt" fn irq4_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq5_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(37);
     let needs_eoi = dispatch_irq(37);
     if needs_eoi {
@@ -1854,6 +2104,7 @@ extern "x86-interrupt" fn irq5_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq6_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(38);
     let needs_eoi = dispatch_irq(38);
     if needs_eoi {
@@ -1863,6 +2114,7 @@ extern "x86-interrupt" fn irq6_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq7_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(39);
     let needs_eoi = dispatch_irq(39);
     if needs_eoi {
@@ -1872,6 +2124,7 @@ extern "x86-interrupt" fn irq7_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq8_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(40);
     let needs_eoi = dispatch_irq(40);
     if needs_eoi {
@@ -1881,6 +2134,7 @@ extern "x86-interrupt" fn irq8_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq9_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(41);
     let needs_eoi = dispatch_irq(41);
     if needs_eoi {
@@ -1890,6 +2144,7 @@ extern "x86-interrupt" fn irq9_interrupt_handler(_stack_frame: InterruptStackFra
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq10_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(42);
     let needs_eoi = dispatch_irq(42);
     if needs_eoi {
@@ -1899,6 +2154,7 @@ extern "x86-interrupt" fn irq10_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq11_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(43);
     let needs_eoi = dispatch_irq(43);
     if needs_eoi {
@@ -1908,6 +2164,7 @@ extern "x86-interrupt" fn irq11_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq13_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(45);
     let needs_eoi = dispatch_irq(45);
     if needs_eoi {
@@ -1917,6 +2174,7 @@ extern "x86-interrupt" fn irq13_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq14_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(46);
     let needs_eoi = dispatch_irq(46);
     if needs_eoi {
@@ -1926,6 +2184,7 @@ extern "x86-interrupt" fn irq14_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq15_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(47);
     let needs_eoi = dispatch_irq(47);
     if needs_eoi {
@@ -1935,6 +2194,7 @@ extern "x86-interrupt" fn irq15_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq16_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(48);
     let needs_eoi = dispatch_irq(48);
     if needs_eoi {
@@ -1944,6 +2204,7 @@ extern "x86-interrupt" fn irq16_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq17_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(49);
     let needs_eoi = dispatch_irq(49);
     if needs_eoi {
@@ -1953,6 +2214,7 @@ extern "x86-interrupt" fn irq17_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq18_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(50);
     let needs_eoi = dispatch_irq(50);
     if needs_eoi {
@@ -1962,6 +2224,7 @@ extern "x86-interrupt" fn irq18_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq19_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(51);
     let needs_eoi = dispatch_irq(51);
     if needs_eoi {
@@ -1971,6 +2234,7 @@ extern "x86-interrupt" fn irq19_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq20_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(52);
     let needs_eoi = dispatch_irq(52);
     if needs_eoi {
@@ -1980,6 +2244,7 @@ extern "x86-interrupt" fn irq20_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq21_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(53);
     let needs_eoi = dispatch_irq(53);
     if needs_eoi {
@@ -1989,6 +2254,7 @@ extern "x86-interrupt" fn irq21_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq22_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(54);
     let needs_eoi = dispatch_irq(54);
     if needs_eoi {
@@ -1998,6 +2264,7 @@ extern "x86-interrupt" fn irq22_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq23_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(55);
     let needs_eoi = dispatch_irq(55);
     if needs_eoi {
@@ -2007,6 +2274,7 @@ extern "x86-interrupt" fn irq23_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq24_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(56);
     let needs_eoi = dispatch_irq(56);
     if needs_eoi {
@@ -2016,6 +2284,7 @@ extern "x86-interrupt" fn irq24_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq25_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(57);
     let needs_eoi = dispatch_irq(57);
     if needs_eoi {
@@ -2025,6 +2294,7 @@ extern "x86-interrupt" fn irq25_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq26_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(58);
     let needs_eoi = dispatch_irq(58);
     if needs_eoi {
@@ -2034,6 +2304,7 @@ extern "x86-interrupt" fn irq26_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq27_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(59);
     let needs_eoi = dispatch_irq(59);
     if needs_eoi {
@@ -2043,6 +2314,7 @@ extern "x86-interrupt" fn irq27_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq28_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(60);
     let needs_eoi = dispatch_irq(60);
     if needs_eoi {
@@ -2052,6 +2324,7 @@ extern "x86-interrupt" fn irq28_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq29_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(61);
     let needs_eoi = dispatch_irq(61);
     if needs_eoi {
@@ -2061,6 +2334,7 @@ extern "x86-interrupt" fn irq29_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq30_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(62);
     let needs_eoi = dispatch_irq(62);
     if needs_eoi {
@@ -2070,6 +2344,7 @@ extern "x86-interrupt" fn irq30_interrupt_handler(_stack_frame: InterruptStackFr
 
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn irq31_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&_stack_frame);
     record_irq(63);
     let needs_eoi = dispatch_irq(63);
     if needs_eoi {
@@ -2101,6 +2376,7 @@ extern "x86-interrupt" fn irq31_interrupt_handler(_stack_frame: InterruptStackFr
 /// #OF — Overflow (INT 4)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2110,13 +2386,17 @@ extern "x86-interrupt" fn overflow_handler(stack_frame: InterruptStackFrame) {
             None,
         );
     }
-    crate::serial_println!("EXCEPTION: OVERFLOW (#OF)\n{:#?}", stack_frame);
-    panic!("Overflow");
+    kernel_fault_exit(
+        "OVERFLOW (#OF)",
+        &stack_frame,
+        format_args!("{:#?}", stack_frame),
+    );
 }
 
 /// #BR — Bound Range Exceeded (INT 5)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2126,13 +2406,17 @@ extern "x86-interrupt" fn bound_range_handler(stack_frame: InterruptStackFrame) 
             None,
         );
     }
-    crate::serial_println!("EXCEPTION: BOUND RANGE EXCEEDED (#BR)\n{:#?}", stack_frame);
-    panic!("Bound Range Exceeded");
+    kernel_fault_exit(
+        "BOUND_RANGE (#BR)",
+        &stack_frame,
+        format_args!("{:#?}", stack_frame),
+    );
 }
 
 /// #NM — Device Not Available (INT 7) — FPU/SSE lazy save
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn device_not_available_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     // FPU/SSE kullanılmadığında tetiklenir — CR0.TS flag
     // Kernel: TS flag'i temizle ve FPU state'i yükle
     unsafe {
@@ -2154,6 +2438,7 @@ extern "x86-interrupt" fn segment_not_present_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2163,18 +2448,17 @@ extern "x86-interrupt" fn segment_not_present_handler(
             Some(error_code),
         );
     }
-    crate::serial_println!(
-        "EXCEPTION: SEGMENT NOT PRESENT (#NP) code={:#x}\n{:#?}",
-        error_code,
-        stack_frame
+    kernel_fault_exit(
+        "SEGMENT_NOT_PRESENT (#NP)",
+        &stack_frame,
+        format_args!("err={:#x}", error_code),
     );
-    dump_registers(&stack_frame);
-    panic!("Segment Not Present");
 }
 
 /// #SS — Stack Segment Fault (INT 12)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn stack_segment_handler(stack_frame: InterruptStackFrame, error_code: u64) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2184,18 +2468,17 @@ extern "x86-interrupt" fn stack_segment_handler(stack_frame: InterruptStackFrame
             Some(error_code),
         );
     }
-    crate::serial_println!(
-        "EXCEPTION: STACK SEGMENT FAULT (#SS) code={:#x}\n{:#?}",
-        error_code,
-        stack_frame
+    kernel_fault_exit(
+        "STACK_SEGMENT_FAULT (#SS)",
+        &stack_frame,
+        format_args!("err={:#x}", error_code),
     );
-    dump_registers(&stack_frame);
-    panic!("Stack Segment Fault");
 }
 
 /// #MF — x87 Floating-Point Error (INT 16)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn x87_fp_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2205,8 +2488,11 @@ extern "x86-interrupt" fn x87_fp_handler(stack_frame: InterruptStackFrame) {
             None,
         );
     }
-    crate::serial_println!("EXCEPTION: x87 FLOATING POINT (#MF)\n{:#?}", stack_frame);
-    panic!("x87 Floating-Point Exception");
+    kernel_fault_exit(
+        "X87_FP_ERROR (#MF)",
+        &stack_frame,
+        format_args!("{:#?}", stack_frame),
+    );
 }
 
 /// #AC — Alignment Check (INT 17)
@@ -2215,6 +2501,7 @@ extern "x86-interrupt" fn alignment_check_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2224,28 +2511,60 @@ extern "x86-interrupt" fn alignment_check_handler(
             Some(error_code),
         );
     }
-    crate::serial_println!(
-        "EXCEPTION: ALIGNMENT CHECK (#AC) code={:#x}\n{:#?}",
-        error_code,
-        stack_frame
+    kernel_fault_exit(
+        "ALIGNMENT_CHECK (#AC)",
+        &stack_frame,
+        format_args!("err={:#x}", error_code),
     );
-    panic!("Alignment Check");
 }
 
 /// #MC — Machine Check (INT 18) — kurtarılamaz donanım hatası
+/// Intel SDM §15.3: MCA bank walking — her bank için MCi_STATUS MSR'ı
+/// oku (bit 63=valid), detaylı hata tipi kodla.
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame) -> ! {
-    crate::serial_println!("EXCEPTION: MACHINE CHECK (#MC) — FATAL HARDWARE ERROR");
+    let _gs_guard = crate::cpu::local::KernelGsGuard::paranoid();
+    crate::serial_println!("\n=== MACHINE CHECK (#MC) — FATAL HARDWARE ERROR ===");
     crate::serial_println!("{:#?}", stack_frame);
     dump_registers(&stack_frame);
-    // MCi_STATUS MSR'larını oku (IA32_MC0_STATUS = 0x401)
-    for i in 0u32..4 {
-        let msr_addr = 0x401 + i * 4;
+    // MCA bank walking (Intel SDM §15.3.2.3)
+    // IA32_MCi_STATUS base = 0x401, her bank 4 MSR
+    // MCG_CAP (0x179) bank count'u verir
+    let mcg_cap = unsafe { x86_64::registers::model_specific::Msr::new(0x179).read() };
+    let bank_count = (mcg_cap & 0xFF) as u32;
+    for i in 0..bank_count.min(32) {
+        let status_msr = 0x401 + i * 4;
         unsafe {
-            let val = x86_64::registers::model_specific::Msr::new(msr_addr).read();
+            let val = x86_64::registers::model_specific::Msr::new(status_msr).read();
             if val & (1u64 << 63) != 0 {
-                // Valid bit set
-                crate::serial_println!("[MC] Bank {} STATUS: {:#018x}", i, val);
+                // Valid bit set — decode error
+                let err_code = (val >> 16) & 0xFFFF;
+                let mca_err = (val >> 0) & 0xFFFF;
+                let corrocted = (val >> 62) & 1;
+                let overflow = (val >> 61) & 1;
+                let uncorrected = (val >> 60) & 1;
+                crate::serial_println!(
+                    "[MC] Bank {} STATUS={:#018x} unc={} ovf={} corr={} err={:#06x} mca={:#06x}",
+                    i,
+                    val,
+                    uncorrected,
+                    overflow,
+                    corrocted,
+                    err_code,
+                    mca_err
+                );
+                // ADDR register (0x402, 0x406, ...) varsa oku
+                let addr_msr = 0x402 + i * 4;
+                let addr_val = x86_64::registers::model_specific::Msr::new(addr_msr).read();
+                if addr_val != 0 {
+                    crate::serial_println!("[MC] Bank {} ADDR={:#018x}", i, addr_val);
+                }
+                // MISC register (0x403, 0x407, ...) varsa oku
+                let misc_msr = 0x403 + i * 4;
+                let misc_val = x86_64::registers::model_specific::Msr::new(misc_msr).read();
+                if misc_val != 0 {
+                    crate::serial_println!("[MC] Bank {} MISC={:#018x}", i, misc_val);
+                }
             }
         }
     }
@@ -2255,6 +2574,7 @@ extern "x86-interrupt" fn machine_check_handler(stack_frame: InterruptStackFrame
 /// #XM — SIMD Floating-Point (INT 19)
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn simd_fp_handler(stack_frame: InterruptStackFrame) {
+    let _gs_guard = enter_kernel_gs(&stack_frame);
     let cs = stack_frame.code_segment;
     if (cs & 3) == 3 {
         user_fault_exit(
@@ -2264,24 +2584,36 @@ extern "x86-interrupt" fn simd_fp_handler(stack_frame: InterruptStackFrame) {
             None,
         );
     }
-    // MXCSR register'ından hata detayını oku
     let mut mxcsr: u32 = 0;
     unsafe {
         core::arch::asm!("stmxcsr [{}]", in(reg) &mut mxcsr as *mut u32, options(nostack));
     }
-    crate::serial_println!(
-        "EXCEPTION: SIMD FLOATING POINT (#XM) MXCSR={:#010x}\n{:#?}",
-        mxcsr,
-        stack_frame
+    kernel_fault_exit(
+        "SIMD_FP (#XM)",
+        &stack_frame,
+        format_args!("MXCSR={:#010x}", mxcsr),
     );
-    panic!("SIMD Floating-Point Exception");
 }
 
 /// #VE — Virtualization Exception (INT 20)
+/// Intel VT-x çalışırken oluşan virtualization istisnası
 #[cfg(not(target_os = "windows"))]
 extern "x86-interrupt" fn virtualization_handler(stack_frame: InterruptStackFrame) {
-    crate::serial_println!("EXCEPTION: VIRTUALIZATION (#VE)\n{:#?}", stack_frame);
-    panic!("Virtualization Exception");
+    let _gs_guard = enter_kernel_gs(&stack_frame);
+    let cs = stack_frame.code_segment;
+    if (cs & 3) == 3 {
+        user_fault_exit(
+            "VIRTUALIZATION",
+            stack_frame.instruction_pointer.as_u64(),
+            None,
+            None,
+        );
+    }
+    kernel_fault_exit(
+        "VIRTUALIZATION (#VE)",
+        &stack_frame,
+        format_args!("{:#?}", stack_frame),
+    );
 }
 
 #[cfg(target_os = "windows")]

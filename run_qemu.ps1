@@ -1,6 +1,6 @@
 param(
     [ValidateSet("auto", "iso", "uefi")]
-    [string]$Mode = "auto",
+    [string]$Mode = "uefi",
     [ValidateSet("fast", "debug")]
     [string]$Profile = "fast",
     [ValidateSet("auto", "whpx", "tcg")]
@@ -8,6 +8,8 @@ param(
     [int]$DisplayWidth = 1920,
     [int]$DisplayHeight = 1080,
     [int]$CpuCount = 0,
+    [ValidateRange(128, 32768)]
+    [int]$MemoryMiB = 2048,
     [switch]$RebuildIso,
     [switch]$RebuildAppliance,
     [switch]$NoBuild,
@@ -18,6 +20,13 @@ param(
     [switch]$NoAutoLogin,
     [switch]$Headless,
     [switch]$WaitForExit,
+    [switch]$EnableTpm,
+    [switch]$TpmGui,
+    [switch]$TrustedBootSmoke,
+    [string]$TpmStatePath = "",
+    [string]$SwtpmPath = "",
+    [int]$TpmServerPort = 2321,
+    [int]$TpmControlPort = 2322,
     [switch]$ForceVarsReset,
     [switch]$Gdb,
     [switch]$GdbWait,
@@ -26,8 +35,10 @@ param(
     [switch]$FsSmokeTest,
     [switch]$ShellSmokeTest,
     [switch]$ShellCommandTest,
+    [switch]$BootTests,
     [switch]$PackagedPeSmoke,
     [switch]$MixedUpdateSmoke,
+    [switch]$SkipBootstrap,
     [string]$CuratedBundleDir = "",
     [string]$EfiPath = "",
     [string]$OvmfCodePath = "",
@@ -39,6 +50,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "scripts\bootstrap_windows.ps1")
 
 function Wait-FileMarker {
     param(
@@ -130,6 +142,178 @@ function Start-CleanProcess {
         }
     }
     return $proc
+}
+
+function ConvertTo-WslPath {
+    param([string]$PathValue)
+
+    $converted = & wsl.exe -e wslpath -a -u -- $PathValue 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "WSL path conversion failed for TPM state: $PathValue"
+    }
+    $converted = ($converted | Select-Object -Last 1).ToString().Trim()
+    if (-not $converted) {
+        throw "WSL returned an empty TPM state path for: $PathValue"
+    }
+    $converted
+}
+
+function Convert-QemuArgumentsForWsl {
+    param([string[]]$Arguments)
+
+    $converted = @()
+    foreach ($argument in $Arguments) {
+        if ($argument -match '^file:(?<path>[A-Za-z]:\\.*)$') {
+            $converted += "file:$(ConvertTo-WslPath $Matches.path)"
+            continue
+        }
+        if ($argument -match '^(?<prefix>.*file=)(?<path>[A-Za-z]:\\[^,]+)(?<suffix>,.*)?$') {
+            $suffix = if ($Matches.suffix) { $Matches.suffix } else { "" }
+            $converted += "$($Matches.prefix)$(ConvertTo-WslPath $Matches.path)$suffix"
+            continue
+        }
+        if ($argument -match '^[A-Za-z]:\\' -and (Test-Path -LiteralPath $argument)) {
+            $converted += ConvertTo-WslPath $argument
+            continue
+        }
+        $converted += $argument
+    }
+    $converted
+}
+
+function Get-QemuLaunchArguments {
+    param([string[]]$Arguments)
+
+    if ($EnableTpm) {
+        return @($qemuLaunchPrefix) + (Convert-QemuArgumentsForWsl $Arguments)
+    }
+    return $Arguments
+}
+
+function Test-TcpPortReady {
+    param(
+        [string]$HostName,
+        [int]$Port
+    )
+
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.ConnectAsync($HostName, $Port)
+        if (-not $connect.Wait(250)) {
+            return $false
+        }
+        return $client.Connected
+    } catch {
+        return $false
+    } finally {
+        $client.Dispose()
+    }
+}
+
+function Resolve-TpmEmulator {
+    param([string]$RequestedPath)
+
+    if ($RequestedPath) {
+        if ($RequestedPath.StartsWith("/")) {
+            $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+            if (-not $wsl) { throw "WSL swtpm path requested but wsl.exe is unavailable: $RequestedPath" }
+            return [pscustomobject]@{
+                FilePath = $wsl.Source
+                Prefix = @("-e", $RequestedPath)
+                Wsl = $true
+            }
+        }
+        $resolved = Resolve-Path -LiteralPath $RequestedPath -ErrorAction SilentlyContinue
+        if (-not $resolved) {
+            throw "swtpm not found at $RequestedPath"
+        }
+        return [pscustomobject]@{
+            FilePath = $resolved.Path
+            Prefix = @()
+            Wsl = $false
+        }
+    }
+
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if ($wsl) {
+        $wslSwtpm = & $wsl.Source -e sh -lc "command -v swtpm" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $wslSwtpm) {
+            return [pscustomobject]@{
+                FilePath = $wsl.Source
+                Prefix = @("-e", "swtpm")
+                Wsl = $true
+            }
+        }
+    }
+
+    $native = Get-Command swtpm -ErrorAction SilentlyContinue
+    if ($native) {
+        return [pscustomobject]@{
+            FilePath = $native.Source
+            Prefix = @()
+            Wsl = $false
+        }
+    }
+
+    throw "TPM emulator unavailable: install swtpm (native Windows or WSL) or pass -SwtpmPath."
+}
+
+function Start-TpmEmulator {
+    param(
+        [string]$StatePath,
+        [string]$RequestedPath,
+        [int]$ServerPort,
+        [int]$ControlPort,
+        [string]$StdoutPath,
+        [string]$StderrPath
+    )
+
+    $emulator = Resolve-TpmEmulator $RequestedPath
+    if (-not $emulator.Wsl) {
+        throw "TPM emulation requires the WSL QEMU backend; the installed Windows QEMU has no -tpmdev backend. Install swtpm in WSL or pass a WSL swtpm path."
+    }
+    $stateDir = [System.IO.Path]::GetFullPath($StatePath)
+    New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+    $stateArg = if ($emulator.Wsl) { ConvertTo-WslPath $stateDir } else { $stateDir }
+    $socketPath = "/tmp/echos-tpm-$stamp/swtpm.sock"
+    & wsl.exe -e sh -lc "rm -rf /tmp/echos-tpm-$stamp && mkdir -p /tmp/echos-tpm-$stamp" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "WSL TPM socket directory creation failed: $socketPath"
+    }
+    $arguments = @($emulator.Prefix) + @(
+        "socket",
+        "--tpmstate", "dir=$stateArg",
+        "--tpm2",
+        "--ctrl", "type=unixio,path=$socketPath",
+        "--flags", "not-need-init",
+        "--log", "level=20"
+    )
+
+    $process = Start-CleanProcess `
+        -FilePath $emulator.FilePath `
+        -ArgumentList $arguments `
+        -StdoutPath $StdoutPath `
+        -StderrPath $StderrPath
+
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline) {
+        if ($process.HasExited) {
+            $stderr = if (Test-Path $StderrPath) { Get-Content $StderrPath -Raw } else { "" }
+            throw "swtpm exited before opening Unix socket $socketPath`: $stderr"
+        }
+        & wsl.exe -e test -S $socketPath 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            return [pscustomobject]@{
+                Process = $process
+                SocketPath = $socketPath
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    try { $process.Kill() } catch {}
+    try { $process.WaitForExit() } catch {}
+    throw "swtpm Unix socket did not become ready: $socketPath"
 }
 
 function Wait-FileMarkerAfterOffset {
@@ -404,13 +588,21 @@ foreach ($smokeSwitch in @($SuspendResumeSmoke, $FsSmokeTest, $effectiveShellSmo
 if ($exclusiveSmokeCount -gt 1) {
     throw "SuspendResumeSmoke, FsSmokeTest, ShellSmokeTest/ShellCommandTest, PackagedPeSmoke ve MixedUpdateSmoke ayni anda kosulmaz"
 }
+if ($EnableTpm -and $MixedUpdateSmoke) {
+    throw "-EnableTpm ile MixedUpdateSmoke birlikte kullanılamaz; TPM backend tek UEFI QEMU oturumu gerektirir."
+}
+if ($TpmGui -and -not $EnableTpm) {
+    throw "-TpmGui yalnızca -EnableTpm ile kullanılabilir."
+}
 
 try { taskkill /IM qemu-system-x86_64.exe /F 2>$null | Out-Null } catch {}
 
 Write-Host "echOS QEMU Appliance" -ForegroundColor Cyan
 Write-Host "====================`n" -ForegroundColor Cyan
 
-$projectRoot = (Get-Location).Path
+$projectRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$originalLocation = (Get-Location).Path
+Set-Location -LiteralPath $projectRoot
 $logDir = Join-Path $projectRoot "logs"
 $artifactDir = Join-Path $projectRoot "build\appliance"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
@@ -425,9 +617,15 @@ $qemuStdoutPath = Join-Path $logDir ("qemu_stdout_" + $stamp + ".log")
 $qemuStderrPath = Join-Path $logDir ("qemu_stderr_" + $stamp + ".log")
 $httpServerStdoutPath = Join-Path $logDir ("http_server_stdout_" + $stamp + ".log")
 $httpServerStderrPath = Join-Path $logDir ("http_server_stderr_" + $stamp + ".log")
+$tpmStdoutPath = Join-Path $logDir ("tpm_stdout_" + $stamp + ".log")
+$tpmStderrPath = Join-Path $logDir ("tpm_stderr_" + $stamp + ".log")
 
 $transcriptStarted = $false
 $httpServerProc = $null
+$tpmProcess = $null
+$tpmSocketPath = $null
+$leaveQemuRunning = $false
+$qemuLaunchPrefix = @()
 try {
     Start-Transcript -Path $logPath | Out-Null
     $transcriptStarted = $true
@@ -499,14 +697,50 @@ if (Test-Path $llvmBin) {
 # Incremental derleme aktif — sadece değişen dosyalar yeniden derlenir
 # $env:CARGO_INCREMENTAL = "0"  # ESKİ: her seferinde sıfırdan derliyordu
 
-$qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
-if (-not (Test-Path $qemu)) {
-    $qemuCmd = Get-Command qemu-system-x86_64 -ErrorAction SilentlyContinue
-    if ($qemuCmd) {
-        $qemu = $qemuCmd.Source
-    } else {
-        throw "QEMU bulunamadı"
+$bootstrap = Initialize-EchosWindowsEnvironment `
+    -ProjectRoot $projectRoot `
+    -NeedBareMetal:($Mode -eq "iso") `
+    -NeedPython:$MixedUpdateSmoke `
+    -NeedMsvc:($Mode -ne "iso") `
+    -SkipInstall:$SkipBootstrap
+$qemu = $bootstrap.QemuPath
+$qemuLaunchFile = $qemu
+
+if ($EnableTpm) {
+    $wslCommand = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if (-not $wslCommand) {
+        throw "-EnableTpm requires wsl.exe because the installed Windows QEMU has no TPM backend."
     }
+    $wslQemu = & $wslCommand.Source -e sh -lc "command -v qemu-system-x86_64" 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $wslQemu) {
+        throw "-EnableTpm requires qemu-system-x86_64 in WSL (with -tpmdev emulator support)."
+    }
+    $wslTpmBackends = & $wslCommand.Source -e qemu-system-x86_64 -tpmdev help 2>&1
+    if (-not (($wslTpmBackends -join "`n") -match "emulator")) {
+        throw "WSL QEMU lacks the TPM emulator backend (-tpmdev emulator)."
+    }
+    $wslTpmDevices = & $wslCommand.Source -e qemu-system-x86_64 -device help 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not (($wslTpmDevices -join "`n") -match "tpm-tis")) {
+        throw "WSL QEMU lacks the tpm-tis device required for TPM 2.0 firmware discovery."
+    }
+    if ($TpmGui) {
+        $wslGui = & $wslCommand.Source -e sh -lc 'test -n "$DISPLAY" && test -S /mnt/wslg/runtime-dir/wayland-0' 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw "-TpmGui requires WSLg (DISPLAY and /mnt/wslg/runtime-dir/wayland-0). Use -Headless or install/enable WSLg."
+        }
+        Write-Host "TPM GUI: WSLg GTK display enabled" -ForegroundColor DarkGray
+    }
+    $qemuLaunchFile = $wslCommand.Source
+    $qemuLaunchPrefix = @("-e", "qemu-system-x86_64")
+    $whpxEnabled = $false
+    $accelMode = "tcg"
+    $accelArgs = @("-accel", "tcg")
+    $cpuModel = $tcgCpuModel
+    if (-not $cpuCountExplicit) {
+        $qemuCpuCount = $defaultTcgCpuCount
+    }
+    $qemuSmpArg = "sockets=1,cores=$qemuCpuCount,threads=1,maxcpus=$qemuCpuCount"
+    Write-Host "TPM backend: WSL QEMU + Unix socket (native Windows QEMU TPM backend unavailable)" -ForegroundColor DarkGray
 }
 
 $python = $null
@@ -523,7 +757,11 @@ $isoKernelPath = Join-Path $projectRoot "multiboot_iso\boot\ech_os"
 $useIso = $false
 if ($Mode -eq "iso") { $useIso = $true }
 elseif ($Mode -eq "uefi") { $useIso = $false }
-else { $useIso = Test-Path $isoPath }
+else { $useIso = $false }
+
+if ($EnableTpm -and $useIso) {
+    throw "-EnableTpm yalnızca UEFI appliance yolunda kullanılabilir; Multiboot2 ISO'da TCG2 firmware yolu yok. -Mode uefi kullanın."
+}
 
 if ($useIso) {
     if (-not $NoBuild) {
@@ -561,7 +799,7 @@ if ($useIso) {
     }
     if ($Gdb) {
         $qemuArgs += @("-gdb", "tcp::${GdbPort},server,nowait")
-        Write-Host "GDB stub: tcp::${GdbPort}" -ForegroundColor Green
+        Write-Host "GDB endpoint: tcp::${GdbPort}" -ForegroundColor Green
     }
     if ($GdbWait) {
         $qemuArgs += "-S"
@@ -582,20 +820,20 @@ if ($useIso) {
     $mixedUpdateArtifactDir = $null
     $mixedUpdateIndexUrl = $null
 
-    $qemuShare = "C:\Program Files\qemu\share"
+$qemuShare = $bootstrap.QemuShare
     $ovmfCode = if ($OvmfCodePath -ne "") {
         $resolvedOvmfCode = Resolve-Path -LiteralPath $OvmfCodePath -ErrorAction SilentlyContinue
         if (-not $resolvedOvmfCode) { throw "OVMF code image not found at $OvmfCodePath" }
         $resolvedOvmfCode.Path
     } else {
-        Join-Path $qemuShare "edk2-x86_64-code.fd"
+    $bootstrap.OvmfCodePath
     }
     $ovmfVarsTemplate = if ($OvmfVarsTemplatePath -ne "") {
         $resolvedVarsTemplate = Resolve-Path -LiteralPath $OvmfVarsTemplatePath -ErrorAction SilentlyContinue
         if (-not $resolvedVarsTemplate) { throw "OVMF vars template not found at $OvmfVarsTemplatePath" }
         $resolvedVarsTemplate.Path
     } else {
-        Join-Path $qemuShare "edk2-i386-vars.fd"
+    $bootstrap.OvmfVarsTemplatePath
     }
     $ovmfVars = if ($OvmfVarsPath -ne "") {
         [System.IO.Path]::GetFullPath($OvmfVarsPath)
@@ -750,6 +988,9 @@ if ($useIso) {
     if ($ShellCommandTest) {
         $builderArgs += "--shell-command-test"
     }
+    if ($BootTests) {
+        $builderArgs += "--boot-tests"
+    }
     if ($PackagedPeSmoke) {
         $builderArgs += @("--pe-smoke-bundle", $peSmokeBundlePath)
     }
@@ -766,6 +1007,7 @@ if ($useIso) {
         (-not $SuspendResumeSmoke) -and `
         (-not $FsSmokeTest) -and `
         (-not $effectiveShellSmokeTest) -and `
+        (-not $BootTests) -and `
         (-not $PackagedPeSmoke) -and `
         (-not $MixedUpdateSmoke) -and `
         ($EspExtraFile.Count -eq 0)
@@ -807,13 +1049,14 @@ if ($useIso) {
     if (-not (Test-Path $ovmfVars)) {
         Copy-Item $ovmfVarsTemplate $ovmfVars -Force
     }
-    $ovmfCodeRuntime = Join-Path $artifactDir "OVMF_CODE.fd"
-    if ((-not (Test-Path $ovmfCodeRuntime)) -or ((Get-Item -LiteralPath $ovmfCode).LastWriteTimeUtc -gt (Get-Item -LiteralPath $ovmfCodeRuntime -ErrorAction SilentlyContinue).LastWriteTimeUtc)) {
+    $ovmfCodeRuntimeName = if ($OvmfCodePath -ne "") { "OVMF_CODE.custom.fd" } else { "OVMF_CODE.fd" }
+    $ovmfCodeRuntime = Join-Path $artifactDir $ovmfCodeRuntimeName
+    if (($OvmfCodePath -ne "") -or (-not (Test-Path $ovmfCodeRuntime)) -or ((Get-Item -LiteralPath $ovmfCode).LastWriteTimeUtc -gt (Get-Item -LiteralPath $ovmfCodeRuntime -ErrorAction SilentlyContinue).LastWriteTimeUtc)) {
         Copy-Item $ovmfCode $ovmfCodeRuntime -Force
     }
     $ovmfCode = $ovmfCodeRuntime
 
-    $displayArgs = if ($Headless) {
+    $displayArgs = if ($Headless -or ($EnableTpm -and -not $TpmGui)) {
         @("-display", "none")
     } else {
         @("-display", "gtk,grab-on-hover=on,zoom-to-fit=on")
@@ -835,7 +1078,7 @@ if ($useIso) {
         "-debugcon", "file:$debugLogPath",
         "-global", "isa-debugcon.iobase=0xE9",
         "-serial", "file:$serialLogPath",
-        "-m", "2G",
+        "-m", ("{0}M" -f $MemoryMiB),
         "-monitor", $monitorEndpoint,
         "-no-reboot",
         "-no-shutdown",
@@ -843,6 +1086,28 @@ if ($useIso) {
         "-netdev", "user,id=net0,hostfwd=tcp::$HostHttpPort-:80,hostfwd=tcp::$HostHttpsPort-:443",
         "-device", "$nicModel,netdev=net0,mac=52:54:00:12:34:56"
     ) + $displayArgs + $videoArgs + $accelArgs
+    if ($EnableTpm) {
+        $tpmState = if ($TpmStatePath -ne "") {
+            [System.IO.Path]::GetFullPath($TpmStatePath)
+        } else {
+            Join-Path $artifactDir "tpm2"
+        }
+        Write-Host "TPM 2.0 emulator: state=$tpmState backend=WSL Unix socket" -ForegroundColor DarkGray
+        $tpmRuntime = Start-TpmEmulator `
+            -StatePath $tpmState `
+            -RequestedPath $SwtpmPath `
+            -ServerPort $TpmServerPort `
+            -ControlPort $TpmControlPort `
+            -StdoutPath $tpmStdoutPath `
+            -StderrPath $tpmStderrPath
+        $tpmProcess = $tpmRuntime.Process
+        $tpmSocketPath = $tpmRuntime.SocketPath
+        $qemuArgs += @(
+            "-chardev", "socket,id=chrtpm,path=$tpmSocketPath",
+            "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
+            "-device", "tpm-tis,tpmdev=tpm0"
+        )
+    }
     if ($SuspendResumeSmoke) {
         $qemuArgs += @("-global", "ICH9-LPC.disable_s3=0")
     }
@@ -851,7 +1116,7 @@ if ($useIso) {
     }
     if ($Gdb) {
         $qemuArgs += @("-gdb", "tcp::${GdbPort},server,nowait")
-        Write-Host "GDB stub: tcp::${GdbPort}" -ForegroundColor Green
+        Write-Host "GDB endpoint: tcp::${GdbPort}" -ForegroundColor Green
     }
     if ($GdbWait) {
         $qemuArgs += "-S"
@@ -1056,7 +1321,7 @@ try {
         }
     } else {
         Write-Host "Launching QEMU...`n" -ForegroundColor Yellow
-        $proc = Start-CleanProcess -FilePath $qemu -ArgumentList $qemuArgs -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
+        $proc = Start-CleanProcess -FilePath $qemuLaunchFile -ArgumentList (Get-QemuLaunchArguments $qemuArgs) -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
 
         if ($whpxEnabled -and -not $useIso) {
             $whpxEntryTimeoutSec = if ($Accel -eq "whpx") { 20 } else { 5 }
@@ -1108,12 +1373,31 @@ try {
                 $cpuModel = $tcgCpuModel
                 $qemuCpuCount = $fallbackCpuCount
                 $qemuSmpArg = "sockets=1,cores=$qemuCpuCount,threads=1,maxcpus=$qemuCpuCount"
-                $proc = Start-CleanProcess -FilePath $qemu -ArgumentList $qemuArgs -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
+                $proc = Start-CleanProcess -FilePath $qemuLaunchFile -ArgumentList (Get-QemuLaunchArguments $qemuArgs) -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
             }
         }
 
 $interactiveReady = $false
-if (-not $useIso) {
+$bootMarkerTimeoutSec = if ($EnableTpm) { 240 } else { 90 }
+$trustedBootSatisfied = $false
+if ($TrustedBootSmoke -and -not $useIso) {
+    $trustedMarkers = @(
+        "[UEFI] EFI Entry Point Reached!",
+        "[UEFI] Loaded image signature OK",
+        "[TPM] Measure OK (PCR4)",
+        "[TPM] Event log entries=",
+        "[UEFI] Runtime services verified",
+        "[UEFI] Secure Boot databases available"
+    )
+    foreach ($marker in $trustedMarkers) {
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker $marker -TimeoutSec $bootMarkerTimeoutSec)) {
+            if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+            throw "Trusted boot marker görülmedi: $marker"
+        }
+    }
+    $trustedBootSatisfied = $true
+    if (-not $proc.HasExited) { try { $proc.Kill() } catch {} }
+} elseif (-not $useIso) {
     $successMarkers = @(
         "[BOOTCTRL] stage=boot-control-loaded",
         "[BOOTCTRL] stage=kernel-core-ready",
@@ -1121,7 +1405,7 @@ if (-not $useIso) {
         "[BOOTCTRL] stage=display-ready"
     )
     if ((-not $NoAutoLogin) -and (-not $effectiveShellSmokeTest)) {
-        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[DESKTOP] session bootstrap step=login-visible" -TimeoutSec 90)) {
+        if (-not (Wait-FileMarker -Path $serialLogPath -Marker "[DESKTOP] session bootstrap step=login-visible" -TimeoutSec $bootMarkerTimeoutSec)) {
             try { $proc.Kill() } catch {}
             throw "Login screen marker görülmedi"
         }
@@ -1253,14 +1537,14 @@ if (-not $useIso) {
             try { $proc.Kill() } catch {}
         }
     } elseif (-not $NoAutoLogin) {
-        if (Wait-FileMarker -Path $serialLogPath -Marker "[BOOTCTRL] success" -TimeoutSec 90) {
+        if (Wait-FileMarker -Path $serialLogPath -Marker "[BOOTCTRL] success" -TimeoutSec $bootMarkerTimeoutSec) {
             $interactiveReady = $true
             if ($Headless -and -not $proc.HasExited) {
                 try { $proc.Kill() } catch {}
             }
         }
     } else {
-        if (Wait-FileMarker -Path $serialLogPath -Marker "[BOOTCTRL] stage=display-ready" -TimeoutSec 90) {
+        if (Wait-FileMarker -Path $serialLogPath -Marker "[BOOTCTRL] stage=display-ready" -TimeoutSec $bootMarkerTimeoutSec) {
             $interactiveReady = $true
             if ($Headless -and -not $proc.HasExited) {
                 try { $proc.Kill() } catch {}
@@ -1271,16 +1555,27 @@ if (-not $useIso) {
 
 if ($interactiveReady -and (-not $Headless) -and (-not $WaitForExit)) {
     Assert-SerialMarkers -Path $serialLogPath -Markers $successMarkers
+    # The GUI hand-off is intentional.  Keep QEMU, swtpm, and the Unix socket
+    # alive after this PowerShell scope returns; tearing down the TPM backend
+    # here makes the guest freeze immediately after the ready screen.
+    $leaveQemuRunning = $true
     Write-Host "`nQEMU ready; leaving VM running and returning control to the shell." -ForegroundColor Green
     Write-Host "Use -WaitForExit if you want the script to block until the QEMU window closes." -ForegroundColor DarkGray
+    $global:LASTEXITCODE = 0
     return
 }
 
 $proc.WaitForExit()
 
+if ($TrustedBootSmoke -and $trustedBootSatisfied) {
+    Write-Host "`nTrusted Boot firmware/TPM markers verified; QEMU stopped." -ForegroundColor Green
+    $global:LASTEXITCODE = 0
+    return
+}
+
 Write-Host "`nQEMU exited." -ForegroundColor Magenta
 
-if (-not $useIso) {
+if (-not $useIso -and -not $TrustedBootSmoke) {
     $requiredMarkers = @(
         "[BOOTCTRL] stage=boot-control-loaded",
         "[BOOTCTRL] stage=kernel-core-ready",
@@ -1288,11 +1583,22 @@ if (-not $useIso) {
         "[BOOTCTRL] stage=display-ready"
     )
     if ((-not $NoAutoLogin) -and (-not $effectiveShellSmokeTest)) {
-        $requiredMarkers += @(
-            "[BOOTCTRL] stage=desktop-ready",
-            "[BOOTCTRL] stage=app-basket-ready",
-            "[BOOTCTRL] success"
-        )
+        if ($BootTests) {
+            # Wave 4 acceptance runs the bounded suite before compositor
+            # publication; the desktop contract is proven by its terminal
+            # bootstrap markers, while BOOTCTRL success remains mandatory.
+            $requiredMarkers += @(
+                "[BOOTCTRL] success",
+                "[DESKTOP] session bootstrap step=login-visible",
+                "[DESKTOP] session bootstrap step=render-shell"
+            )
+        } else {
+            $requiredMarkers += @(
+                "[BOOTCTRL] stage=desktop-ready",
+                "[BOOTCTRL] stage=app-basket-ready",
+                "[BOOTCTRL] success"
+            )
+        }
     }
     if ($SuspendResumeSmoke) {
         $requiredMarkers += @(
@@ -1307,15 +1613,44 @@ if (-not $useIso) {
             "[WIN32] CreateWindowExA:"
         )
     }
+    if ($BootTests) {
+        $requiredMarkers += @(
+            "[BOOT_TEST] PASS",
+            "[RING3_TEST] PASS",
+            "[VM_SECURITY_TEST] PASS",
+            "[VM_STRESS_TEST] PASS",
+            "[IRQ_STRESS_TEST] PASS"
+        )
+    }
 
     Assert-SerialMarkers -Path $serialLogPath -Markers $requiredMarkers
+    if ($BootTests) {
+        $serialText = Get-Content -LiteralPath $serialLogPath -Raw -ErrorAction SilentlyContinue
+        $fatalMarkers = @("[PANIC]", "PAGE_FAULT", "DOUBLE_FAULT", "TRIPLE_FAULT", "phase_state=failed", "qemu: fatal", "guest_errors")
+        $fatalSeen = @($fatalMarkers | Where-Object { $serialText -and $serialText.Contains($_) })
+        if ($fatalSeen.Count -ne 0) {
+            throw "UEFI Wave 4 smoke fatal marker: $($fatalSeen -join ', ')"
+        }
+    }
 }
 
     }
 } finally {
-    if ($httpServerProc -and -not $httpServerProc.HasExited) {
+    if (-not $leaveQemuRunning -and $tpmProcess -and -not $tpmProcess.HasExited) {
+        try { $tpmProcess.Kill() } catch {}
+        try { $tpmProcess.WaitForExit() } catch {}
+    }
+    if (-not $leaveQemuRunning -and $tpmSocketPath) {
+        try {
+            $tpmPattern = "/tmp/echos-tpm-$stamp/swtpm.sock"
+            $cleanupCommand = "for p in `$(pgrep -f -- 'swtpm socket.*$tpmPattern' || true); do kill `$p 2>/dev/null || true; done; rm -rf '/tmp/echos-tpm-$stamp'"
+            & wsl.exe -e sh -lc $cleanupCommand 2>$null
+        } catch {}
+    }
+    if (-not $leaveQemuRunning -and $httpServerProc -and -not $httpServerProc.HasExited) {
         try { $httpServerProc.Kill() } catch {}
         try { $httpServerProc.WaitForExit() } catch {}
     }
     if ($transcriptStarted) { Stop-Transcript | Out-Null }
+    if ($originalLocation) { Set-Location -LiteralPath $originalLocation }
 }

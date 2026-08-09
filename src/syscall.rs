@@ -33,6 +33,8 @@ use core::arch::global_asm;
 use x86_64::registers::model_specific::Msr;
 use x86_64::VirtAddr;
 
+pub use crate::cpu::local::CpuData;
+
 /// EFER MSR: Genişletilmiş Özellik Enable Register.
 /// SCE (SYSCALL Enable) bitini içerir.
 const MSR_EFER: u32 = 0xC000_0080;
@@ -42,30 +44,6 @@ const MSR_STAR: u32 = 0xC000_0081;
 const MSR_LSTAR: u32 = 0xC000_0082;
 /// SFMASK MSR: SYSCALL sırasında temizlenecek RFLAGS bitlerini belirler.
 const MSR_SFMASK: u32 = 0xC000_0084;
-/// KERNEL_GS_BASE MSR: SWAPGS talimatı için çekirdek GS tabanını depolar.
-const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
-
-/// CPU başına sistem çağrısı geçiş verisi yapısı.
-///
-/// `repr(C)` zorunludur: assembly kodu sabit ofsetlerle bu alanlara erişir.
-///
-/// GS segment tabanlı erişim haritası:
-/// - GS:0  -> `user_rsp_scratch`  (kullanıcı RSP geçici deposu)
-/// - GS:8  -> `kernel_stack_top`  (çekirdek yığın tepe adresi)
-/// - GS:16 -> `cpu_id`            (CPU kimlik numarası, u32 = 4 bayt)
-/// - GS:24 -> `user_rip`          (kullanıcı RIP; SYSCALL sonrası RCX)
-/// - GS:32 -> `user_rflags`       (kullanıcı RFLAGS; SYSCALL sonrası R11)
-/// - GS:40 -> `irq_depth`         (kesme derinliği sayacı)
-#[repr(C)]
-pub struct CpuData {
-    pub user_rsp_scratch: u64,
-    pub kernel_stack_top: u64,
-    pub cpu_id: u32,
-    pub user_rip: u64,
-    pub user_rflags: u64,
-    pub irq_depth: u64,
-}
-
 /// Sistem çağrısı başına ayrılan çekirdek yığını boyutu (40 KiB).
 ///
 /// Her sistem çağrısı iç içe geçebileceğinden yeterince büyük tutulur.
@@ -107,10 +85,11 @@ pub fn init() {
     crate::serial_println!("Syscall Mechanism Initialized.");
 }
 
-/// Geçerli CPU için `CpuData` işaretçisini KERNEL_GS_BASE MSR'a yazar.
+/// Geçerli CPU için Ring 0 `CpuData` GS tabanını kurar.
 ///
-/// SWAPGS sonrası GS segmentinin `CpuData` yapısını göstermesi için
-/// her CPU'nun başlangıcında çağrılması gerekir.
+/// Ring 0'da IA32_GS_BASE doğrudan `CpuData`'yı gösterir; kullanıcı GS
+/// tabanı IA32_KERNEL_GS_BASE swap gölgesinde tutulur. Her CPU başlangıcında
+/// kesmeler etkinleşmeden önce çağrılmalıdır.
 pub unsafe fn init_cpu_data(cpu_data: *mut CpuData) {
     let stack_top = (*cpu_data).kernel_stack_top;
     if stack_top != 0 && !is_dedicated_kernel_stack_top(stack_top) {
@@ -120,8 +99,7 @@ pub unsafe fn init_cpu_data(cpu_data: *mut CpuData) {
         );
     }
 
-    let mut kernel_gs_base = Msr::new(MSR_KERNEL_GS_BASE);
-    kernel_gs_base.write(cpu_data as u64);
+    crate::cpu::local::init(cpu_data);
 }
 
 /// Geçerli CPU'nun çekirdek yığın tepe adresini günceller.
@@ -142,13 +120,7 @@ pub fn set_kernel_stack_for_current_cpu(stack_top: u64) -> bool {
         return false;
     }
 
-    unsafe {
-        let mut msr = Msr::new(MSR_KERNEL_GS_BASE);
-        let base = msr.read();
-        let data = base as *mut CpuData;
-        // GS:8 pozisyonunu (kernel_stack_top) güncelle
-        (*data).kernel_stack_top = stack_top;
-    }
+    crate::cpu::local::set_kernel_stack(stack_top);
     true
 }
 
@@ -272,7 +244,10 @@ pub extern "sysv64" fn syscall_dispatcher(
         if SYSCALL_LOG_COUNT <= 10 {
             crate::debug_diag!(
                 "[SYSCALL] Ring3 syscall: num={} a1={:#x} a2={:#x} a3={:#x}",
-                num, a1, a2, a3
+                num,
+                a1,
+                a2,
+                a3
             );
         }
     }

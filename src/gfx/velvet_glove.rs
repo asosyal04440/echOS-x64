@@ -4751,36 +4751,50 @@ impl DesktopSession {
         let _pending_reasons = frame_plan.pending.as_slice();
 
         if frame_plan.touches(InvalidationTarget::Wallpaper) {
+            serial_println!("[DESKTOP] render-shell wallpaper begin");
             let width = self.shell.desktop.content_rect.width as usize;
             let height = self.shell.desktop.content_rect.height as usize;
-            self.shell.client.commit_scene(
+            let scene = build_desktop_shortcuts_scene(
                 self.shell.desktop.window_id,
-                build_desktop_shortcuts_scene(
-                    self.shell.desktop.window_id,
-                    &mut self.text_system,
-                    width,
-                    height,
-                    theme_mode,
-                    self.shell.selected_shortcut,
-                ),
-            )?;
+                &mut self.text_system,
+                width,
+                height,
+                theme_mode,
+                self.shell.selected_shortcut,
+            );
+            serial_println!(
+                "[DESKTOP] render-shell wallpaper scene-ready objects={} damage={}",
+                scene.render_objects.len(),
+                scene.damage_hint.len()
+            );
+            self.shell
+                .client
+                .commit_scene(self.shell.desktop.window_id, scene)?;
+            serial_println!("[DESKTOP] render-shell wallpaper committed");
         }
 
         if frame_plan.touches(InvalidationTarget::TopBar) {
+            serial_println!("[DESKTOP] render-shell top-bar begin");
             let width = self.shell.top_bar.content_rect.width as usize;
             let height = self.shell.top_bar.content_rect.height as usize;
-            self.shell.client.commit_scene(
+            let scene = build_top_bar_scene(
                 self.shell.top_bar.window_id,
-                build_top_bar_scene(
-                    self.shell.top_bar.window_id,
-                    &mut self.text_system,
-                    width,
-                    height,
-                    self.shell.active_workspace,
-                    &session_snapshot,
-                    theme_mode,
-                ),
-            )?;
+                &mut self.text_system,
+                width,
+                height,
+                self.shell.active_workspace,
+                &session_snapshot,
+                theme_mode,
+            );
+            serial_println!(
+                "[DESKTOP] render-shell top-bar scene-ready objects={} damage={}",
+                scene.render_objects.len(),
+                scene.damage_hint.len()
+            );
+            self.shell
+                .client
+                .commit_scene(self.shell.top_bar.window_id, scene)?;
+            serial_println!("[DESKTOP] render-shell top-bar committed");
         }
 
         if frame_plan.touches(InvalidationTarget::Dock) {

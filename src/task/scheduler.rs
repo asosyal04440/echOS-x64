@@ -52,23 +52,32 @@ use super::task::{
 use crate::cpu::{cpu_slots, epoch::SMP_EPOCH_DOMAIN};
 use crate::memory_barriers::{smp_mb, smp_wmb};
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::registers::model_specific::Msr;
 use x86_64::structures::paging::{OffsetPageTable, PhysFrame};
 use x86_64::VirtAddr;
 
 const MAX_CPUS: usize = 8192;
-const MSR_GS_BASE: u32 = 0xC000_0101;
-const MSR_FS_BASE: u32 = 0xC000_0102;
+const MAX_NUMA_NODES: usize = 256;
+/// NUMA yük indeksi — aynı node'daki CPU'ya task vermek için task eşdeğeri ceza.
+/// SLIT convention: local=10, remote=20+ → ~2x latency → 4 task queue depth = eşdeğer ceza.
+const NUMA_LOAD_PENALTY: u32 = 4;
+const MASK_WORDS: usize = 4; // 256 CPU slots ÷ 64 bits per u64 word
 
 static mut WORKERS: Vec<Option<Worker<Task>>> = Vec::new();
 static mut STEALERS: Vec<Option<Stealer<Task>>> = Vec::new();
+
+/// Taşma kuyruğu: Chase-Lev deque dolu olduğunda görevler buraya düşer.
+/// schedule() her tick'te önce bu kuyruğu boşaltmayı dener.
+lazy_static! {
+    static ref OVERFLOW_TASKS: Mutex<VecDeque<Box<Task>>> = Mutex::new(VecDeque::new());
+}
 
 // Global görev ID sayacı
 static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
@@ -80,12 +89,33 @@ static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 /// Global SMP scheduler yapısı (Legacy wrapper)
 pub struct SmpScheduler {
     cpu_count: AtomicU32,
+    /// Per-NUMA-node en düşük yüklü CPU'nın load değeri (cache). u32::MAX = geçersiz.
+    numa_best_load: Box<[AtomicU32]>,
+    /// Per-NUMA-node en düşük yüklü CPU ID'si.
+    numa_best_cpu: Box<[AtomicU32]>,
+    /// Bitmask of CPUs with stealable work (load > 0). Bit N set = CPU N has ≥1 task.
+    /// Updated atomically in publish_worker_load. Read in choose_victim_cpu for O(1) victim scan.
+    stealable_mask: [AtomicU64; MASK_WORDS],
 }
 
 impl SmpScheduler {
     pub fn new(cpu_count: u32) -> Self {
+        let init_slice = || -> Box<[AtomicU32]> {
+            (0..MAX_NUMA_NODES)
+                .map(|_| AtomicU32::new(u32::MAX))
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        };
         Self {
             cpu_count: AtomicU32::new(cpu_count),
+            numa_best_load: init_slice(),
+            numa_best_cpu: init_slice(),
+            stealable_mask: [
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+                AtomicU64::new(0),
+            ],
         }
     }
 
@@ -114,6 +144,32 @@ impl SmpScheduler {
     }
 }
 
+/// Pre-computed per-NUMA-node CPU membership masks for O(1) topology-filtered bitmap scan.
+/// masks[node][word] has bit N set when CPU (word*64 + N) belongs to NUMA node `node`.
+struct NodeMasks {
+    masks: [[u64; MASK_WORDS]; MAX_NUMA_NODES],
+}
+
+fn build_node_masks() -> Box<NodeMasks> {
+    let mut masks = Box::new(NodeMasks {
+        masks: [[0u64; MASK_WORDS]; MAX_NUMA_NODES],
+    });
+    let cpu_limit = crate::cpu::cpu_slots::cpu_count().min(256);
+    for cpu in 0..cpu_limit {
+        let node = crate::cpu::cpu_slots::numa_node(cpu) as usize;
+        if node < MAX_NUMA_NODES && crate::cpu::cpu_slots::is_online(cpu) {
+            let word = (cpu as usize) / 64;
+            let bit = 1u64 << ((cpu as usize) & 63);
+            masks.masks[node][word] |= bit;
+        }
+    }
+    masks
+}
+
+lazy_static! {
+    static ref NODE_CPU_MASKS: Box<NodeMasks> = build_node_masks();
+}
+
 fn task_can_run_on_cpu(task: &Task, cpu_id: u32) -> bool {
     task.hot.affinity == 0xFFFF_FFFF || (cpu_id < 32 && (task.hot.affinity & (1u32 << cpu_id)) != 0)
 }
@@ -133,14 +189,62 @@ pub fn queued_task_count(cpu_id: u32) -> u32 {
 }
 
 fn publish_worker_load(cpu_id: usize) {
-    crate::cpu::smp::update_cpu_load(cpu_id as u32, queued_task_count_usize(cpu_id));
+    let load = queued_task_count_usize(cpu_id);
+    crate::cpu::smp::update_cpu_load(cpu_id as u32, load);
+    update_numa_best_cpu(cpu_id as u32, load);
+    set_stealable_bit(cpu_id, load > 0);
+}
+
+#[inline]
+fn set_stealable_bit(cpu_id: usize, stealable: bool) {
+    let word = cpu_id / 64;
+    let bit = 1u64 << ((cpu_id) & 63);
+    if word < MASK_WORDS {
+        if stealable {
+            SMP_SCHEDULER.stealable_mask[word].fetch_or(bit, Ordering::Release);
+        } else {
+            SMP_SCHEDULER.stealable_mask[word].fetch_and(!bit, Ordering::Release);
+        }
+    }
+}
+
+fn update_numa_best_cpu(cpu_id: u32, load: u32) {
+    let node = cpu_slots::numa_node(cpu_id) as usize;
+    if node >= MAX_NUMA_NODES {
+        return;
+    }
+    let cur_load = SMP_SCHEDULER.numa_best_load[node].load(Ordering::Relaxed);
+    if load < cur_load {
+        SMP_SCHEDULER.numa_best_load[node].store(load, Ordering::Release);
+        SMP_SCHEDULER.numa_best_cpu[node].store(cpu_id, Ordering::Release);
+    } else if SMP_SCHEDULER.numa_best_cpu[node].load(Ordering::Relaxed) == cpu_id && load != cur_load {
+        SMP_SCHEDULER.numa_best_load[node].store(u32::MAX, Ordering::Release);
+    }
 }
 
 fn choose_spawn_cpu(task: &Task) -> usize {
     let current_cpu = get_current_cpu_id() as usize;
     let cpu_limit = SMP_SCHEDULER.cpu_count.load(Ordering::Relaxed).max(1) as usize;
+    let current_node = cpu_slots::numa_node(current_cpu as u32);
+
+    // Fast path: per-NUMA best CPU cache (O(1))
+    if (current_node as usize) < MAX_NUMA_NODES {
+        let candidate = SMP_SCHEDULER.numa_best_cpu[current_node as usize].load(Ordering::Acquire) as usize;
+        let expected_load = SMP_SCHEDULER.numa_best_load[current_node as usize].load(Ordering::Acquire);
+        if candidate < cpu_limit
+            && cpu_slots::is_online(candidate as u32)
+            && task_can_run_on_cpu(task, candidate as u32)
+            && unsafe { WORKERS.get(candidate).and_then(|w| w.as_ref()).is_some() }
+            && queued_task_count_usize(candidate) == expected_load
+        {
+            return candidate;
+        }
+    }
+
+    // Cold path: NUMA-aware full scan
     let mut best_cpu = current_cpu.min(cpu_limit.saturating_sub(1));
     let mut best_load = queued_task_count_usize(best_cpu);
+    let mut best_is_local = cpu_slots::numa_node(best_cpu as u32) == current_node;
 
     for cpu in 0..cpu_limit {
         let cpu_id = cpu as u32;
@@ -154,10 +258,23 @@ fn choose_spawn_cpu(task: &Task) -> usize {
         }
 
         let load = queued_task_count_usize(cpu);
-        if load < best_load || (load == best_load && cpu == current_cpu) {
+        let is_local = cpu_slots::numa_node(cpu_id) == current_node;
+
+        let eff_load = if is_local { load } else { load + NUMA_LOAD_PENALTY };
+        let eff_best = if best_is_local { best_load } else { best_load + NUMA_LOAD_PENALTY };
+
+        if eff_load < eff_best || (eff_load == eff_best && cpu == current_cpu) {
             best_cpu = cpu;
             best_load = load;
+            best_is_local = is_local;
         }
+    }
+
+    // NUMA cache'ini güncelle
+    let best_node = cpu_slots::numa_node(best_cpu as u32) as usize;
+    if best_node < MAX_NUMA_NODES {
+        SMP_SCHEDULER.numa_best_load[best_node].store(best_load, Ordering::Release);
+        SMP_SCHEDULER.numa_best_cpu[best_node].store(best_cpu as u32, Ordering::Release);
     }
 
     best_cpu
@@ -166,11 +283,22 @@ fn choose_spawn_cpu(task: &Task) -> usize {
 fn enqueue_boxed_task(target_cpu: usize, task: Box<Task>) -> Option<usize> {
     unsafe {
         if let Some(worker) = WORKERS.get(target_cpu).and_then(|w| w.as_ref()) {
-            worker.push(task);
-            Some(target_cpu)
+            match worker.push(task) {
+                Ok(()) => Some(target_cpu),
+                Err(task) => {
+                    // Deque dolu → overflow kuyruğuna yönlendir
+                    OVERFLOW_TASKS.lock().push_back(task);
+                    Some(target_cpu)
+                }
+            }
         } else if let Some(worker) = WORKERS.get(0).and_then(|w| w.as_ref()) {
-            worker.push(task);
-            Some(0)
+            match worker.push(task) {
+                Ok(()) => Some(0),
+                Err(task) => {
+                    OVERFLOW_TASKS.lock().push_back(task);
+                    Some(0)
+                }
+            }
         } else {
             None
         }
@@ -418,23 +546,23 @@ pub fn current_win32_thread_state() -> Option<Win32ThreadState> {
 }
 
 #[inline(always)]
-unsafe fn read_user_gs_base() -> u64 {
-    Msr::new(MSR_GS_BASE).read()
+fn read_user_gs_base() -> u64 {
+    crate::cpu::local::user_gs_base()
 }
 
 #[inline(always)]
-unsafe fn write_user_gs_base(base: u64) {
-    Msr::new(MSR_GS_BASE).write(base);
+fn write_user_gs_base(base: u64) -> bool {
+    crate::cpu::local::set_user_gs_base(base)
 }
 
 #[inline(always)]
-unsafe fn read_user_fs_base() -> u64 {
-    Msr::new(MSR_FS_BASE).read()
+fn read_user_fs_base() -> u64 {
+    crate::cpu::local::user_fs_base()
 }
 
 #[inline(always)]
-unsafe fn write_user_fs_base(base: u64) {
-    Msr::new(MSR_FS_BASE).write(base);
+fn write_user_fs_base(base: u64) -> bool {
+    crate::cpu::local::set_user_fs_base(base)
 }
 
 pub fn current_task_id() -> TaskId {
@@ -480,7 +608,7 @@ pub fn current_user_page_table() -> Option<PhysFrame> {
     }
 }
 
-pub fn current_address_space() -> Option<Arc<Mutex<crate::memory::AddressSpace>>> {
+pub fn current_address_space() -> Option<Arc<RwLock<crate::memory::AddressSpace>>> {
     let cpu_id = get_current_cpu_id();
     unsafe {
         PER_CPU_CURRENT_TASK
@@ -594,7 +722,7 @@ pub fn fork_current_user_task_with_flags(
         let clone_thread = (flags & CLONE_THREAD) != 0;
         if clone_thread {
             child.cold.tgid = current.cold.tgid; // Aynı thread group'a katıl
-            // CLONE_THREAD implies CLONE_PARENT: same parent for all threads in group
+                                                 // CLONE_THREAD implies CLONE_PARENT: same parent for all threads in group
             child.cold.parent_pid = current.cold.parent_pid;
         } else {
             child.cold.tgid = child_id; // Yeni grup: tgid = kendi PID'i
@@ -681,7 +809,32 @@ pub fn idle_loop() -> ! {
         }
         x86_64::instructions::interrupts::enable();
         core::hint::spin_loop();
+        crate::memory::frame_ownership::refcache_drain();
         x86_64::instructions::hlt();
+    }
+}
+
+/// BSP'yi cpu-0 idle görev yığınına geçirip `idle_loop()`'a sıçrar — asla dönmez.
+///
+/// Neden gerekli: BSP boot boyunca bootloader'ın sağladığı boot stack'te
+/// çalışır. Bu yığın, boot sonrasında çekirdek tahsisleri (pagetable,
+/// trampoline, per-cpu verileri) tarafından yeniden kullanılabilir. Idle
+/// save/restore döngüsü CPU'nun kendi durumunu `PER_CPU_IDLE_TASK[cpu].context`'te
+/// saklar ve restore ederken kayıtlı RSP'ye geri döner; boot stack clobber
+/// olursa restore torn okur ve bozuk RIP/CS yüklenir (#GP/#UD).
+/// Çözüm: idle döngüsüne girilmeden önce BSP'nin yığınını, idle görevin
+/// kendisine ait (kalıcı, asla geri kazanılmayan) kernel yığınına taşı.
+#[cfg(target_os = "none")]
+pub fn migrate_bsp_to_idle_stack_and_loop() -> ! {
+    let idle_stack_top = unsafe { PER_CPU_IDLE_TASK[0].kernel_stack_top };
+    unsafe {
+        core::arch::asm!(
+            "mov rsp, {stack_top}",
+            "jmp {target}",
+            stack_top = in(reg) idle_stack_top - 8,
+            target = in(reg) (idle_loop as fn() -> ! as usize),
+            options(noreturn),
+        );
     }
 }
 
@@ -717,7 +870,7 @@ pub fn spawn_with_priority_in_address_space(
     entry_point: fn() -> !,
     priority: Priority,
     name: &'static str,
-    address_space: Option<Arc<Mutex<crate::memory::AddressSpace>>>,
+    address_space: Option<Arc<RwLock<crate::memory::AddressSpace>>>,
 ) -> TaskId {
     if name == "gpu_test" {
         crate::serial_println!("DEBUG: Task struct oluÅŸturuluyor...");
@@ -763,6 +916,9 @@ pub fn tick() {
     wake_sleeping_tasks(ticks + 1);
     crate::task::futex::check_timeouts();
 
+    // Valkyrie-V bridge state machine'ini her tick'te ilerlet.
+    crate::valkyrie_virt::valkyrie_tick_driver();
+
     // update_utilization ve normalize_vruntime devre dışı (basitleştirildi)
 
     if should_preempt(ticks as u64) {
@@ -791,7 +947,11 @@ pub fn tick() {
             }
         };
         crate::cpu::smp::update_cpu_load(cpu_id, load);
+        update_numa_best_cpu(cpu_id, load);
     }
+
+    // Her tick'te per-CPU RefCache delta cache'ini flush et ve review queue işle
+    crate::memory::frame_ownership::refcache_tick();
 
     // Load Balance Report — Simics: ~100 saniyede bir, bare-metal: ~10 saniyede bir
     #[cfg(feature = "simics")]
@@ -907,6 +1067,19 @@ pub fn exit(code: i32) -> ! {
     let now = get_ticks() as u64;
 
     x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        // Erken boot sırasında (scheduler init öncesi) fault olursa per-CPU
+        // task vektörü boş olabilir; index panic yerine temiz halt ver.
+        if PER_CPU_CURRENT_TASK.is_empty() || cpu_id as usize >= PER_CPU_CURRENT_TASK.len() {
+            crate::serial_println!(
+                "[SCHED] exit(code={}) with no task context on cpu {} (early boot fault?)",
+                code,
+                cpu_id
+            );
+            crate::serial_println!("[SCHED] Halting.");
+            loop {
+                x86_64::instructions::hlt();
+            }
+        }
         if let Some(current) = PER_CPU_CURRENT_TASK[cpu_id as usize].as_mut() {
             let delta = now.saturating_sub(current.last_start);
             update_task_vruntime(current, delta);
@@ -939,7 +1112,8 @@ pub fn exit(code: i32) -> ! {
                             parent_task.last_start = get_ticks() as u64;
                             crate::serial_println!(
                                 "[VFORK] Parent PID {} woken by child {}",
-                                parent_task.id, current.id
+                                parent_task.id,
+                                current.id
                             );
                             break;
                         }
@@ -955,7 +1129,10 @@ pub fn exit(code: i32) -> ! {
                 // Thread group lideri veya bağımsız process — SIGCHLD gönder
                 if let Some(parent) = current.cold.parent_pid {
                     if current.cold.exit_signal == crate::task::task::EXIT_SIGNAL_SIGCHLD {
-                        crate::task::signal::send_signal(parent, crate::task::signal::Signal::SIGCHLD);
+                        crate::task::signal::send_signal(
+                            parent,
+                            crate::task::signal::Signal::SIGCHLD,
+                        );
                     }
                 }
             }
@@ -963,6 +1140,38 @@ pub fn exit(code: i32) -> ! {
             crate::serial_println!("ERROR: Idle task attempted to exit!");
         }
     });
+
+    // Process teardown: sadece thread group lideri adres alanını temizler
+    unsafe {
+        if let Some(current) = PER_CPU_CURRENT_TASK[cpu_id as usize].as_mut() {
+            if current.cold.tgid == current.id {
+                if let Some(space_arc) = current.cold.address_space.as_ref() {
+                    let sid = crate::memory::address_space_id(space_arc);
+
+                    // Phase 1: DYING + drain — yeni fault'ları durdur, aktifleri bekle
+                    crate::memory::start_as_teardown(sid);
+
+                    // Phase 2: VMA haritasını temizle
+                    space_arc.write().vmas.clear();
+
+                    // Phase 3: Cross-CPU TLB shootdown (tüm user TLB'leri flush)
+                    crate::cpu::smp::tlb_defer_shootdown();
+                    crate::cpu::smp::tlb_flush_pending();
+
+                    // Phase 4: Sayfa tablolarını yürü, frame'leri serbest bırak
+                    if let Some(pml4) = current.cold.page_table {
+                        crate::memory::free_user_page_tables(pml4.start_address(), sid);
+                    }
+
+                    // Phase 5: LRU/PT locks/lifecycle kayıtlarını temizle
+                    crate::memory::cleanup_address_space(sid);
+                }
+                // Phase 6: Arc'ı düşür (VmaMap Drop → tüm VMA node'ları free)
+                current.cold.address_space = None;
+                current.cold.page_table = None;
+            }
+        }
+    }
 
     schedule();
 
@@ -1106,7 +1315,10 @@ pub fn exec_current_user_image(image: &[u8]) -> Result<(), ()> {
                 if let Some(sig) = crate::task::signal::Signal::from_number(i) {
                     let action = current.cold.signals.get_action(sig);
                     if let crate::task::signal::SignalAction::Catch { .. } = action {
-                        current.cold.signals.set_action(sig, crate::task::signal::SignalAction::Default);
+                        current
+                            .cold
+                            .signals
+                            .set_action(sig, crate::task::signal::SignalAction::Default);
                     }
                 }
             }
@@ -1159,15 +1371,18 @@ pub fn exec_current_user_image_with_args(
         crate::memory::USER_STACK_PAGES,
         &mut mapper,
         frame_allocator,
-    ).map_err(|_| ())?;
+    )
+    .map_err(|_| ())?;
 
     let mut rsp = stack_top;
 
     // 1. Random 16 bytes (16-byte aligned)
     rsp = rsp.saturating_sub(16);
     rsp &= !0xFu64;
-    let random_bytes: [u8; 16] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-                                   0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF];
+    let random_bytes: [u8; 16] = [
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD,
+        0xEF,
+    ];
     let _ = crate::posix::write_user_slice(rsp as usize, &random_bytes);
 
     // 2. Environment strings (top→bottom)
@@ -1276,7 +1491,10 @@ pub fn exec_current_user_image_with_args(
                 if let Some(sig) = crate::task::signal::Signal::from_number(i) {
                     let action = current.cold.signals.get_action(sig);
                     if let crate::task::signal::SignalAction::Catch { .. } = action {
-                        current.cold.signals.set_action(sig, crate::task::signal::SignalAction::Default);
+                        current
+                            .cold
+                            .signals
+                            .set_action(sig, crate::task::signal::SignalAction::Default);
                     }
                 }
             }
@@ -1323,7 +1541,8 @@ pub fn exec_current_user_image_with_args(
                             parent_task.last_start = get_ticks() as u64;
                             crate::serial_println!(
                                 "[VFORK] Parent PID {} woken by child exec {}",
-                                parent_task.id, current.id
+                                parent_task.id,
+                                current.id
                             );
                             break;
                         }
@@ -1333,7 +1552,13 @@ pub fn exec_current_user_image_with_args(
         }
     });
 
-    unsafe { crate::task::user::enter_user_mode_with_ret(x86_64::VirtAddr::new(elf.entry), x86_64::VirtAddr::new(user_rsp), 0) }
+    unsafe {
+        crate::task::user::enter_user_mode_with_ret(
+            x86_64::VirtAddr::new(elf.entry),
+            x86_64::VirtAddr::new(user_rsp),
+            0,
+        )
+    }
 }
 
 pub fn spawn_user_image_task(
@@ -1348,7 +1573,7 @@ pub fn spawn_user_image_task_with_address_space(
     image: &[u8],
     priority: Priority,
     name: &'static str,
-) -> Result<(TaskId, Arc<Mutex<crate::memory::AddressSpace>>), ()> {
+) -> Result<(TaskId, Arc<RwLock<crate::memory::AddressSpace>>), ()> {
     let address_space = crate::memory::create_address_space(image);
     let task_id = SMP_SCHEDULER.allocate_task_id();
     let mut task =
@@ -1428,75 +1653,115 @@ fn has_schedulable_work(cpu_id: u32) -> bool {
             }
         }
     }
+    if !OVERFLOW_TASKS.lock().is_empty() {
+        return true;
+    }
     choose_victim_cpu(cpu_id).is_some()
 }
 
 fn choose_victim_cpu(cpu_id: u32) -> Option<usize> {
     let cpu_limit = SMP_SCHEDULER.cpu_count.load(Ordering::Relaxed).max(1) as usize;
     let pressure = scheduler_pressure_snapshot();
-    let current_topology = crate::topology::get_cpu_topology(cpu_id).map(|topology| {
-        let guard = topology.read();
-        (guard.package_id, guard.core_id, guard.numa_node_id)
-    });
+    let my_node = cpu_slots::numa_node(cpu_id) as usize;
+    let self_word = (cpu_id as usize) / 64;
+    let self_bit = 1u64 << ((cpu_id as usize) & 63);
+    let word_limit = (cpu_limit + 63) / 64;
 
-    let mut best_victim = None;
-    let mut best_score = 0u32;
+    let critical = matches!(pressure.class, SchedulerPressureClass::Critical);
+    let critical_or_elevated = matches!(
+        pressure.class,
+        SchedulerPressureClass::Elevated | SchedulerPressureClass::Critical
+    );
+    let memory_penalty = if critical {
+        (pressure.memory_some_avg10 / 64) as u32
+    } else {
+        0
+    };
+    let memory_full_skip = critical && pressure.memory_full_avg10 >= 350;
 
-    for victim in 0..cpu_limit {
-        if victim == cpu_id as usize || !cpu_slots::is_online(victim as u32) {
+    // Phase 1: Same NUMA node victim via stealable bitmap + pre-computed node mask (O(1))
+    let node_masks = &NODE_CPU_MASKS.masks;
+    for w in 0..word_limit {
+        let word = SMP_SCHEDULER.stealable_mask[w].load(Ordering::Acquire);
+        if word == 0 {
             continue;
         }
-
-        let load = unsafe {
-            WORKERS
-                .get(victim)
-                .and_then(|w| w.as_ref())
-                .map(|worker| worker.len() as u32)
-                .unwrap_or(0)
+        let node_mask = if my_node < MAX_NUMA_NODES {
+            node_masks[my_node][w]
+        } else {
+            0
         };
-        if load == 0 {
-            continue;
-        }
-
-        let mut score = load.saturating_mul(16);
-        if let Some((pkg, core, node)) = current_topology {
-            if cpu_slots::numa_node(victim as u32) == node {
-                score = score.saturating_add(64);
-            } else if matches!(pressure.class, SchedulerPressureClass::Critical) {
-                score = score.saturating_sub(24);
-            }
-            if cpu_slots::package_id(victim as u32) == pkg {
-                score = score.saturating_add(48);
-            } else if matches!(
-                pressure.class,
-                SchedulerPressureClass::Elevated | SchedulerPressureClass::Critical
-            ) {
-                score = score.saturating_sub(12);
-            }
-            if cpu_slots::core_id(victim as u32) != core {
-                score = score.saturating_add(8);
-            }
-        }
-        if matches!(pressure.class, SchedulerPressureClass::Critical) {
-            score = score.saturating_add((pressure.memory_some_avg10 / 64) as u32);
-            if pressure.memory_full_avg10 >= 350 && load < 2 {
+        let mut bits = if w == self_word {
+            word & node_mask & !self_bit
+        } else {
+            word & node_mask
+        };
+        while bits != 0 {
+            let bit = bits.trailing_zeros();
+            let victim = w * 64 + bit as usize;
+            bits &= bits - 1;
+            if victim >= cpu_limit || !cpu_slots::is_online(victim as u32) {
                 continue;
             }
-        }
-
-        if score > best_score {
-            best_score = score;
-            best_victim = Some(victim);
+            let load = unsafe {
+                WORKERS
+                    .get(victim)
+                    .and_then(|w| w.as_ref())
+                    .map(|worker| worker.len() as u32)
+                    .unwrap_or(0)
+            };
+            if load == 0 {
+                set_stealable_bit(victim, false);
+                continue;
+            }
+            if memory_full_skip && load < 2 {
+                continue;
+            }
+            return Some(victim);
         }
     }
 
-    best_victim
+    // Phase 2: Any stealable CPU (fallback — also O(1) via bitmap)
+    for w in 0..word_limit {
+        let word = SMP_SCHEDULER.stealable_mask[w].load(Ordering::Acquire);
+        if word == 0 {
+            continue;
+        }
+        let mut bits = if w == self_word { word & !self_bit } else { word };
+        while bits != 0 {
+            let bit = bits.trailing_zeros();
+            let victim = w * 64 + bit as usize;
+            bits &= bits - 1;
+            if victim >= cpu_limit || !cpu_slots::is_online(victim as u32) {
+                continue;
+            }
+            let load = unsafe {
+                WORKERS
+                    .get(victim)
+                    .and_then(|w| w.as_ref())
+                    .map(|worker| worker.len() as u32)
+                    .unwrap_or(0)
+            };
+            if load == 0 {
+                set_stealable_bit(victim, false);
+                continue;
+            }
+            if memory_full_skip && load < 2 {
+                continue;
+            }
+            return Some(victim);
+        }
+    }
+
+    None
 }
 
 fn restore_worker_tasks(cpu_index: usize, mut deferred: Vec<Box<Task>>) {
     if let Some(worker) = unsafe { WORKERS.get(cpu_index).and_then(|w| w.as_ref()) } {
         while let Some(task) = deferred.pop() {
-            worker.push(task);
+            if let Err(task) = worker.push(task) {
+                OVERFLOW_TASKS.lock().push_back(task);
+            }
         }
     }
 }
@@ -1512,8 +1777,16 @@ fn take_task_from_worker_by_id(cpu_index: usize, task_id: TaskId) -> Option<Box<
             break;
         };
         if task.id == task_id {
-            found = Some(task);
-            break;
+            // Sadece Ready görevler alınabilir: Running/Blocked görev başka bir
+            // CPU'da schedule() ortasındaysa (current .take() edilmiş, henüz
+            // kuyruğa geri konmamış) buradan çekmek çift-sahiplik yaratır ve
+            // context torn read ile bozuk restore'a yol açar (#GP).
+            if task.state == TaskState::Ready {
+                found = Some(task);
+                break;
+            }
+            deferred.push(task);
+            continue;
         }
         deferred.push(task);
     }
@@ -1539,8 +1812,12 @@ fn steal_task_from_victim_by_id(victim: usize, task_id: TaskId) -> Option<Box<Ta
             break;
         };
         if task.id == task_id {
-            found = Some(task);
-            break;
+            if task.state == TaskState::Ready {
+                found = Some(task);
+                break;
+            }
+            deferred.push(task);
+            continue;
         }
         deferred.push(task);
     }
@@ -1618,11 +1895,11 @@ pub fn schedule() {
                 old_flags = current.hot.flags;
                 if current.cold.mode == ExecutionMode::LegacyRing3 {
                     if let Some(state) = current.cold.win32.as_mut() {
-                        state.gs_base_shadow = unsafe { read_user_gs_base() };
+                        state.gs_base_shadow = read_user_gs_base();
                     }
                 }
                 // FS base kaydet (arch_prctl ile ayarlanmış olabilir)
-                current.cold.fs_base = unsafe { read_user_fs_base() };
+                current.cold.fs_base = read_user_fs_base();
 
                 if current.state == TaskState::Running {
                     let delta = now.saturating_sub(current.last_start);
@@ -1639,7 +1916,9 @@ pub fn schedule() {
                     TaskState::Ready => {
                         if let Some(worker) = WORKERS.get(cpu_id as usize).and_then(|w| w.as_ref())
                         {
-                            worker.push(current);
+                            if let Err(task) = worker.push(current) {
+                                OVERFLOW_TASKS.lock().push_back(task);
+                            }
                         }
                     }
                     TaskState::Sleeping { wake_tick } => {
@@ -1704,6 +1983,17 @@ pub fn schedule() {
                 }
             }
 
+            // Taşma kuyruğunu boşalt — deque dolu olduğunda görevler buraya düşer
+            if next_task_opt.is_none() {
+                if let Some(task) = OVERFLOW_TASKS.lock().pop_front() {
+                    crate::debug_diag!(
+                        "[DIAG] schedule: drained overflow task to cpu {}",
+                        cpu_id
+                    );
+                    next_task_opt = Some(task);
+                }
+            }
+
             // Boşsa iş çalmayı dene
             if next_task_opt.is_none() {
                 let cpu_limit = SMP_SCHEDULER.cpu_count.load(Ordering::Relaxed).max(1) as usize;
@@ -1717,10 +2007,13 @@ pub fn schedule() {
                                 || (task.hot.affinity & (1 << cpu_id)) != 0
                             {
                                 next_task_opt = Some(task);
+                                publish_worker_load(victim);
                             } else {
                                 // Affinity uyuşmazlığı — görevi geri koy
                                 if let Some(w) = WORKERS.get(victim).and_then(|w| w.as_ref()) {
-                                    w.push(task);
+                                    if let Err(task) = w.push(task) {
+                                        OVERFLOW_TASKS.lock().push_back(task);
+                                    }
                                 }
                             }
                         }
@@ -1744,13 +2037,16 @@ pub fn schedule() {
                                         || (task.hot.affinity & (1 << cpu_id)) != 0
                                     {
                                         next_task_opt = Some(task);
+                                        publish_worker_load(victim);
                                         break;
                                     } else {
                                         // Geri koy
                                         if let Some(w) =
                                             WORKERS.get(victim).and_then(|w| w.as_ref())
                                         {
-                                            w.push(task);
+                                            if let Err(task) = w.push(task) {
+                                                OVERFLOW_TASKS.lock().push_back(task);
+                                            }
                                         }
                                     }
                                 }
@@ -1887,35 +2183,75 @@ pub fn schedule() {
                 incoming_user_fs_base = 0;
             }
 
-            crate::gdt::set_kernel_stack(VirtAddr::new(target_kernel_stack_top));
-            crate::syscall::set_kernel_stack_for_current_cpu(target_kernel_stack_top);
+            // Aynı görev yeniden seçildiyse (worker'a push → hemen geri pop)
+            // context switch ATLANIR: save+restore aynı bellek bölgesinden
+            // yapılırsa restore torn okur ve bozuk cs/rip yüklenir (#GP).
+            // LKD doktrini: schedule() prev==next ise switch yapmaz.
+            let same_task = old_context_ptr as *const _ == new_context_ptr as *const _;
+            static mut SW_PROBE_COUNT: u32 = 0;
             unsafe {
-                write_user_gs_base(incoming_user_gs_base);
-                write_user_fs_base(incoming_user_fs_base);
+                SW_PROBE_COUNT += 1;
+                if SW_PROBE_COUNT <= 12 {
+                    let next_id = PER_CPU_CURRENT_TASK[cpu_id as usize]
+                        .as_ref()
+                        .map(|t| t.hot.id)
+                        .unwrap_or_else(|| PER_CPU_IDLE_TASK[cpu_id as usize].hot.id);
+                    crate::debug_diag!(
+                        "[SWPROBE] cpu={} next_id={} old_ptr={:#x} new_ptr={:#x} same={} old_rip={:#x} old_rsp={:#x} new_rip={:#x} new_rsp={:#x}",
+                        cpu_id,
+                        next_id,
+                        old_context_ptr as u64,
+                        new_context_ptr as u64,
+                        same_task,
+                        (*old_context_ptr).rip,
+                        (*old_context_ptr).rsp,
+                        (*new_context_ptr).rip,
+                        (*new_context_ptr).rsp
+                    );
+                }
             }
 
-            // FPU mode flags hesapla — asm'e RDX olarak geçirilir
-            let mut fpu_mode: u64 = 0;
-            if old_flags.contains(crate::task::task::TaskFlags::NO_FPU) {
-                fpu_mode |= 1; // bit 0: skip old FPU save
-            }
-            if new_flags.contains(crate::task::task::TaskFlags::NO_FPU)
-                || new_flags.contains(crate::task::task::TaskFlags::FPU_PRISTINE)
-            {
-                fpu_mode |= 2; // bit 1: skip new FPU restore
-            }
-            let xsave_caps = crate::cpu::xsave_capabilities();
-            if xsave_caps.has_xsave {
-                fpu_mode |= 4; // bit 2: use xsave/xrstor family
-            }
-            if xsave_caps.has_xsaveopt {
-                fpu_mode |= 8; // bit 3: prefer xsaveopt over xsave
-            }
+            if !same_task {
+                crate::gdt::set_kernel_stack(VirtAddr::new(target_kernel_stack_top));
+                crate::syscall::set_kernel_stack_for_current_cpu(target_kernel_stack_top);
+                if !write_user_gs_base(incoming_user_gs_base) {
+                    crate::debug_diag!(
+                        "[SCHED] rejected non-user GS base during context switch: {:#x}",
+                        incoming_user_gs_base
+                    );
+                    let _ = write_user_gs_base(0);
+                }
+                if !write_user_fs_base(incoming_user_fs_base) {
+                    crate::debug_diag!(
+                        "[SCHED] rejected non-user FS base during context switch: {:#x}",
+                        incoming_user_fs_base
+                    );
+                    let _ = write_user_fs_base(0);
+                }
 
-            // Bağlam değişiminden önce son bellek bariyeri
-            smp_mb();
-            crate::security::spectre::on_context_switch();
-            switch_context(old_context_ptr, new_context_ptr, fpu_mode);
+                // FPU mode flags hesapla — asm'e RDX olarak geçirilir
+                let mut fpu_mode: u64 = 0;
+                if old_flags.contains(crate::task::task::TaskFlags::NO_FPU) {
+                    fpu_mode |= 1; // bit 0: skip old FPU save
+                }
+                if new_flags.contains(crate::task::task::TaskFlags::NO_FPU)
+                    || new_flags.contains(crate::task::task::TaskFlags::FPU_PRISTINE)
+                {
+                    fpu_mode |= 2; // bit 1: skip new FPU restore
+                }
+                let xsave_caps = crate::cpu::xsave_capabilities();
+                if xsave_caps.has_xsave {
+                    fpu_mode |= 4; // bit 2: use xsave/xrstor family
+                }
+                if xsave_caps.has_xsaveopt {
+                    fpu_mode |= 8; // bit 3: prefer xsaveopt over xsave
+                }
+
+                // Bağlam değişiminden önce son bellek bariyeri
+                smp_mb();
+                crate::security::spectre::on_context_switch();
+                switch_context(old_context_ptr, new_context_ptr, fpu_mode);
+            }
 
             // Context switch'ten döndük — eski task (biz) tekrar çalışıyor.
             // FPU_PRISTINE bayrağını temizle: bir sonraki switch-in'de FPU restore yapmalı.
@@ -1966,7 +2302,12 @@ switch_context:
     mov [rdi + 24], r12
     mov [rdi + 32], rbx
     mov [rdi + 40], rbp
-    mov [rdi + 48], rsp
+    // RSP'yi call öncesi değeriyle kaydet (post-call rsp = caller rsp - 8).
+    // Resume noktası (RIP) derleyicinin epilogue'u call-öncesi rsp'ye göre
+    // derlendiğinden, kayıt edilen rsp 8 bayt yukarı alınmalıdır; aksi halde
+    // epilogue pop/ret slotları 8 bayt aşağı kayar (RIP slotu = parked rbp).
+    lea rax, [rsp + 8]
+    mov [rdi + 48], rax
     pushfq
     pop rax
     mov [rdi + 56], rax      // RFLAGS
@@ -2295,10 +2636,13 @@ pub fn steal_from_cpu(cpu_id: u32) -> Option<Box<Task>> {
 pub fn push_to_cpu(cpu_id: u32, task: Box<Task>) {
     unsafe {
         if let Some(worker) = WORKERS.get(cpu_id as usize).and_then(|w| w.as_ref()) {
-            worker.push(task);
+            if let Err(task) = worker.push(task) {
+                OVERFLOW_TASKS.lock().push_back(task);
+            }
         } else if let Some(worker) = WORKERS.get(0).and_then(|w| w.as_ref()) {
-            // Hedef CPU'da worker yoksa CPU 0'a gönder
-            worker.push(task);
+            if let Err(task) = worker.push(task) {
+                OVERFLOW_TASKS.lock().push_back(task);
+            }
         }
     }
 }

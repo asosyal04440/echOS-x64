@@ -596,6 +596,14 @@ const RLIMIT_RSS: usize = 5;
 const RLIMIT_NPROC: usize = 6;
 const RLIMIT_NOFILE: usize = 7;
 const RLIMIT_MEMLOCK: usize = 8;
+
+// mlockall flags (Linux)
+const MCL_CURRENT: usize = 1;
+const MCL_FUTURE: usize = 2;
+const MCL_ONFAULT: usize = 4;
+
+// mlock2 flags
+const MLOCK_ONFAULT: usize = 1;
 const RLIMIT_AS: usize = 9;
 const RLIMIT_LOCKS: usize = 10;
 const RLIMIT_SIGPENDING: usize = 11;
@@ -1306,9 +1314,9 @@ static DRM_RESOURCES: Mutex<Vec<DrmResource>> = Mutex::new(Vec::new());
 /// tv_nsec : Saniyenin nanosaniye kısmı (0..=999_999_999).
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Timespec {
-    tv_sec: i64,
-    tv_nsec: i64,
+pub(crate) struct Timespec {
+    pub(crate) tv_sec: i64,
+    pub(crate) tv_nsec: i64,
 }
 
 #[repr(C)]
@@ -7683,7 +7691,7 @@ fn sys_getppid() -> usize {
     1
 }
 
-/// clock_gettime syscall (tick tabanlı)
+/// clock_gettime syscall (vDSO tabanlı, tick fallback)
 fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> usize {
     if let Err(err) = validate_user_range(tp_ptr, core::mem::size_of::<Timespec>()) {
         return err;
@@ -7691,12 +7699,7 @@ fn sys_clock_gettime(clock_id: usize, tp_ptr: usize) -> usize {
     if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
         return errno(EINVAL);
     }
-    let ticks = tasking::scheduler::get_ticks() as u64;
-    let ns = ticks.saturating_mul(TICK_NS);
-    let ts = Timespec {
-        tv_sec: (ns / 1_000_000_000) as i64,
-        tv_nsec: (ns % 1_000_000_000) as i64,
-    };
+    let ts = crate::vdso::get_time_timespec();
     if let Err(err) = write_user(tp_ptr, ts) {
         return err;
     }
@@ -11159,28 +11162,55 @@ fn sys_ppoll(fds_ptr: usize, nfds: usize, _timeout_ptr: usize, _sigmask_ptr: usi
 // ---------------------------------------------------------------------------
 
 /// `mlock` — Belirtilen bellek aralığını kilitler (RAM'de tutar).
-fn sys_mlock(_addr: usize, _len: usize) -> usize {
-    0 // no-op: tek kullanıcılı sistemde kilit gerekmez
+fn sys_mlock(addr: usize, len: usize) -> usize {
+    let ret = kernel_memory::user_mlock_range(addr, len, true);
+    if ret < 0 { (-ret) as usize } else { 0 }
 }
 
 /// `munlock` — Bellek kilidini kaldırır.
-fn sys_munlock(_addr: usize, _len: usize) -> usize {
-    0
+fn sys_munlock(addr: usize, len: usize) -> usize {
+    let ret = kernel_memory::user_mlock_range(addr, len, false);
+    if ret < 0 { (-ret) as usize } else { 0 }
 }
 
 /// `mlockall` — Tüm proces belleğini kilitler.
-fn sys_mlockall(_flags: usize) -> usize {
+fn sys_mlockall(flags: usize) -> usize {
+    if flags & !(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT) != 0 {
+        return errno(EINVAL);
+    }
+    kernel_memory::user_mlock_all(flags & MCL_CURRENT != 0);
     0
 }
 
 /// `munlockall` — Tüm bellek kilidini kaldırır.
 fn sys_munlockall() -> usize {
+    kernel_memory::user_munlock_all();
     0
 }
 
-/// `mlock2` — mlock + flags.
-fn sys_mlock2(_addr: usize, _len: usize, _flags: usize) -> usize {
-    0
+/// `mlock2` — mlock + flags (MLOCK_ONFAULT).
+fn sys_mlock2(addr: usize, len: usize, flags: usize) -> usize {
+    if flags & !MLOCK_ONFAULT != 0 {
+        return errno(EINVAL);
+    }
+    if flags & MLOCK_ONFAULT != 0 {
+        // MLOCK_ONFAULT: mark VMA as locked but don't fault pages in.
+        // Pages will be moved to the unevictable list when faulted.
+        let page_mask = !(kernel_memory::PAGE_SIZE as u64 - 1);
+        let start = (addr as u64) & page_mask;
+        let end = (addr as u64)
+            .saturating_add(len as u64)
+            .saturating_add(kernel_memory::PAGE_SIZE as u64 - 1)
+            & page_mask;
+        if end <= start || !kernel_memory::is_user_range(start, end.saturating_sub(start)) {
+            return errno(EINVAL);
+        }
+        kernel_memory::mark_vmas_locked(start as usize, (end - start) as usize);
+        0
+    } else {
+        let ret = kernel_memory::user_mlock_range(addr, len, true);
+        if ret < 0 { (-ret) as usize } else { 0 }
+    }
 }
 
 /// `userfaultfd` — User-space fault handling fd'si oluşturur.
@@ -12294,21 +12324,21 @@ fn sys_io_pgetevents(
 }
 
 /// `clock_gettime_impl` — clock_gettime için dahili implementasyon.
+///
+/// vDSO TSC tabanlı yüksek çözünürlüklü zaman kullanır.
+/// Henüz başlatılmamışsa ticks*10ms fallback'e düşer.
 fn clock_gettime_impl(clock_id: usize, ts: &mut Timespec) -> usize {
-    // Basit birtick sayacı ile zaman hesaplama
-    static BOOT_TICKS: AtomicU64 = AtomicU64::new(0);
-    let ticks = BOOT_TICKS.fetch_add(1, Ordering::Relaxed);
-    let total_ns = ticks * TICK_NS;
+    let (sec, nsec) = crate::vdso::get_time_ns();
     match clock_id {
         0 => {
             // CLOCK_REALTIME — yaklaşık Unix zamanı
-            ts.tv_sec = (total_ns / 1_000_000_000) as i64 + 1_700_000_000; // 2023-11-14 approx
-            ts.tv_nsec = (total_ns % 1_000_000_000) as i64;
+            ts.tv_sec = sec as i64 + 1_700_000_000; // 2023-11-14 approx
+            ts.tv_nsec = nsec as i64;
         }
         1 => {
             // CLOCK_MONOTONIC
-            ts.tv_sec = (total_ns / 1_000_000_000) as i64;
-            ts.tv_nsec = (total_ns % 1_000_000_000) as i64;
+            ts.tv_sec = sec as i64;
+            ts.tv_nsec = nsec as i64;
         }
         _ => {
             return errno(EINVAL);

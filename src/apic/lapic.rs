@@ -393,13 +393,20 @@ fn has_tsc_deadline() -> bool {
 
 /// TSC (Time Stamp Counter) frekansını kalibre eder.
 ///
-/// Yöntem 1 (tercihli): CPUID leaf 0x15 — Intel Skylake ve sonrası işlemcilerde
-///   doğrudan TSC/referans frekansı oranı bildirilen bir CPUID yaprağı.
-///   Formül: freq = ECX * EBX / EAX
+/// Yöntem 1 (tercihli): CPUID leaf 0x15 — Intel Skylake+:
+///   freq = ECX * EBX / EAX
 ///
-/// Yöntem 2 (geri düş): PIT (Programmable Interval Timer) ile ~10ms ölçüm.
-///   PIT 1.193182 MHz'de çalışır, 11932 tick ≈ 10ms.
-///   Bu sürede okunan TSC delta'sı × 100 = yaklaşık TSC Hz.
+/// Yöntem 2: HPET main counter — varsa en güvenilir donanım zaman referansı.
+///   HPET MMIO offset 0xF0 = 64-bit counter, ~10-25 MHz.
+///
+/// Yöntem 3: ACPI PM Timer (FADT pm_tmr_blk) — 3.579545 MHz, 24-bit.
+///   I/O port üzerinden okunur.
+///
+/// Yöntem 4: PIT (Programmable Interval Timer) — 1.193182 MHz, Channel 2.
+///   10ms'de TSC delta ölçümü.
+///
+/// Yöntem 5: CPUID leaf 0x16 — işlemci base frequency (MHz).
+///   En zayıf yöntem: Turbo'dan etkilenir.
 fn calibrate_tsc() {
     // Yöntem 1: CPUID leaf 0x15 (Intel Skylake+)
     let cpuid_result = unsafe { core::arch::x86_64::__cpuid(0x15) };
@@ -410,65 +417,153 @@ fn calibrate_tsc() {
         return;
     }
 
-    // Yöntem 2: LAPIC timer ile kaba kalibrasyon
-    // Divider = 16, 10ms PIT ile ölç
-    write_reg(APIC_TIMER_DIV, 0x03); // Böl 16 (divider = 16)
-    let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
-    write_reg(APIC_TIMER_INIT, 0xFFFF_FFFF);
+    // Yöntem 2: HPET main counter ile ~10ms ölçüm
+    if calibrate_tsc_hpet().is_some() {
+        return;
+    }
 
+    // Yöntem 3: ACPI PM Timer ile ~10ms ölçüm
+    if calibrate_tsc_pm_timer().is_some() {
+        return;
+    }
+
+    // Yöntem 4: PIT (Programmable Interval Timer) ile ~10ms ölçüm
+    if calibrate_tsc_pit().is_some() {
+        return;
+    }
+
+    // Yöntem 5: CPUID leaf 0x16 (fallback)
+    let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
+    let freq = if max_leaf >= 0x16 {
+        let cpuid16 = unsafe { core::arch::x86_64::__cpuid_count(0x16, 0) };
+        if cpuid16.eax > 0 {
+            (cpuid16.eax as u64) * 1_000_000
+        } else {
+            3_000_000_000u64
+        }
+    } else {
+        3_000_000_000u64
+    };
+    crate::serial_println!(
+        "[TSC] All calibration methods failed, CPUID 0x16 fallback: {} Hz",
+        freq
+    );
+    TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
+}
+
+/// HPET main counter ile TSC kalibrasyonu.
+/// HPET MMIO base ACPI FADT'tan okunur.
+fn calibrate_tsc_hpet() -> Option<u64> {
+    // ACPI FADT'tan HPET base adresini al
+    // HPET table (ACPI HPET.ASL) MMIO base offset 0xF0 = main counter
+    // Önce ACPI HPET tablosunu dene (doğrudan FADT HPET base'den değil)
+    let hpet_base = crate::acpi::get_hpet_base();
+    if hpet_base == 0 {
+        return None;
+    }
+    // HPET MMIO eşle
+    let mapped = crate::memory::map_mmio(hpet_base, 0x1000);
+    let virt = if mapped.is_null() {
+        crate::memory::active_physical_offset() + hpet_base
+    } else {
+        mapped as u64
+    };
+    // HPET main counter at offset 0xF0 (64-bit)
+    let counter_ptr = (virt + 0xF0) as *const u64;
+    let cap_ptr = virt as *const u64;
+    let cap_val = unsafe { read_volatile(cap_ptr) };
+    let period_fs = (cap_val >> 32) as u32;
+    if period_fs == 0 || period_fs > 100_000_000 {
+        return None; // Invalid or legacy HPET
+    }
+    let hpet_hz = 1_000_000_000_000_000u64 / period_fs as u64; // fS → Hz
+
+    // 10ms ölçüm penceresi
+    let tsc_start = unsafe { core::arch::x86_64::_rdtsc() };
+    let counter_start = unsafe { read_volatile(counter_ptr) };
+    let hpet_10ms = hpet_hz / 100; // 10ms
+    let mut counter_now;
+    loop {
+        counter_now = unsafe { read_volatile(counter_ptr) };
+        if counter_now.wrapping_sub(counter_start) >= hpet_10ms {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    let tsc_end = unsafe { core::arch::x86_64::_rdtsc() };
+    let tsc_delta = tsc_end.wrapping_sub(tsc_start);
+    let freq = tsc_delta * 100; // 10ms → 1s
+    TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
+    crate::serial_println!(
+        "[TSC] HPET calibration: {} Hz (HPET period {} fS)",
+        freq,
+        period_fs
+    );
+    Some(freq)
+}
+
+/// ACPI PM Timer ile TSC kalibrasyonu.
+/// PM Timer FADT pm_tmr_blk I/O port'undan okunur, 3.579545 MHz.
+fn calibrate_tsc_pm_timer() -> Option<u64> {
+    let pm_tmr = crate::acpi::get_pm_tmr_port();
+    if pm_tmr == 0 {
+        return None;
+    }
+    // PM Timer 24-bit, 3.579545 MHz = 3579545 Hz
+    // 10ms = 35795 ticks
+    const PM_TMR_HZ: u64 = 3_579_545;
+    const PM_TMR_10MS: u64 = PM_TMR_HZ / 100;
+
+    unsafe {
+        let mut port = x86_64::instructions::port::Port::<u32>::new(pm_tmr as u16);
+        let tsc_start = core::arch::x86_64::_rdtsc();
+        let pm_start = port.read() & 0x00FF_FFFF;
+        let mut pm_now;
+        loop {
+            pm_now = port.read() & 0x00FF_FFFF;
+            if pm_now.wrapping_sub(pm_start) >= PM_TMR_10MS as u32 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        let tsc_end = core::arch::x86_64::_rdtsc();
+        let tsc_delta = tsc_end.wrapping_sub(tsc_start);
+        let freq = tsc_delta * PM_TMR_HZ / (pm_now.wrapping_sub(pm_start) as u64);
+        TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
+        crate::serial_println!(
+            "[TSC] PM Timer calibration: {} Hz",
+            freq
+        );
+        Some(freq)
+    }
+}
+
+/// PIT (Programmable Interval Timer) ile TSC kalibrasyonu.
+fn calibrate_tsc_pit() -> Option<u64> {
     // ~10ms bekle (PIT Channel 2: 1.193182 MHz)
     // 10ms = 11932 PIT ticks
     unsafe {
         let mut pit_cmd = x86_64::instructions::port::Port::<u8>::new(0x43);
         let mut pit_ch2 = x86_64::instructions::port::Port::<u8>::new(0x42);
-        pit_cmd.write(0xB0); // Kanal 2, lobyte/hibyte, tek-seferlik mod
+        pit_cmd.write(0xB0);
         pit_ch2.write((11932 & 0xFF) as u8);
         pit_ch2.write((11932 >> 8) as u8);
 
-        // PIT tamamlanmasını bekle (port 0x61 bit 5)
         let mut gate = x86_64::instructions::port::Port::<u8>::new(0x61);
         let val = gate.read();
-        gate.write((val & 0xFC) | 0x01); // Höparlör kapısını etkinleştir (speaker gate)
-                                         // PIT channel-2 one-shot calibration window.
+        gate.write((val & 0xFC) | 0x01);
+
+        let tsc_start = core::arch::x86_64::_rdtsc();
         for _ in 0..10_000_000 {
             core::hint::spin_loop();
         }
-    }
-
-    let current = read_reg(APIC_TIMER_CURRENT);
-    let tsc_end = unsafe { core::arch::x86_64::_rdtsc() };
-    let elapsed_ticks = 0xFFFF_FFFFu32.wrapping_sub(current);
-    let tsc_delta = tsc_end.wrapping_sub(tsc_start);
-
-    // TSC frekansını hesapla
-    if elapsed_ticks > 0 {
-        // elapsed_ticks = LAPIC tick sayısı (bölen 16) yaklaşık 10ms'de
-        // TSC frekansı ≈ tsc_delta * 100 (10ms → 1s ölçeği)
+        let tsc_end = core::arch::x86_64::_rdtsc();
+        let tsc_delta = tsc_end.wrapping_sub(tsc_start);
         let freq = tsc_delta * 100;
         TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
-    } else {
-        // CPUID leaf 0x16 ile işlemci frekansını almayı dene
-        let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
-        let freq = if max_leaf >= 0x16 {
-            let cpuid16 = unsafe { core::arch::x86_64::__cpuid_count(0x16, 0) };
-            if cpuid16.eax > 0 {
-                // EAX = base frequency in MHz
-                (cpuid16.eax as u64) * 1_000_000
-            } else {
-                3_000_000_000u64 // CPUID boş dönerse 3 GHz
-            }
-        } else {
-            3_000_000_000u64 // Leaf 0x16 desteklenmiyorsa 3 GHz
-        };
-        crate::serial_println!(
-            "[TSC] PIT calibration failed, using CPUID/fallback: {} Hz",
-            freq
-        );
-        TSC_FREQ_HZ.store(freq, Ordering::SeqCst);
+        crate::serial_println!("[TSC] PIT calibration: {} Hz", freq);
+        Some(freq)
     }
-
-    // LAPIC timer'ı durdur
-    write_reg(APIC_TIMER_INIT, 0);
 }
 
 /// TSC-deadline zamanlayıcısını arm eder.

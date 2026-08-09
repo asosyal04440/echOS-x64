@@ -3728,19 +3728,25 @@ impl Ext4FileSystem {
         }
 
         let idx_offset = header_offset + 12;
+        let mut lo = 0i32;
+        let mut hi = parent_header.eh_entries as i32 - 1;
         let mut child_block: Option<u64> = None;
 
-        for i in 0..parent_header.eh_entries as usize {
-            let offset = idx_offset + i * 12;
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let offset = idx_offset + mid as usize * 12;
             if offset + 12 > parent_data.len() {
                 break;
             }
             if let Some(idx) = Ext4ExtentIdx::parse(&parent_data[offset..]) {
                 if logical_block >= idx.ei_block {
                     child_block = Some(idx.ei_leaf);
+                    lo = mid + 1;
                 } else {
-                    break;
+                    hi = mid - 1;
                 }
+            } else {
+                break;
             }
         }
 
@@ -3773,25 +3779,35 @@ impl Ext4FileSystem {
         logical_block: u32,
         header_offset: usize,
     ) -> Option<u64> {
+        let header = Ext4ExtentHeader::parse(&data[header_offset..])?;
         let extent_offset = header_offset + 12;
-        let mut i = 0;
-        loop {
-            let offset = extent_offset + i * 12;
+        let mut lo = 0i32;
+        let mut hi = header.eh_entries as i32 - 1;
+        let mut found: Option<Ext4Extent> = None;
+
+        while lo <= hi {
+            let mid = lo + (hi - lo) / 2;
+            let offset = extent_offset + mid as usize * 12;
             if offset + 12 > data.len() {
                 break;
             }
             if let Some(extent) = Ext4Extent::parse(&data[offset..]) {
-                if logical_block >= extent.ee_block
-                    && logical_block < extent.ee_block + extent.ee_len as u32
-                {
-                    let off = logical_block - extent.ee_block;
-                    return Some(extent.ee_start + off as u64);
+                if logical_block >= extent.ee_block {
+                    found = Some(extent);
+                    lo = mid + 1;
+                } else {
+                    hi = mid - 1;
                 }
-                if extent.ee_block > logical_block {
-                    break;
-                }
+            } else {
+                break;
             }
-            i += 1;
+        }
+
+        if let Some(extent) = found {
+            if logical_block < extent.ee_block + extent.ee_len as u32 {
+                let off = logical_block - extent.ee_block;
+                return Some(extent.ee_start + off as u64);
+            }
         }
         None
     }

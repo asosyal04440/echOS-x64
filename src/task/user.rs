@@ -31,11 +31,8 @@ use super::super::{elf, kernel, serial_println};
 use core::arch::asm;
 use kernel::{arch, memory as kernel_memory, tasking};
 use x86_64::registers::control::{Cr3, Cr3Flags};
-use x86_64::registers::model_specific::Msr;
 use x86_64::structures::paging::{FrameAllocator, Mapper, OffsetPageTable, Size4KiB};
 use x86_64::VirtAddr;
-
-const MSR_GS_BASE: u32 = 0xC000_0101;
 
 /// IRETQ ile Ring 3'e geçiş yapar.
 /// Bu fonksiyon geri dönmez.
@@ -90,6 +87,8 @@ pub unsafe fn enter_user_mode(entry_point: VirtAddr, user_stack_top: VirtAddr) -
         // CR3 switch LAST — kernel code at low-half addresses is mapped in
         // user PML4 (PD[0..7] without USER_ACCESSIBLE) for this trampoline.
         "mov cr3, {cr3_val}",
+        // Publish the user GS shadow and retain CpuData in IA32_KERNEL_GS_BASE.
+        "swapgs",
         "iretq",
         cr3_val = in(reg) user_pml4_addr,
         ds_val = in(reg) user_ds,
@@ -213,6 +212,8 @@ pub unsafe fn enter_user_mode_with_ret(
         "mov dx, 0xe9",
         "mov al, 0x4a",
         "out dx, al",
+        // Publish the user GS shadow and retain CpuData in IA32_KERNEL_GS_BASE.
+        "swapgs",
         "iretq",
         cr3_val = in(reg) user_pml4_addr,
         ds_val = in(reg) user_ds,
@@ -231,7 +232,15 @@ pub unsafe fn enter_win32_user_mode(thread: tasking::task::Win32ThreadState, rax
     let kernel_stack_top = VirtAddr::new(kernel_stack_top);
     arch::gdt::set_kernel_stack(kernel_stack_top);
     arch::syscall::set_kernel_stack_for_current_cpu(kernel_stack_top.as_u64());
-    Msr::new(MSR_GS_BASE).write(thread.teb_base);
+    if !arch::cpu::local::set_user_gs_base(thread.teb_base) {
+        serial_println!(
+            "[FATAL] enter_win32_user_mode: invalid TEB GS base {:#x}",
+            thread.teb_base
+        );
+        loop {
+            x86_64::instructions::hlt();
+        }
+    }
     let user_cs = arch::gdt::user_code_selector().0 | 3;
     let user_ds = arch::gdt::user_data_selector().0 | 3;
     let rflags: u64 = 0x202;
@@ -244,6 +253,8 @@ pub unsafe fn enter_win32_user_mode(thread: tasking::task::Win32ThreadState, rax
         "push {rflags}",
         "push {cs:r}",
         "push {rip}",
+        // Publish TEB as user GS; keep the CPU-local pointer in the swap shadow.
+        "swapgs",
         "iretq",
         in("rax") rax_seed,
         in("rcx") thread.initial_rcx,
@@ -258,10 +269,13 @@ pub unsafe fn enter_win32_user_mode(thread: tasking::task::Win32ThreadState, rax
 }
 
 pub fn fork_child_start() -> ! {
-    crate::debug_diag!("[DIAG] fork_child_start entered, PID={:?}", tasking::scheduler::current_task_id());
+    crate::debug_diag!(
+        "[DIAG] fork_child_start entered, PID={:?}",
+        tasking::scheduler::current_task_id()
+    );
     crate::debug_diag!("[SHELL_TEST] fork_child_start entered");
     {
-        let cpu_id = crate::cpu::smp::current_cpu_id();
+        let cpu_id = arch::cpu::smp::current_cpu_id();
         let cr3 = unsafe { Cr3::read().0.start_address().as_u64() };
         crate::debug_diag!(
             "[SHELL_TEST] fork_child_start: CPU={} PID={:?} CR3={:#x}",

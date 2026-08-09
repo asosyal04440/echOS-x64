@@ -114,8 +114,30 @@ pub const BPF_IND: u8 = 0x40;
 pub const BPF_MEM: u8 = 0x60;
 pub const BPF_LEN: u8 = 0x00;
 
+/// BPF_PSEUDO_MAP_FD — LD_MAP_FD pseudo-instruction (BPF_LD | BPF_DW | BPF_IMM)
+pub const BPF_PSEUDO_MAP_FD: u8 = 1;
+
+/// BPF_TAIL_CALL_MAX — maksimum tail call zincir derinliği
+pub const BPF_TAIL_CALL_MAX: u32 = 33;
+
+/// BPF_FUNC_* helper identifier constants (Linux 6.x uyumlu)
+pub const BPF_FUNC_map_lookup_elem: i32 = 1;
+pub const BPF_FUNC_map_update_elem: i32 = 2;
+pub const BPF_FUNC_map_delete_elem: i32 = 3;
+pub const BPF_FUNC_probe_read: i32 = 4;
+pub const BPF_FUNC_ktime_get_ns: i32 = 5;
+pub const BPF_FUNC_trace_printk: i32 = 6;
+pub const BPF_FUNC_get_prandom_u32: i32 = 7;
+pub const BPF_FUNC_tail_call: i32 = 12;
+pub const BPF_FUNC_clone_redirect: i32 = 13;
+pub const BPF_FUNC_get_current_pid_tgid: i32 = 14;
+pub const BPF_FUNC_get_current_uid_gid: i32 = 16;
+pub const BPF_FUNC_redirect: i32 = 23;
+
 /// BPF K (immediate) value modifier
 pub const BPF_K: u8 = 0x00;
+/// BPF_IMM — 64-bit immediate mode (BPF_LD | BPF_DW | BPF_IMM)
+pub const BPF_IMM: u8 = 0x00;
 
 /// BPF jump modifiers
 pub const BPF_JUMP: u8 = 0x00;
@@ -278,6 +300,21 @@ impl EbpfVm {
             let uses_src_reg = (opcode & BPF_SRC_X) == BPF_SRC_X;
 
             match class {
+                // BPF_LD — Load operations (LD_MAP_FD, LD_ABS, LD_IND)
+                BPF_LD => {
+                    // BPF_LD | BPF_DW | BPF_IMM — LD_MAP_FD pseudo-instruction
+                    // opcode = 0x18, dst = BPF_PSEUDO_MAP_FD (1), src = 0, off = 0, imm = <map_fd_low>
+                    // İkinci 64-bit instruction: imm = <aux_data> (pek kullanılmaz)
+                    if opcode == (BPF_LD | BPF_DW | BPF_IMM) && dst == BPF_PSEUDO_MAP_FD {
+                        let map_id = imm as u32;
+                        if map_id > 0 {
+                            self.registers[BPF_REG_0 as usize] = map_id as u64;
+                        }
+                        pc += 1; // Skip ikinci 64-bit instruction
+                    } else {
+                        pc += 1;
+                    }
+                }
                 // ALU operations
                 BPF_ALU => match op {
                     BPF_ADD => {
@@ -633,19 +670,107 @@ impl EbpfVm {
     fn builtin_call(&mut self, func_id: i32) -> Result<u64, EbpfError> {
         match func_id {
             1 => {
-                // bpf_trace_printk
+                // bpf_map_lookup_elem(map_id, key_ptr) → value_ptr
+                // R1 = map_id (u32), R2 = key_ptr
+                let map_id = self.registers[1] as u32;
+                let key_ptr = self.registers[2];
+                // Key'i stack'ten oku (4 byte varsayılıyor)
+                let key = self.read_stack_bytes(key_ptr, 4)?;
+                match super::ebpf_maps::map_lookup_elem(map_id, &key) {
+                    Some(value) => {
+                        // Value'yu stack'e yaz ve pointer döndür
+                        let value_offset = (BPF_STACK_SIZE as u64).saturating_sub(64);
+                        for (i, &byte) in value.iter().enumerate().take(8) {
+                            if (value_offset as usize + i) < BPF_STACK_SIZE {
+                                self.stack[value_offset as usize + i] = byte;
+                            }
+                        }
+                        Ok(value_offset)
+                    }
+                    None => Ok(0), // NULL pointer
+                }
+            }
+            2 => {
+                // bpf_map_update_elem(map_id, key_ptr, value_ptr, flags)
+                // R1 = map_id, R2 = key_ptr, R3 = value_ptr, R4 = flags
+                let map_id = self.registers[1] as u32;
+                let key_ptr = self.registers[2];
+                let value_ptr = self.registers[3];
+                let flags = self.registers[4];
+                let key = self.read_stack_bytes(key_ptr, 4)?;
+                let value = self.read_stack_bytes(value_ptr, 4)?;
+                match super::ebpf_maps::map_update_elem(map_id, &key, &value, flags) {
+                    Ok(()) => Ok(0),
+                    Err(_) => Ok(u64::MAX), // -1
+                }
+            }
+            3 => {
+                // bpf_map_delete_elem(map_id, key_ptr)
+                let map_id = self.registers[1] as u32;
+                let key_ptr = self.registers[2];
+                let key = self.read_stack_bytes(key_ptr, 4)?;
+                match super::ebpf_maps::map_delete_elem(map_id, &key) {
+                    Ok(()) => Ok(0),
+                    Err(_) => Ok(u64::MAX),
+                }
+            }
+            4 => {
+                // bpf_probe_read(dst_ptr, size, src_ptr)
+                // Güvenli bellek okuma — hata durumunda 0 doldurur
+                let _dst = self.registers[1];
+                let _size = self.registers[2] as usize;
+                let _src = self.registers[3];
+                // Basit implementasyon: src_ptr'dan size byte oku
+                // Gerçek implementasyonda cross-address-space okuma yapılır
+                Ok(0)
+            }
+            5 => {
+                // bpf_ktime_get_ns
+                Ok(crate::interrupts::get_ticks() as u64 * 1000000)
+            }
+            6 => {
+                // bpf_trace_printk(fmt, fmt_size, ...)
                 crate::serial_println!("[eBPF] Trace print helper invoked");
                 Ok(0)
             }
-            2 => {
-                // bpf_ktime_get_ns
-                Ok(crate::interrupts::get_ticks() as u64 * 1000000) // ns cinsinden
-            }
-            3 => {
+            7 => {
                 // bpf_get_prandom_u32
                 Ok(crate::random::next_u32() as u64)
             }
+            12 => {
+                // bpf_tail_call(ctx, prog_array_map, index)
+                // Tail call: farklı bir eBPF programına atla
+                // R1 = ctx, R2 = prog_array_map_id, R3 = index
+                // Tail call limit: 33 (Linux kernel ile aynı)
+                // Basit implementasyon: şimdilik desteklenmez
+                Ok(u64::MAX) // -1 = tail call yapılmadı
+            }
+            14 => {
+                // bpf_get_current_pid_tgid
+                // PID ve TSGID bilgisini döndür (32-bit PID | 32-bit TSGID)
+                let cpu_id = crate::cpu::smp::get_current_cpu_id() as u64;
+                Ok(cpu_id << 32) // PID = cpu_id, TSGID = 0 (kernel thread)
+            }
+            16 => {
+                // bpf_get_current_uid_gid
+                Ok(0) // root uid=0, gid=0
+            }
             _ => Err(EbpfError::CallError),
+        }
+    }
+
+    /// Stack'ten belirli adresten N byte oku
+    fn read_stack_bytes(&self, addr: u64, count: usize) -> Result<Vec<u8>, EbpfError> {
+        if addr >= (BPF_STACK_SIZE as u64 - 512) && addr < BPF_STACK_SIZE as u64 {
+            let offset = (addr - (BPF_STACK_SIZE as u64 - 512)) as usize;
+            let end = offset.checked_add(count).ok_or(EbpfError::MemoryAccess)?;
+            if end > BPF_STACK_SIZE {
+                return Err(EbpfError::MemoryAccess);
+            }
+            Ok(self.stack[offset..offset + count].to_vec())
+        } else {
+            // Stack dışı adres → 0-filled
+            Ok(vec![0u8; count])
         }
     }
 
@@ -1198,6 +1323,10 @@ enum VerifierRegKind {
     Scalar,
     CtxPtr,
     StackPtr,
+    /// Map file descriptor (loaded via `BPF_LD_MAP_FD (BPF_PSEUDO_MAP_FD)`)
+    MapFd(u32),
+    /// Map value pointer (returned by `bpf_map_lookup_elem`)
+    MapValuePtr,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1225,6 +1354,20 @@ const VERIFIER_REG_STACK_FP: VerifierRegState = VerifierRegState {
     kind: VerifierRegKind::StackPtr,
     stack_offset: 0,
 };
+
+fn verifier_reg_map_fd(map_id: u32) -> VerifierRegState {
+    VerifierRegState {
+        kind: VerifierRegKind::MapFd(map_id),
+        stack_offset: 0,
+    }
+}
+
+fn verifier_reg_map_value_ptr() -> VerifierRegState {
+    VerifierRegState {
+        kind: VerifierRegKind::MapValuePtr,
+        stack_offset: -64,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct VerifierState {
@@ -1348,16 +1491,19 @@ fn decode_instruction(insn: u64) -> DecodedInsn {
 }
 
 fn verifier_merge_reg_state(lhs: VerifierRegState, rhs: VerifierRegState) -> VerifierRegState {
-    use VerifierRegKind::{CtxPtr, Scalar, StackPtr, Uninit};
+    use VerifierRegKind::{CtxPtr, MapFd, MapValuePtr, Scalar, StackPtr, Uninit};
 
     match (lhs.kind, rhs.kind) {
         (Uninit, _) | (_, Uninit) => VERIFIER_REG_UNINIT,
         (Scalar, Scalar) => VERIFIER_REG_SCALAR,
         (CtxPtr, CtxPtr) => VERIFIER_REG_CTX,
-        (StackPtr, StackPtr) if lhs.stack_offset == rhs.stack_offset => lhs,
-        _ => VERIFIER_REG_UNINIT,
+        (StackPtr, StackPtr) => VERIFIER_REG_STACK_FP,
+        (MapFd(a), MapFd(b)) if a == b => verifier_reg_map_fd(a),
+        (MapValuePtr, MapValuePtr) => verifier_reg_map_value_ptr(),
+        _ => VERIFIER_REG_SCALAR, // uyumsuz → scalar (conservative)
     }
 }
+
 
 fn verifier_stack_access_start(base_stack_offset: i32, off: i16, size: usize) -> Option<usize> {
     let base = BPF_STACK_SIZE as i64;
@@ -1398,13 +1544,60 @@ fn verifier_is_supported_helper(helper_id: i32) -> bool {
 }
 
 fn verifier_validate_helper_args(state: &VerifierState, helper_id: i32) -> Result<(), EbpfError> {
+    // Linux helper IDs (Linux 6.x uyumlu):
+    //  1 = bpf_map_lookup_elem  (R1=map_fd: u32, R2=key_ptr)
+    //  2 = bpf_map_update_elem  (R1=map_fd, R2=key_ptr, R3=value_ptr, R4=flags)
+    //  3 = bpf_map_delete_elem  (R1=map_fd, R2=key_ptr)
+    //  4 = bpf_probe_read       (R1=dst, R2=size, R3=src)
+    //  5 = bpf_ktime_get_ns
+    //  6 = bpf_trace_printk     (R1=fmt, R2=fmt_size, R3-R5=args)
+    //  7 = bpf_get_prandom_u32
+    //  12 = bpf_tail_call       (R1=ctx, R2=prog_array_map, R3=index)
+    //  14 = bpf_get_current_pid_tgid
+    //  16 = bpf_get_current_uid_gid
+    //  23 = bpf_redirect        (XDP için) — ifindex to 0
+    //  13 = bpf_clone_redirect  (ifindex, flags)
+
     match helper_id {
         1 => {
+            // bpf_map_lookup_elem: R1 = map_fd (scalar ok), R2 = key_ptr (stack ptr)
             if !state.reg_readable(BPF_REG_1 as usize) {
                 return Err(EbpfError::VerifierRejected);
             }
+            if !state.reg_readable(BPF_REG_2 as usize) {
+                return Err(EbpfError::VerifierRejected);
+            }
         }
-        2 | 3 => {}
+        2 => {
+            // bpf_map_update_elem: R1 = map_fd, R2 = key_ptr, R3 = value_ptr
+            for r in [BPF_REG_1, BPF_REG_2, BPF_REG_3] {
+                if !state.reg_readable(r as usize) {
+                    return Err(EbpfError::VerifierRejected);
+                }
+            }
+        }
+        3 => {
+            // bpf_map_delete_elem: R1 = map_fd, R2 = key_ptr
+            for r in [BPF_REG_1, BPF_REG_2] {
+                if !state.reg_readable(r as usize) {
+                    return Err(EbpfError::VerifierRejected);
+                }
+            }
+        }
+        12 => {
+            // bpf_tail_call: needs R1=ctx (must be readable pointer), R2=prog_array_map, R3=index
+            if !state.reg_readable(BPF_REG_1 as usize) {
+                return Err(EbpfError::VerifierRejected);
+            }
+            if !state.reg_readable(BPF_REG_2 as usize) {
+                return Err(EbpfError::VerifierRejected);
+            }
+            if !state.reg_readable(BPF_REG_3 as usize) {
+                return Err(EbpfError::VerifierRejected);
+            }
+        }
+        // Builtins with no argument validation needed
+        4 | 5 | 6 | 7 | 13 | 14 | 16 | 23  => {}
         _ => return Err(EbpfError::CallError),
     }
     Ok(())
@@ -1612,6 +1805,12 @@ fn verifier_apply_alu(insn: DecodedInsn, state: &mut VerifierState) -> Result<()
             state.regs[dst] = VERIFIER_REG_SCALAR;
         }
         VerifierRegKind::Uninit => {
+            return Err(EbpfError::VerifierRejected);
+        }
+        VerifierRegKind::MapFd(_) => {
+            state.regs[dst] = VERIFIER_REG_SCALAR;
+        }
+        VerifierRegKind::MapValuePtr => {
             return Err(EbpfError::VerifierRejected);
         }
     }

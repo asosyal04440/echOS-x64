@@ -1,0 +1,10 @@
+[package]
+name = "echos-compression"
+version = "0.1.0"
+edition = "2021"
+description = "echOS compression/decompression algorithms (DEFLATE, LZO1X, LZ4, Zstandard)"
+license = "MIT"
+autotests = false
+
+[lib]
+test = true

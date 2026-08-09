@@ -66,12 +66,16 @@
 //! - `zswap.rs`: ZSwap — OOM öncesi son kurtarma katmanı
 
 use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
+use spin::RwLock;
 
+use crate::memory::AddressSpace;
 use crate::task::scheduler::{current_task_id, get_ticks, TaskInfo};
 use crate::task::task::TaskId;
 
@@ -92,6 +96,140 @@ const OOM_MAX_KILLS: usize = 3;
 const OOM_SCORE_ADJ_MIN: i16 = -1000;
 const OOM_SCORE_ADJ_MAX: i16 = 1000;
 const OOM_SCORE_ADJ_ROOT: i16 = 0;
+
+// ============================================================================
+// OOM REAPER
+// ============================================================================
+
+/// OOM reaper thread sleep interval (ticks) between queue polls when idle.
+const REAPER_POLL_INTERVAL: usize = 10;
+
+/// Work item for the OOM reaper thread.
+struct ReaperWork {
+    space_id: u64,
+    pml4_phys: Option<x86_64::PhysAddr>,
+    victim_pid: TaskId,
+    /// Keeps the AddressSpace alive throughout the reaping.  The VmaMap
+    /// was already cleared in `queue_oom_reaper`; this Arc is held only
+    /// to prevent premature AddressSpace Drop while `free_user_page_tables`
+    /// and `cleanup_address_space` run.
+    _space: Option<Arc<spin::RwLock<AddressSpace>>>,
+}
+
+/// Concurrent work queue for the OOM reaper.
+static OOM_REAPER_QUEUE: Mutex<VecDeque<ReaperWork>> = Mutex::new(VecDeque::new());
+
+/// Wake flag — set to true when new work is queued.
+static OOM_REAPER_WAKE: AtomicBool = AtomicBool::new(false);
+
+/// PID of the OOM reaper thread (0 = not started).
+static OOM_REAPER_PID: AtomicUsize = AtomicUsize::new(0);
+
+/// The OOM reaper kernel thread.
+///
+/// Loops waiting for work. When a victim is queued, tears down its address
+/// space (page tables → TLB shootdown → swap/LRU cleanup) so the OOM killer
+/// does not depend on the victim being scheduled.
+fn oom_reaper_main() -> ! {
+    crate::serial_println!("[OOM] Reaper thread started");
+    loop {
+        if !OOM_REAPER_WAKE.load(Ordering::Acquire) {
+            crate::task::sleep(REAPER_POLL_INTERVAL);
+            continue;
+        }
+        OOM_REAPER_WAKE.store(false, Ordering::Release);
+
+        while let Some(work) = OOM_REAPER_QUEUE.lock().pop_front() {
+            oom_reap_victim(work);
+        }
+    }
+}
+
+/// Process one reaper work item: tear down victim's address space.
+fn oom_reap_victim(work: ReaperWork) {
+    crate::serial_println!(
+        "[OOM] Reaper processing PID {} space {}",
+        work.victim_pid,
+        work.space_id
+    );
+
+    let sid = work.space_id;
+    let pml4 = work.pml4_phys;
+
+    // Phase 1: mark address space DYING, drain concurrent faults
+    crate::memory::start_as_teardown(sid);
+
+    // Phase 3: cross-CPU TLB shootdown
+    crate::cpu::smp::tlb_defer_shootdown();
+    crate::cpu::smp::tlb_flush_pending();
+
+    // Phase 4: free user page tables
+    if let Some(pml4) = pml4 {
+        crate::memory::free_user_page_tables(pml4, sid);
+    }
+
+    // Phase 5: clean up LRU/swap/page-table-lock lifecycle records
+    crate::memory::cleanup_address_space(sid);
+
+    crate::serial_println!(
+        "[OOM] Reaper finished PID {} space {}",
+        work.victim_pid,
+        sid
+    );
+}
+
+/// Enqueue a victim for reaping. Called after `kill_task`.
+///
+/// Searches `PER_CPU_CURRENT_TASK` for the victim, extracts its address
+/// space info, and pushes a work item to the reaper queue.
+fn queue_oom_reaper(victim_pid: TaskId) {
+    if OOM_REAPER_PID.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+
+    let mut found = false;
+
+    // Safety: single-threaded access under interrupt disable.
+    x86_64::instructions::interrupts::without_interrupts(|| unsafe {
+        for i in 0..crate::task::scheduler::PER_CPU_CURRENT_TASK.len() {
+            if let Some(task) = crate::task::scheduler::PER_CPU_CURRENT_TASK[i].as_mut() {
+                if task.id != victim_pid {
+                    continue;
+                }
+                // Task must be terminated (kill_task already called).
+                if task.state != crate::task::task::TaskState::Terminated {
+                    continue;
+                }
+                let addr_space = task.cold.address_space.take();
+                let pml4_frame = task.cold.page_table.take();
+
+                if let Some(space_arc) = addr_space {
+                    let sid = crate::memory::address_space_id(&space_arc);
+
+                    // Phase 2: clear VMA map while we hold the Arc
+                    if let Some(mut guard) = space_arc.try_write() {
+                        guard.vmas.clear();
+                    }
+
+                    let pml4_phys = pml4_frame.map(|f| f.start_address());
+                    OOM_REAPER_QUEUE.lock().push_back(ReaperWork {
+                        space_id: sid,
+                        pml4_phys,
+                        victim_pid,
+                        _space: Some(space_arc),
+                    });
+                    OOM_REAPER_WAKE.store(true, Ordering::Release);
+                }
+                found = true;
+                break;
+            }
+        }
+    });
+
+    if !found {
+        crate::serial_println!("[OOM] Reaper: PID {} not found or already reaped", victim_pid);
+    }
+}
 
 // ============================================================================
 // OOM SCORE CALCULATION
@@ -432,6 +570,8 @@ pub fn oom_kill(processes: &[OomProcessInfo]) -> Option<usize> {
         return None;
     }
 
+    queue_oom_reaper(victim.pid);
+
     let freed_pages = victim.rss_pages;
 
     // Kill kaydı tut
@@ -479,7 +619,9 @@ pub fn should_trigger_oom(free_pages: usize, total_pages: usize) -> bool {
 /// OOM killer'ı başlat
 pub fn init() {
     OOM_STATE.set_enabled(true);
-    crate::serial_println!("[OOM] OOM Killer initialized");
+    let pid = crate::task::scheduler::spawn(oom_reaper_main);
+    OOM_REAPER_PID.store(pid, Ordering::Relaxed);
+    crate::serial_println!("[OOM] OOM Killer initialized (reaper PID: {})", pid);
 }
 
 /// Cgroup-scoped OOM kill: belirli cgroup'üan süreçlerini hedef al

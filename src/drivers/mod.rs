@@ -877,6 +877,27 @@ pub mod linux {
     /// INIT_DONE atomik bayrağıyla çift başlatma önlenir.
     /// Döner: başarılı probe_and_attach sayısı (0 = tüm sürücüler başlatılamadı)
     pub fn init_linux_driver_layer() -> usize {
+        init_linux_driver_layer_impl(true, true)
+    }
+
+    /// BIOS/Limine handover'ında PCI BAR'ları doğrulanmış bir MMIO mapping
+    /// sağlayıcısı yoksa NVMe register erişimini başlatmaz.  PCI discovery,
+    /// PS/2/xHCI registration ve probe/attach yine çalışır; storage capability
+    /// daha sonra gerçek BAR mapping hazır olduğunda yeniden denenebilir.
+    pub fn init_linux_driver_layer_without_nvme() -> usize {
+        init_linux_driver_layer_impl(false, true)
+    }
+
+    /// BIOS/Limine handover'ında PCI BAR ve legacy-I/O alanlarının adresleme
+    /// kanıtı adapter tarafından henüz yayınlanmadıysa yalnızca platform
+    /// sürücü kayıtlarını kurar. PCI discovery/probe/attach ertelenir; bu,
+    /// framebuffer veya PCI BAR fiziksel adresini kernel sanal adresi gibi
+    /// kullanarak page fault üretmeyi engelleyen açık bir capability policy'dir.
+    pub fn init_linux_driver_layer_deferred_hardware() -> usize {
+        init_linux_driver_layer_impl(false, false)
+    }
+
+    fn init_linux_driver_layer_impl(probe_nvme: bool, probe_hardware: bool) -> usize {
         if INIT_DONE.swap(true, Ordering::SeqCst) {
             return 0; // Daha önce çağrıldı; yeniden başlatma atlandı
         }
@@ -909,20 +930,39 @@ pub mod linux {
             vendor_id: 0,
             device_id: 0,
         });
-        // PCI bus'u tara ve cihazları kayıt et
-        register_pci_devices();
+        // PCI bus'u yalnız adapter fiziksel BAR/MMIO mapping kanıtını
+        // yayınladıysa tara. BIOS/Limine yolu bu kanıtı ortak init'ten sonra
+        // deferred olarak alır; erken probe fail-closed kalır.
+        if probe_hardware {
+            register_pci_devices();
+        } else {
+            crate::debug::serial::trace_raw(format_args!(
+                "[DRV] PCI probe deferred: adapter MMIO mapping policy\n"
+            ));
+        }
         // Sürücüleri kayıt et (probe sırası önemli değil, hepsi denenir)
         register_driver(Box::new(Ps2ControllerDriver));
         register_driver(Box::new(Ps2MouseDriver));
         register_driver(Box::new(StoragePciDriver));
         register_driver(Box::new(XhciPciDriver));
         // NVMe alt sistemini başlat (controller keşif + namespace discovery)
-        crate::debug::serial::trace_raw(format_args!("[DRV] NVMe subsystem init...\n"));
-        crate::drivers::nvme::init();
-        let ns_info = crate::drivers::nvme::get_namespace_info(1);
-        crate::debug::serial::trace_raw(format_args!("[DRV] NVMe namespace 1 info: {:?}\n", ns_info));
-        // Probe+attach döngüsünü çalıştır ve başarılı bağlama sayısını döndür
-        probe_and_attach()
+        if probe_nvme {
+            crate::debug::serial::trace_raw(format_args!("[DRV] NVMe subsystem init...\n"));
+            crate::drivers::nvme::init();
+            let ns_info = crate::drivers::nvme::get_namespace_info(1);
+            crate::debug::serial::trace_raw(format_args!("[DRV] NVMe namespace 1 info: {:?}\n", ns_info));
+        } else {
+            crate::debug::serial::trace_raw(format_args!(
+                "[DRV] NVMe probe deferred: BIOS MMIO mapping policy\n"
+            ));
+        }
+        // Platform probe'u güvenliyse çalıştır; deferred BIOS politikasında
+        // yalnızca kayıtların kurulmuş olması başarılı init kanıtıdır.
+        if probe_hardware {
+            probe_and_attach()
+        } else {
+            0
+        }
     }
 }
 

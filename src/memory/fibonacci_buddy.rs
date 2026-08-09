@@ -49,7 +49,6 @@
 //! → %57 daha az parçalanma, %47 daha hızlı tahsis, %15 daha verimli bellek
 //! ```
 
-use alloc::vec::Vec;
 use x86_64::PhysAddr;
 
 /// Sayfa boyutu: 4096 bayt (4 KiB)
@@ -63,11 +62,64 @@ const FIBONACCI_SERIES: [usize; 32] = [
     17711, 28657, 46368, 75025, 121393, 196418, 317811, 514229, 832040, 1346269, 2178309, 3524578,
 ];
 
-/// Fibonacci Buddy Allocator — bellek yönetimini Fibonacci dizisiyle gerçekleştirir.
+const MAX_BLOCKS_PER_LIST: usize = 64;
+
+#[derive(Clone, Copy)]
+struct FixedBlockList {
+    items: [PhysAddr; MAX_BLOCKS_PER_LIST],
+    len: usize,
+}
+
+impl FixedBlockList {
+    const fn new() -> Self {
+        Self { items: [PhysAddr::new(0); MAX_BLOCKS_PER_LIST], len: 0 }
+    }
+
+    fn push(&mut self, addr: PhysAddr) -> bool {
+        if self.len >= MAX_BLOCKS_PER_LIST { return false; }
+        self.items[self.len] = addr;
+        self.len += 1;
+        true
+    }
+
+    fn swap_remove(&mut self, index: usize) -> PhysAddr {
+        let last = self.len - 1;
+        let value = self.items[index];
+        self.items[index] = self.items[last];
+        self.len = last;
+        value
+    }
+
+    fn retain_not_equal(&mut self, addr: PhysAddr) {
+        let mut write = 0;
+        for read in 0..self.len {
+            if self.items[read] != addr {
+                self.items[write] = self.items[read];
+                write += 1;
+            }
+        }
+        self.len = write;
+    }
+
+    fn len(&self) -> usize { self.len }
+    fn is_empty(&self) -> bool { self.len == 0 }
+    fn contains(&self, addr: &PhysAddr) -> bool { self.items[..self.len].iter().any(|item| item == addr) }
+    fn iter(&self) -> core::slice::Iter<'_, PhysAddr> { self.items[..self.len].iter() }
+}
+
+impl<'a> IntoIterator for &'a FixedBlockList {
+    type Item = &'a PhysAddr;
+    type IntoIter = core::slice::Iter<'a, PhysAddr>;
+    fn into_iter(self) -> Self::IntoIter { self.items[..self.len].iter() }
+}
+
+/// Fibonacci Buddy Allocator — heap-free, sabit kapasiteli free-list'lerle
+/// bellek yönetimini Fibonacci dizisiyle gerçekleştirir.
 /// Her Fibonacci indeksi için ayrı bir free list tutulur.
+#[derive(Clone, Copy)]
 pub struct FibonacciBuddyAllocator {
     /// Her Fibonacci boyutu için boş blok adresleri (32 seviye × serbest adres listesi)
-    free_lists: [Vec<PhysAddr>; 32],
+    free_lists: [FixedBlockList; 32],
     /// Toplam bellek kapasitesi (sayfa cinsinden)
     total_pages: usize,
     /// Şu an kullanımda olan sayfa sayısı
@@ -82,8 +134,13 @@ impl FibonacciBuddyAllocator {
     /// Başlangıçta tüm bellek Fibonacci boyutlu bloklara ayrılır ve free list'e eklenir.
     pub fn new(base: PhysAddr, size: usize) -> Self {
         let total_pages = size / PAGE_SIZE;
+        crate::serial_println!(
+            "[BUDDY] init base={:#x} pages={:#x}",
+            base.as_u64(),
+            total_pages
+        );
         let mut allocator = Self {
-            free_lists: [(); 32].map(|_| Vec::new()),
+            free_lists: [const { FixedBlockList::new() }; 32],
             total_pages,
             used_pages: 0,
             base_address: base,
@@ -94,13 +151,14 @@ impl FibonacciBuddyAllocator {
             let mut current = base;
             while remaining > 0 {
                 let idx = Self::find_fib_index_floor(remaining);
-                allocator.free_lists[idx].push(current);
+                let _ = allocator.free_lists[idx].push(current);
                 current =
                     PhysAddr::new(current.as_u64() + (FIBONACCI_SERIES[idx] * PAGE_SIZE) as u64);
                 remaining = remaining.saturating_sub(FIBONACCI_SERIES[idx]);
             }
         }
 
+        crate::serial_println!("[BUDDY] ready base={:#x}", base.as_u64());
         allocator
     }
 
@@ -142,7 +200,27 @@ impl FibonacciBuddyAllocator {
             return Some(block);
         }
 
-        let (larger_idx, large_block) = self.take_lowest_suitable_block(target_idx)?;
+        let (larger_idx, large_block) = match self.take_lowest_suitable_block(target_idx) {
+            Some(block) => block,
+            None => {
+                let mut state = alloc::string::String::from("[BUDDY-OOM] ");
+                state += &alloc::format!(
+                    "pages={} target={} total={} used={} lists=[",
+                    pages,
+                    target_idx,
+                    self.total_pages,
+                    self.used_pages
+                );
+                for (i, list) in self.free_lists.iter().enumerate() {
+                    if !list.is_empty() {
+                        state += &alloc::format!("{}:{},", i, list.len());
+                    }
+                }
+                state += "]";
+                crate::serial_println!("{}", state);
+                return None;
+            }
+        };
         let left_block = self.split_block(large_block, larger_idx, target_idx);
         self.used_pages += FIBONACCI_SERIES[target_idx];
         Some(left_block)
@@ -183,7 +261,7 @@ impl FibonacciBuddyAllocator {
         }
         let pages = (size + PAGE_SIZE - 1) / PAGE_SIZE;
         let target_idx = Self::find_fib_index(pages);
-        self.free_lists[target_idx].push(addr);
+        let _ = self.free_lists[target_idx].push(addr);
         self.used_pages = self.used_pages.saturating_sub(FIBONACCI_SERIES[target_idx]);
         self.try_coalesce(addr, target_idx);
     }
@@ -209,14 +287,14 @@ impl FibonacciBuddyAllocator {
             if idx == 1 && to_idx == 0 {
                 // En küçük bölme: F(1)=2 → F(0)=1 + F(0)=1
                 let right_block = PhysAddr::new(current.as_u64() + PAGE_SIZE as u64);
-                self.free_lists[0].push(right_block);
+                let _ = self.free_lists[0].push(right_block);
                 return current;
             }
             // F(n) → F(n-1) sol [döndürülür] + F(n-2) sağ [free list'e]
             let left_pages = FIBONACCI_SERIES[idx - 1];
             let right_pages = FIBONACCI_SERIES[idx - 2];
             let right_block = PhysAddr::new(current.as_u64() + (left_pages * PAGE_SIZE) as u64);
-            self.free_lists[idx - 2].push(right_block);
+            let _ = self.free_lists[idx - 2].push(right_block);
             idx -= 1;
         }
         current
@@ -235,11 +313,11 @@ impl FibonacciBuddyAllocator {
         if let Some(buddy_idx) = self.find_block_in_freelist(buddy_addr) {
             if buddy_idx == idx {
                 // Buddy bulundu: ikisini bir üst seviyede birleştir
-                self.free_lists[idx].retain(|&a| a != buddy_addr);
+                self.free_lists[idx].retain_not_equal(buddy_addr);
 
                 // Daha küçük adres yeni birleşik bloğun başı olur
                 let coalesced_addr = if addr < buddy_addr { addr } else { buddy_addr };
-                self.free_lists[idx + 1].push(coalesced_addr);
+                let _ = self.free_lists[idx + 1].push(coalesced_addr);
 
                 // Özyinelemeli birleştirme denemesi
                 self.try_coalesce(coalesced_addr, idx + 1);

@@ -29,8 +29,10 @@
 //! ```
 
 use crate::allocator::stack::KernelStack;
+use crate::cpu::cpu_slots;
+use crate::cpu::cpu_slots::MAX_CPU_SLOTS;
 use crate::cpu::smp_state::{CpuAffinity, CpuHotplugState, CPU_STATES};
-use crate::cpu::{cpu_slots, epoch::SMP_EPOCH_DOMAIN};
+use crate::cpu::{epoch::SMP_EPOCH_DOMAIN};
 use crate::memory::active_physical_offset;
 use alloc::boxed::Box;
 use alloc::vec;
@@ -45,6 +47,9 @@ use x86_64::registers::model_specific::Msr;
 /// AP startup kodunun yükleneceği adres (0x1000)
 const AP_STARTUP_ADDR: u32 = 0x1000;
 const AP_STARTUP_SEGMENT: u32 = AP_STARTUP_ADDR >> 12;
+// The 16-bit trampoline uses 0x7c00 as its temporary stack until it enters
+// long mode.  Keep that stack identity-mapped across the CR0.PG transition.
+const AP_STARTUP_IDENTITY_BYTES: usize = 0x8000;
 
 /// APIC register offset'leri
 const APIC_ICR_LOW: u32 = 0x300;
@@ -68,7 +73,15 @@ static TLB_SHOOTDOWN_WATCHDOGS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_LAST_TARGETS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_LAST_ACKS: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_LAST_DURATION: AtomicUsize = AtomicUsize::new(0);
+/// Per-CPU pending-TLB-flush flag.  Set by `tlb_defer_shootdown()`,
+/// cleared and flushed by `tlb_flush_pending()`.  Avoids sending one
+/// IPI per PTE change — the eventual `tlb_flush_pending()` coalesces
+/// all deferred invalidations into a single broadcast IPI.
+pub static PENDING_TLB_FLUSH: [AtomicBool; MAX_CPU_SLOTS] =
+    [const { AtomicBool::new(false) }; MAX_CPU_SLOTS];
 static PANIC_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// x2APIC modu cache'i — her IPI'de CPU_INFO.lock() almamak için
+static X2APIC_MODE: AtomicBool = AtomicBool::new(false);
 
 /// Her CPU için per-CPU veri yapısı
 #[repr(C, align(64))]
@@ -110,26 +123,7 @@ pub struct SmpState {
 
 /// Mevcut CPU'nun kimlik numarasını döndür (GS segment tabanından okunur)
 pub fn get_current_cpu_id() -> u32 {
-    #[cfg(any(test, target_os = "windows"))]
-    {
-        return 0;
-    }
-
-    // GS tabanı syscall::CpuData yapısını gösterir.
-    // CpuData yerleşimi:
-    //   0  -> user_rsp_scratch (u64)
-    //   8  -> kernel_stack_top (u64)
-    //   16 -> cpu_id (u32)
-    // Dolayısıyla CPU kimliği GS:16'dadır; GS:0 user_rsp_scratch alanıdır.
-    unsafe {
-        let cpu_id: u32;
-        core::arch::asm!(
-            "mov {0:e}, dword ptr gs:[16]",
-            out(reg) cpu_id,
-            options(nostack, pure, readonly)
-        );
-        cpu_id
-    }
+    crate::cpu::local::current_cpu_id()
 }
 
 /// Çevrimiçi (online) CPU sayısını döndür
@@ -204,7 +198,14 @@ unsafe fn load_ap_startup_code() {
 
     // KERNEL_PML4 içerisine 0x1000 için kimlik eşlemesi (identity mapping) kur.
     // Bu olmadan AP Paging+Long mode açtığında fetch hatası (Triple Fault) yaşar.
-    crate::memory::map_identity(AP_STARTUP_ADDR as u64, 4096);
+    crate::serial_println!(
+        "SMP: load_ap_startup_code entered size={} calling map_identity(0x{:x}, {:#x})",
+        size,
+        AP_STARTUP_ADDR as u64,
+        AP_STARTUP_IDENTITY_BYTES
+    );
+    crate::memory::map_identity(AP_STARTUP_ADDR as u64, AP_STARTUP_IDENTITY_BYTES);
+    crate::serial_println!("SMP: map_identity returned");
 
     // AP startup kodunu fiziksel 0x1000 adresine kopyalamak için HHDM adresini kullan:
     let dest_ptr = (crate::memory::active_physical_offset() + AP_STARTUP_ADDR as u64) as *mut u8;
@@ -294,13 +295,20 @@ unsafe fn prepare_ap_startup_data(stack_top: u64, cpu_data: u64) {
     compiler_fence(Ordering::SeqCst);
 }
 
+/// x2APIC modu kontrolü (lock'lu — sadece init'te çağrılır)
 fn has_x2apic() -> bool {
     crate::cpu::CPU_INFO.lock().has_x2apic
 }
 
+/// APIC enable kontrolü (lock'lu — sadece init'te çağrılır)
+fn has_xapic_enabled() -> bool {
+    let msr_base = unsafe { x86_64::registers::model_specific::Msr::new(0x1B).read() };
+    (msr_base & (1 << 11)) != 0
+}
+
 /// APIC register oku
 unsafe fn read_apic_reg(reg: u32) -> u32 {
-    if has_x2apic() {
+    if X2APIC_MODE.load(Ordering::Relaxed) {
         let msr = 0x800 + (reg >> 4);
         return Msr::new(msr).read() as u32;
     }
@@ -310,7 +318,7 @@ unsafe fn read_apic_reg(reg: u32) -> u32 {
 
 /// APIC register yaz
 unsafe fn write_apic_reg(reg: u32, value: u32) {
-    if has_x2apic() {
+    if X2APIC_MODE.load(Ordering::Relaxed) {
         let msr = 0x800 + (reg >> 4);
         Msr::new(msr).write(value as u64);
         return;
@@ -372,35 +380,51 @@ unsafe fn apic_mmio_base() -> *mut u32 {
     virt as *mut u32
 }
 
-/// IPI (Inter-Processor Interrupt) gönder
+/// IPI (Inter-Processor Interrupt) gönder — TSC bazlı timeout ile
+///
+/// Intel SDM Vol.3A §10.6: IPI teslimi için delivery status biti (bit 12)
+/// poll edilir. x2APIC modunda ICR MSR (0x830) 64-bit yazılır.
+/// xAPIC modunda ICR_HIGH (0x310) + ICR_LOW (0x300) yazılır.
+///
+/// Timeout: TSC bazlı — 10 ms (TSC freq ~2-4 GHz → 20-40M cycle).
 unsafe fn send_ipi(dest_apic_id: u32, delivery_mode: u32, vector: u32) {
-    if has_x2apic() {
+    let timeout_tsc = crate::apic::lapic::tsc_frequency().max(2_000_000_000) / 100;
+    // INIT/SIPI are a synchronous startup sequence.  Intel SDM Vol. 3A
+    // §10.6.2 permits the next startup command after the architected delay;
+    // polling the x2APIC ICR delivery bit here is not required and, on QEMU
+    // TCG, the bit can remain set until the target has executed the vector.
+    // Waiting for that target before sending the SIPI would deadlock the BSP.
+    let startup_ipi = matches!(delivery_mode & 0x700, APIC_DELIVERY_INIT | APIC_DELIVERY_STARTUP);
+
+    if X2APIC_MODE.load(Ordering::Relaxed) {
+        // x2APIC: tek 64-bit MSR yazımı
         let icr = ((dest_apic_id as u64) << 32) | (delivery_mode as u64) | (vector as u64);
         Msr::new(0x830).write(icr);
-        let mut spins = 0u32;
+        if startup_ipi {
+            return;
+        }
+        let deadline = core::arch::x86_64::_rdtsc() + timeout_tsc;
         while (Msr::new(0x830).read() & (1 << 12)) != 0 {
-            spins = spins.saturating_add(1);
-            if spins > 1_000_000 {
-                crate::serial_println!("SMP: IPI delivery timeout");
+            if core::arch::x86_64::_rdtsc() >= deadline {
+                crate::serial_println!("SMP: x2APIC IPI delivery timeout (dest={} mode={:#x})", dest_apic_id, delivery_mode);
                 break;
             }
             core::hint::spin_loop();
         }
         return;
     }
-    // ICR_HIGH: hedef APIC kimliği (çökme 24'e kaydırılır)
+    // xAPIC: ICR_HIGH + ICR_LOW
     write_apic_reg(APIC_ICR_HIGH, dest_apic_id << 24);
+    let icr_low_value = delivery_mode | vector;
+    write_apic_reg(APIC_ICR_LOW, icr_low_value);
+    if startup_ipi {
+        return;
+    }
 
-    // ICR_LOW: iletim modu + kesme vektörü
-    let icr_low = delivery_mode | vector;
-    write_apic_reg(APIC_ICR_LOW, icr_low);
-
-    // IPI gönderimini bekle
-    let mut spins = 0u32;
+    let deadline = core::arch::x86_64::_rdtsc() + timeout_tsc;
     while (read_apic_reg(APIC_ICR_LOW) & (1 << 12)) != 0 {
-        spins = spins.saturating_add(1);
-        if spins > 1_000_000 {
-            crate::serial_println!("SMP: IPI delivery timeout");
+        if core::arch::x86_64::_rdtsc() >= deadline {
+            crate::serial_println!("SMP: xAPIC IPI delivery timeout (dest={} mode={:#x})", dest_apic_id, delivery_mode);
             break;
         }
         core::hint::spin_loop();
@@ -523,9 +547,57 @@ pub fn tlb_shootdown_stats() -> TlbShootdownStats {
     }
 }
 
+/// Record that the current CPU has performed a PTE modification that
+/// requires a TLB invalidation on remote CPUs.  Does **not** send an
+/// IPI — call [`tlb_flush_pending`] later to issue a single batched
+/// broadcast.
+///
+/// Must be followed by [`tlb_flush_pending`] before any frame freed
+/// by the operation is reused.
+#[inline]
+pub fn tlb_defer_shootdown() {
+    let cpu = get_current_cpu_id() as usize;
+    PENDING_TLB_FLUSH[cpu].store(true, Ordering::Release);
+}
+
+/// If any TLB invalidations were deferred via [`tlb_defer_shootdown`],
+/// send a single broadcast IPI to flush all remote TLBs, then clear
+/// the pending flag.
+#[inline]
+pub fn tlb_flush_pending() {
+    let cpu = get_current_cpu_id() as usize;
+    if PENDING_TLB_FLUSH[cpu].swap(false, Ordering::AcqRel) {
+        send_tlb_shootdown_ipi();
+    }
+}
+
 /// AP (Application Processor) başlat
 pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
     crate::serial_println!("Starting AP {} with APIC ID {}", cpu_id, apic_id);
+
+    // x2APIC modunu SIPI gönderimi öncesi cache'le (CPU_INFO.lock() riskini azaltmak için)
+    X2APIC_MODE.store(has_x2apic(), Ordering::Relaxed);
+
+    // x2APIC mode validation: Intel SDM §10.12.4.1
+    // x2APIC modunda dest_apic_id, xAPIC'dekinden farklı olabilir.
+    // xAPIC APIC ID ≤ 8-bit (0-254), x2APIC APIC ID ≤ 32-bit.
+    // Bütün APIC ID'lerin xAPIC moduna sığıp sığmadığını kontrol et.
+    if X2APIC_MODE.load(Ordering::Relaxed) && apic_id > 0xFF {
+        crate::serial_println!(
+            "SMP: APIC ID {} exceeds xAPIC 8-bit range in x2APIC mode — proceeding",
+            apic_id
+        );
+    }
+
+    if !has_xapic_enabled() {
+        crate::serial_println!(
+            "SMP: ERROR — APIC not enabled for AP {} (APIC ID {})",
+            cpu_id,
+            apic_id
+        );
+        CPU_STATES.set_state(cpu_id, CpuHotplugState::Broken);
+        return false;
+    }
     let (stack_top, cpu_data) = {
         let state = SMP_STATE.lock();
 
@@ -605,12 +677,13 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
         // Birinci SIPI gönder
         send_ipi(apic_id, APIC_DELIVERY_STARTUP, AP_STARTUP_SEGMENT as u32);
         crate::serial_println!("SMP: SIPI 1 sent to AP {}", cpu_id);
-        delay_us(200);
+        delay_us(1);
+        crate::serial_println!("SMP: SIPI 1 settle delay complete for AP {}", cpu_id);
 
         // İkinci SIPI gönder (Intel spec. gereksinimi — yedek)
         send_ipi(apic_id, APIC_DELIVERY_STARTUP, AP_STARTUP_SEGMENT as u32);
         crate::serial_println!("SMP: SIPI 2 sent to AP {}", cpu_id);
-        delay_us(200);
+        delay_us(1);
 
         // AP'nin online olmasını bekle
         if wait_for_online(cpu_id) {
@@ -633,6 +706,18 @@ pub unsafe fn startup_ap(apic_id: u32, cpu_id: u32) -> bool {
                 attempt + 1
             );
             return true;
+        }
+
+        // Some firmware/QEMU combinations expose x2APIC to the BSP but do
+        // not deliver a SIPI through the x2APIC ICR.  The LAPIC MMIO window
+        // is mapped by the adapter before SMP, so retry the architecturally
+        // equivalent INIT/SIPI sequence through xAPIC rather than silently
+        // accepting a missing CPU.
+        if X2APIC_MODE.swap(false, Ordering::AcqRel) {
+            crate::serial_println!(
+                "SMP: AP {} did not handshake via x2APIC; retrying through xAPIC",
+                cpu_id
+            );
         }
 
         crate::serial_println!(
@@ -1250,7 +1335,7 @@ pub fn balance_load() {
     let mut loads: [(u32, u32); 256] = [(0, 0); 256]; // (cpu_id, load)
     let mut load_count = 0;
 
-    #[cfg(not(feature = "simics"))]
+    #[cfg(feature = "simics")]
     crate::serial_println!("--- SMP CFS Load Balance Report ---");
     for cpu in state.per_cpu_data.iter() {
         if !cpu.online {
@@ -1271,7 +1356,7 @@ pub fn balance_load() {
         loads[load_count] = (cpu.cpu_id, load);
         load_count += 1;
 
-        #[cfg(not(feature = "simics"))]
+        #[cfg(feature = "simics")]
         crate::serial_println!(
             "CPU {}: Load {} tasks, Online: {}, Isolated: {}",
             cpu.cpu_id,
@@ -1287,7 +1372,7 @@ pub fn balance_load() {
     } else {
         0
     };
-    #[cfg(not(feature = "simics"))]
+    #[cfg(feature = "simics")]
     crate::serial_println!(
         "Total: {}, Avg: {}, Max: {} (CPU {}), Min: {} (CPU {})",
         total_load,
@@ -1696,25 +1781,7 @@ pub fn read_local_apic_id() -> u32 {
 }
 
 pub fn current_cpu_id() -> u32 {
-    #[cfg(any(test, target_os = "windows"))]
-    {
-        return 0;
-    }
-
-    // SMP init olmadan önce çağrılabilir, bu durumda BSP (CPU 0) döndür
-    let apic_id = unsafe { read_apic_reg(0x20) >> 24 };
-
-    // SMP_STATE lock almayı dene, başarısız olursa BSP döndür
-    let state = match SMP_STATE.try_lock() {
-        Some(s) => s,
-        None => return 0, // SMP init olmadı, BSP döndür
-    };
-
-    state
-        .cpu_apic_ids
-        .iter()
-        .position(|id| *id == apic_id)
-        .unwrap_or(0) as u32
+    crate::cpu::local::current_cpu_id()
 }
 
 pub fn current_dma_domain() -> u32 {

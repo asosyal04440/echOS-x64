@@ -8,11 +8,18 @@ param(
     [ValidateSet("fat16", "fat32")]
     [string]$EspFat = "fat16",
     [string[]]$IncludeFile = @(),
-    [switch]$NoAutoLogin
+    [switch]$NoAutoLogin,
+    [switch]$SkipBootstrap
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "bootstrap_windows.ps1")
+Set-Location -LiteralPath $projectRoot
+$bootstrap = Initialize-EchosWindowsEnvironment `
+    -ProjectRoot $projectRoot `
+    -NeedPython `
+    -SkipInstall:$SkipBootstrap
 
 if (-not $OutputPath) {
     $OutputPath = Join-Path $projectRoot "build\appliance\echOS-uefi.iso"
@@ -22,7 +29,7 @@ if (-not $EfiPath) {
     if (-not $NoBuild) {
         $cargoProfileArgs = if ($Profile -eq "fast") { @("--release") } else { @() }
         Write-Host "Building echOS UEFI artifact..." -ForegroundColor Yellow
-        & cargo build --target x86_64-unknown-uefi @cargoProfileArgs
+        & $bootstrap.CargoPath build --target x86_64-unknown-uefi @cargoProfileArgs
         if ($LASTEXITCODE -ne 0) {
             throw "UEFI build failed"
         }
@@ -50,7 +57,7 @@ foreach ($entry in $IncludeFile) {
     $args += @("--include-file", $entry)
 }
 
-& python @args
+& $bootstrap.PythonPath @args
 if ($LASTEXITCODE -ne 0) {
     throw "UEFI ISO build failed"
 }

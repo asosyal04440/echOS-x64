@@ -43,10 +43,96 @@ use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::hash::{BuildHasherDefault, Hasher};
 use core::sync::atomic::{AtomicU32, Ordering};
+use hashbrown::HashMap;
 use hmac::{Hmac, Mac};
+use lazy_static::lazy_static;
 use sha2::Sha256;
 use spin::Mutex;
+
+// ============================================================================
+// 4-TUPLE HASH TABLE — O(1) TCP connection demux
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Tcp4Tuple {
+    src_ip: [u8; 4],
+    src_port: u16,
+    dst_ip: [u8; 4],
+    dst_port: u16,
+}
+
+#[derive(Default)]
+struct Tcp4Hasher(u64);
+
+impl Hasher for Tcp4Hasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut v = 0u64;
+            for (i, &b) in chunk.iter().enumerate() {
+                v |= (b as u64) << (i * 8);
+            }
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(v);
+        }
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+impl core::hash::Hash for Tcp4Tuple {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        u32::from_ne_bytes(self.src_ip).hash(state);
+        self.src_port.hash(state);
+        u32::from_ne_bytes(self.dst_ip).hash(state);
+        self.dst_port.hash(state);
+    }
+}
+
+type Tcp4Hash = HashMap<Tcp4Tuple, u32, BuildHasherDefault<Tcp4Hasher>>;
+
+impl Tcp4Tuple {
+    fn from_conn(conn: &TcpConnection) -> Option<Self> {
+        let src_ip = match conn.remote.ip {
+            IpAddr::V4(ip) => ip.0,
+            _ => return None,
+        };
+        let dst_ip = match conn.local.ip {
+            IpAddr::V4(ip) => ip.0,
+            _ => return None,
+        };
+        Some(Self { src_ip, src_port: conn.remote.port.0, dst_ip, dst_port: conn.local.port.0 })
+    }
+
+    fn from_packet(src_ip: [u8; 4], src_port: Port, dst_ip: [u8; 4], dst_port: Port) -> Self {
+        Self { src_ip, src_port: src_port.0, dst_ip, dst_port: dst_port.0 }
+    }
+}
+
+lazy_static! {
+    static ref TCP_4TUPLE_HASH: Mutex<Tcp4Hash> = Mutex::new(HashMap::with_hasher(BuildHasherDefault::default()));
+}
+
+fn tcp_hash_insert(conn: &TcpConnection) {
+    if conn.state == TcpState::Listen || conn.state == TcpState::Closed {
+        return;
+    }
+    if let Some(tuple) = Tcp4Tuple::from_conn(conn) {
+        TCP_4TUPLE_HASH.lock().insert(tuple, conn.id);
+    }
+}
+
+fn tcp_hash_remove(conn: &TcpConnection) {
+    if let Some(tuple) = Tcp4Tuple::from_conn(conn) {
+        TCP_4TUPLE_HASH.lock().remove(&tuple);
+    }
+}
+
+fn tcp_hash_lookup(src_ip: [u8; 4], src_port: Port, dst_ip: [u8; 4], dst_port: Port) -> Option<u32> {
+    let tuple = Tcp4Tuple::from_packet(src_ip, src_port, dst_ip, dst_port);
+    TCP_4TUPLE_HASH.lock().get(&tuple).copied()
+}
 
 // ============================================================================
 // TCP SEÇENEKLER (OPTIONS)
@@ -1759,6 +1845,9 @@ impl TcpConnection {
                             CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
                             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
                             CcAlgorithm::Dctcp => self.cc.dctcp.ssthresh,
+                            CcAlgorithm::Bic => self.cc.bic.ssthresh,
+                            CcAlgorithm::Westwood => self.cc.westwood.ssthresh,
+                            CcAlgorithm::Htcp => self.cc.htcp.ssthresh,
                         };
                         super::NET_COUNTERS.tcp.retrans_segs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if !self.tx_buffer.is_empty() {
@@ -1777,6 +1866,9 @@ impl TcpConnection {
                             CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
                             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
                             CcAlgorithm::Dctcp => self.cc.dctcp.ssthresh,
+                            CcAlgorithm::Bic => self.cc.bic.ssthresh,
+                            CcAlgorithm::Westwood => self.cc.westwood.ssthresh,
+                            CcAlgorithm::Htcp => self.cc.htcp.ssthresh,
                         };
                         self.snd_una = header.ack_num;
                         self.keepalive_last_ping = now;
@@ -1898,6 +1990,9 @@ impl TcpConnection {
                 CcAlgorithm::Cubic => self.cc.cubic.ssthresh,
                 CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.cc.bbr.target_cwnd(),
                 CcAlgorithm::Dctcp => self.cc.dctcp.ssthresh,
+                CcAlgorithm::Bic => self.cc.bic.ssthresh,
+                CcAlgorithm::Westwood => self.cc.westwood.ssthresh,
+                CcAlgorithm::Htcp => self.cc.htcp.ssthresh,
             };
 
             // Yeniden iletim sayacını artır
@@ -2710,6 +2805,384 @@ impl DctcpState {
 }
 
 // ============================================================================
+// BIC TIKANIKLIK KONTROLÜ (Binary Increase Congestion control)
+// ============================================================================
+// BIC, Linux 2.6.7'den 2.6.18'e kadar varsayılan algoritmaydı.
+// CUBIC'in öncüsüdür. Optimal pencere boyutunu binary search ile bulur.
+//
+// Temel fikir:
+//   - w_max: Son kayıp anındaki pencere
+//   - Kayıp sonrası: cwnd = w_max * (1 - beta), ssthresh = cwnd
+//   - Büyüme: w_max'e binary search yaklaşımı
+//     - max_probe: w_max + S_max (büyük adım)
+//     - min_probe: w_max - S_max (küçük adım)
+//     - cwnd w_max'a yaklaştıkça adım küçülür (binary search)
+//
+// Kaynak: Linux net/ipv4/tcp_bic.c
+//
+// Avantajları:
+//   - WAN'da Reno'dan daha iyi throughput
+//   - RTT-fairness (farklı RTT'li akışlar eşit pay alır)
+//
+// Dezavantajları:
+//   - CUBIC kadar agresif değil (bu yüzden CUBIC ile değiştirildi)
+//   - Binary search bazı durumlarda yavaş kalabilir
+
+/// BIC tıkanıklık kontrol durumu
+#[derive(Clone, Debug)]
+pub struct BicState {
+    /// Tıkanıklık penceresi (bayt)
+    pub cwnd: u32,
+    /// Yavaş başlangıç eşiği
+    pub ssthresh: u32,
+    /// Son kayıp anındaki pencere büyüklüğü
+    pub w_max: u32,
+    /// Minimum pencere (2 * MSS)
+    pub min_cwnd: u32,
+    /// Binary search üst sınırı (max_probe hedefi)
+    pub max_probe: u32,
+    /// Binary search alt sınırı (min_probe hedefi)
+    pub min_probe: u32,
+    /// Kayıp azaltma faktörü (beta = 0.8 → %20 azaltma)
+    pub beta: f64,
+    /// Maksimum tek adımda artış (S_max, bayt)
+    pub s_max: u32,
+    /// Minimum artış adımı
+    pub s_min: u32,
+}
+
+impl BicState {
+    pub const MSS: u32 = 1460;
+
+    pub fn new() -> Self {
+        BicState {
+            cwnd: Self::MSS * 10,
+            ssthresh: u32::MAX,
+            w_max: Self::MSS * 10,
+            min_cwnd: Self::MSS * 2,
+            max_probe: 0,
+            min_probe: 0,
+            beta: 0.8,
+            s_max: Self::MSS * 32,
+            s_min: Self::MSS,
+        }
+    }
+
+    /// ACK alındığında çağrılır
+    pub fn on_ack(&mut self, acked_bytes: u32, _rtt_ms: u32) {
+        if self.cwnd < self.ssthresh {
+            // Yavaş başlangıç: her ACK ile MSS kadar art
+            self.cwnd += acked_bytes;
+            if self.cwnd > self.ssthresh {
+                self.cwnd = self.ssthresh;
+            }
+        } else {
+            // Tıkanıklık önleme: BIC binary search büyümesi
+            let diff = if self.w_max > self.cwnd {
+                self.w_max - self.cwnd
+            } else {
+                self.cwnd - self.w_max
+            };
+
+            if diff < self.s_max {
+                // w_max'a yakınız: additive increase (küçük adım)
+                self.cwnd += (Self::MSS * acked_bytes) / self.cwnd.max(Self::MSS);
+            } else if diff < self.s_max * 4 {
+                // Orta mesafe: orta büyüklükte adım
+                let step = diff / 2;
+                self.cwnd += (step.max(Self::MSS) * acked_bytes) / self.cwnd.max(Self::MSS);
+            } else {
+                // w_max'dan uzağız: büyük adım (max_probe)
+                self.cwnd += (self.s_max * acked_bytes) / self.cwnd.max(Self::MSS);
+            }
+        }
+
+        // Minimum pencere garantisi
+        if self.cwnd < self.min_cwnd {
+            self.cwnd = self.min_cwnd;
+        }
+    }
+
+    /// Kayıp algılandığında çağrılır
+    pub fn on_loss(&mut self) {
+        // w_max güncelle ve pencereyi azalt
+        self.w_max = self.cwnd;
+        self.ssthresh = ((self.cwnd as f64 * self.beta) as u32).max(self.min_cwnd);
+        self.cwnd = self.ssthresh;
+        self.max_probe = self.w_max + self.s_max;
+        self.min_probe = self.w_max - self.s_max;
+    }
+
+    /// Zaman aşımı
+    pub fn on_timeout(&mut self) {
+        self.w_max = self.cwnd;
+        self.ssthresh = ((self.cwnd as f64 * self.beta) as u32).max(self.min_cwnd);
+        self.cwnd = Self::MSS;
+    }
+}
+
+// ============================================================================
+// WESTWOOD+ TIKANIKLIK KONTROLÜ
+// ============================================================================
+// Westwood+, bant genişliği tahminine dayalı bir algoritmadır.
+// Reno ile aynı slow start ve congestion avoidance yapısını kullanır,
+// ancak kayıp anında bant genişliği tahminine göre ssthresh belirler.
+//
+// Temel fikir:
+//   - Her ACK'da bant genişliği tahmini güncellenir
+//   - BWE = bytes_acked / RTT_min (son round'un minimum RTT'si)
+//   - Kayıp anında: ssthresh = BWE * RTT_min / MSS
+//   - Bu, agresif yarılamadan (Reno) daha doğru bir ssthresh verir
+//
+// Kaynak: Linux net/ipv4/tcp_westwood.c
+//
+// Avantajları:
+//   - Kablosuz bağlantılarda Reno'dan çok daha iyi (random loss'ta gereksiz yarılamaz)
+//   - Yüksek BDP ağlarda daha stabil
+//
+// Dezavantajları:
+//   - Bant genişliği tahmini gürültülü olabilir (ACK compression, delayed ACK)
+//   - Minimum RTT ölçümü kalibrasyon gerektirir
+
+/// Westwood+ tıkanıklık kontrol durumu
+#[derive(Clone, Debug)]
+pub struct WestwoodState {
+    /// Tıkanıklık penceresi (bayt)
+    pub cwnd: u32,
+    /// Yavaş başlangıç eşiği
+    pub ssthresh: u32,
+    /// Tahmini bant genişliği (bayt/saniye)
+    pub bandwidth_est: u64,
+    /// Bu round'da ACK ile doğrulanan toplam bayt
+    pub acked_bytes_total: u32,
+    /// Son round süresi (ms)
+    pub rtt_min: u32,
+    /// Son BWE hesaplama zamanı
+    pub last_bwe_time_ms: u64,
+    /// Smoothed bandwidth estimate (exponential moving average)
+    pub smoothed_bwe: u64,
+}
+
+impl WestwoodState {
+    pub const MSS: u32 = 1460;
+    /// BWE smoothing faktörü (7/8 = 0.875)
+    const BWE_ALPHA: u32 = 8;
+
+    pub fn new() -> Self {
+        WestwoodState {
+            cwnd: Self::MSS * 10,
+            ssthresh: u32::MAX,
+            bandwidth_est: 0,
+            acked_bytes_total: 0,
+            rtt_min: u32::MAX,
+            last_bwe_time_ms: 0,
+            smoothed_bwe: 0,
+        }
+    }
+
+    /// Bant genişliği tahmini güncelle
+    fn update_bwe(&mut self, acked_bytes: u32, rtt_ms: u32, current_time_ms: u64) {
+        if rtt_ms > 0 && rtt_ms < self.rtt_min {
+            self.rtt_min = rtt_ms;
+        }
+
+        self.acked_bytes_total += acked_bytes;
+
+        // Her RTT_min süresinde bir BWE güncelle
+        let elapsed = current_time_ms.saturating_sub(self.last_bwe_time_ms);
+        if self.rtt_min != u32::MAX && elapsed >= self.rtt_min as u64 && self.rtt_min > 0 {
+            // BWE = bytes_acked_in_round / RTT_min (bayt/ms → bayt/s)
+            let bwe = (self.acked_bytes_total as u64 * 1000) / self.rtt_min as u64;
+
+            // Exponential moving average: smoothed = (7/8) * old + (1/8) * new
+            if self.smoothed_bwe == 0 {
+                self.smoothed_bwe = bwe;
+            } else {
+                self.smoothed_bwe = (self.smoothed_bwe * 7 + bwe) / 8;
+            }
+
+            self.bandwidth_est = self.smoothed_bwe;
+            self.acked_bytes_total = 0;
+            self.last_bwe_time_ms = current_time_ms;
+            // RTT min'i bir sonraki round için sıfırla
+            self.rtt_min = u32::MAX;
+        }
+    }
+
+    /// ACK alındığında çağrılır
+    pub fn on_ack(&mut self, acked_bytes: u32, rtt_ms: u32, current_time_ms: u64) {
+        self.update_bwe(acked_bytes, rtt_ms, current_time_ms);
+
+        if self.cwnd < self.ssthresh {
+            // Yavaş başlangıç
+            self.cwnd += acked_bytes;
+            if self.cwnd > self.ssthresh {
+                self.cwnd = self.ssthresh;
+            }
+        } else {
+            // Tıkanıklık önleme: standart additive increase
+            self.cwnd += (Self::MSS * acked_bytes) / self.cwnd.max(Self::MSS);
+        }
+
+        if self.cwnd < Self::MSS * 2 {
+            self.cwnd = Self::MSS * 2;
+        }
+    }
+
+    /// Westwood ssthresh hesaplama: BWE * RTT_min
+    fn compute_ssthresh(&self) -> u32 {
+        if self.bandwidth_est == 0 || self.rtt_min == u32::MAX {
+            // BWE yoksa Reno davranışı: yarıla
+            return (self.cwnd / 2).max(Self::MSS * 2);
+        }
+        // ssthresh = BWE (bayt/s) * RTT_min (s) = BWE * rtt_min_ms / 1000
+        let ssthresh = (self.bandwidth_est * self.rtt_min as u64) / 1000;
+        let min_ssthresh = Self::MSS as u64 * 2;
+        ssthresh.max(min_ssthresh) as u32
+    }
+
+    /// Kayıp algılandığında çağrılır
+    pub fn on_loss(&mut self) {
+        self.ssthresh = self.compute_ssthresh();
+        self.cwnd = self.ssthresh;
+    }
+
+    /// Zaman aşımı
+    pub fn on_timeout(&mut self) {
+        self.ssthresh = self.compute_ssthresh();
+        self.cwnd = Self::MSS;
+    }
+}
+
+// ============================================================================
+// HTCP TIKANIKLIK KONTROLÜ (H-TCP)
+// ============================================================================
+// H-TCP, adaptif artış faktörü kullanan bir algoritmadır.
+// Reno ile aynı temel yapıyı kullanır, ancak artış faktörü alpha
+// son tıkanıklık olayından bu yana geçen süreye bağlıdır.
+//
+// Temel fikir:
+//   - Kısa sürede tekrar tıkanıklık → alpha düşük (temkinli)
+//   - Uzun süre tıkanıklık yok → alpha yüksek (agresif, boş bant genişliğini kullan)
+//   - alpha(t) = (1 + 10*(delta(t) + delta(t)^4)) * (t / RTT)
+//     burada delta(t) = (t - L) / L, L = son tıkanıklık anı
+//
+// Kaynak: Linux net/ipv4/tcp_htcp.c
+//
+// Avantajları:
+//   - Boş bant genişliğini Reno'dan daha hızlı doldurur
+//   - Kısa sürede tekrarlayan kayıplarda Reno kadar temkinli
+//
+// Dezavantajları:
+//   - alpha fonksiyonu agresif olabilir (RTT-fairness sorunları)
+//   - CUBIC ve BBR kadar popüler değil
+
+/// H-TCP tıkanıklık kontrol durumu
+#[derive(Clone, Debug)]
+pub struct HtcpState {
+    /// Tıkanıklık penceresi (bayt)
+    pub cwnd: u32,
+    /// Yavaş başlangıç eşiği
+    pub ssthresh: u32,
+    /// Son tıkanıklık olayı zamanı (ms)
+    pub last_cong_time_ms: u64,
+    /// Mevcut artış faktörü (1.0 taban)
+    pub alpha: f64,
+    /// Son kayıp anındaki pencere
+    pub w_max: u32,
+    /// Kayıp azaltma faktörü (beta = 0.8)
+    pub beta: f64,
+    /// Minimum RTT (ms)
+    pub min_rtt: u32,
+    /// Son round RTT (ms)
+    pub rtt: u32,
+}
+
+impl HtcpState {
+    pub const MSS: u32 = 1460;
+
+    pub fn new() -> Self {
+        HtcpState {
+            cwnd: Self::MSS * 10,
+            ssthresh: u32::MAX,
+            last_cong_time_ms: 0,
+            alpha: 1.0,
+            w_max: Self::MSS * 10,
+            beta: 0.8,
+            min_rtt: u32::MAX,
+            rtt: 100,
+        }
+    }
+
+    /// H-TCP alpha hesaplama
+    ///
+    /// alpha(t) = max(1, 1 + 10*(delta + delta^4)) * (t / RTT)
+    /// burada delta = (elapsed_since_cong - min_rtt) / min_rtt
+    fn compute_alpha(&self, current_time_ms: u64) -> f64 {
+        let elapsed = current_time_ms.saturating_sub(self.last_cong_time_ms) as f64;
+        if elapsed < 1.0 || self.min_rtt == u32::MAX || self.min_rtt == 0 {
+            return 1.0;
+        }
+
+        let min_rtt_f = self.min_rtt as f64;
+        let delta = if elapsed > min_rtt_f {
+            (elapsed - min_rtt_f) / min_rtt_f
+        } else {
+            0.0
+        };
+
+        // alpha = max(1, 1 + 10*(delta + delta^4))
+        let raw_alpha = 1.0 + 10.0 * (delta + delta * delta * delta * delta);
+        raw_alpha.max(1.0)
+    }
+
+    /// ACK alındığında çağrılır
+    pub fn on_ack(&mut self, acked_bytes: u32, rtt_ms: u32, current_time_ms: u64) {
+        if rtt_ms > 0 && rtt_ms < self.min_rtt {
+            self.min_rtt = rtt_ms;
+        }
+        if rtt_ms > 0 {
+            self.rtt = rtt_ms;
+        }
+
+        self.alpha = self.compute_alpha(current_time_ms);
+
+        if self.cwnd < self.ssthresh {
+            // Yavaş başlangıç
+            self.cwnd += acked_bytes;
+            if self.cwnd > self.ssthresh {
+                self.cwnd = self.ssthresh;
+            }
+        } else {
+            // Tıkanıklık önleme: alpha ile artırılmış artış
+            let increase = ((self.alpha * Self::MSS as f64 * acked_bytes as f64)
+                / self.cwnd.max(Self::MSS) as f64) as u32;
+            self.cwnd += increase.max(1);
+        }
+
+        if self.cwnd < Self::MSS * 2 {
+            self.cwnd = Self::MSS * 2;
+        }
+    }
+
+    /// Kayıp algılandığında çağrılır
+    pub fn on_loss(&mut self, current_time_ms: u64) {
+        self.w_max = self.cwnd;
+        self.ssthresh = ((self.cwnd as f64 * self.beta) as u32).max(Self::MSS * 2);
+        self.cwnd = self.ssthresh;
+        self.last_cong_time_ms = current_time_ms;
+    }
+
+    /// Zaman aşımı
+    pub fn on_timeout(&mut self, current_time_ms: u64) {
+        self.w_max = self.cwnd;
+        self.ssthresh = ((self.cwnd as f64 * self.beta) as u32).max(Self::MSS * 2);
+        self.cwnd = Self::MSS;
+        self.last_cong_time_ms = current_time_ms;
+    }
+}
+
+// ============================================================================
 // TIKANIKLIK KONTROL ALGORITMASI SECIMI
 // ============================================================================
 // Linux cekirdeginde farkli algoritmalar mevcuttur:
@@ -2717,6 +3190,9 @@ impl DctcpState {
 // - CUBIC: Linux 2.6.19'dan varsayilan. Yuksek-BDP aglarda daha iyi.
 // - BBR: Google'in 2016 algoritmasi. Model tabanli, daha verimli.
 // - DCTCP: Veri merkezleri icin ECN tabanli (RFC 8257).
+// - BIC: CUBIC'in öncüsü, binary search büyüme (Linux 2.6.7-2.6.18).
+// - Westwood+: Bant genişliği tahminli, kablosuz için iyi.
+// - H-TCP: Adaptif artış faktörlü, uzun idle sonrası agresif.
 
 /// Tikandiklik kontrol algoritmasi secimi
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -2727,6 +3203,9 @@ pub enum CcAlgorithm {
     Bbr,
     Bbrv3,
     Dctcp,
+    Bic,
+    Westwood,
+    Htcp,
 }
 
 /// Tikandiklik kontrol durumu - secilen algoritmayi yonetir
@@ -2737,6 +3216,9 @@ pub struct CcState {
     pub cubic: CubicState,
     pub bbr: BbrState,
     pub dctcp: DctcpState,
+    pub bic: BicState,
+    pub westwood: WestwoodState,
+    pub htcp: HtcpState,
 }
 
 /// Reno tıkanıklık kontrolü - temel TCP algoritması.
@@ -2774,6 +3256,9 @@ impl CcState {
             cubic: CubicState::new(),
             bbr,
             dctcp: DctcpState::new(),
+            bic: BicState::new(),
+            westwood: WestwoodState::new(),
+            htcp: HtcpState::new(),
         }
     }
 
@@ -2783,6 +3268,9 @@ impl CcState {
             CcAlgorithm::Cubic => self.cubic.cwnd,
             CcAlgorithm::Bbr | CcAlgorithm::Bbrv3 => self.bbr.cwnd(),
             CcAlgorithm::Dctcp => self.dctcp.cwnd,
+            CcAlgorithm::Bic => self.bic.cwnd,
+            CcAlgorithm::Westwood => self.westwood.cwnd,
+            CcAlgorithm::Htcp => self.htcp.cwnd,
         }
     }
 
@@ -2805,6 +3293,15 @@ impl CcState {
             CcAlgorithm::Dctcp => {
                 self.dctcp.on_ack(acked_bytes, 0, rtt_ms, current_time_ms);
             }
+            CcAlgorithm::Bic => {
+                self.bic.on_ack(acked_bytes, rtt_ms);
+            }
+            CcAlgorithm::Westwood => {
+                self.westwood.on_ack(acked_bytes, rtt_ms, current_time_ms);
+            }
+            CcAlgorithm::Htcp => {
+                self.htcp.on_ack(acked_bytes, rtt_ms, current_time_ms);
+            }
         }
     }
 
@@ -2823,6 +3320,15 @@ impl CcState {
             CcAlgorithm::Dctcp => {
                 self.dctcp.on_loss();
             }
+            CcAlgorithm::Bic => {
+                self.bic.on_loss();
+            }
+            CcAlgorithm::Westwood => {
+                self.westwood.on_loss();
+            }
+            CcAlgorithm::Htcp => {
+                self.htcp.on_loss(current_time_ms);
+            }
         }
     }
 
@@ -2840,6 +3346,15 @@ impl CcState {
             }
             CcAlgorithm::Dctcp => {
                 self.dctcp.on_timeout();
+            }
+            CcAlgorithm::Bic => {
+                self.bic.on_timeout();
+            }
+            CcAlgorithm::Westwood => {
+                self.westwood.on_timeout();
+            }
+            CcAlgorithm::Htcp => {
+                self.htcp.on_timeout(current_time_ms);
             }
         }
     }
@@ -2885,7 +3400,9 @@ pub fn bind(socket_id: u32, addr: SocketAddr) -> Result<(), NetError> {
 pub fn connect(socket_id: u32, remote: SocketAddr) -> Result<(), NetError> {
     let mut conns = TCP_CONNECTIONS.lock();
     let conn = conns.get_mut(&socket_id).ok_or(NetError::ProtocolError)?;
-    conn.connect(remote)
+    conn.connect(remote)?;
+    tcp_hash_insert(conn);
+    Ok(())
 }
 
 /// TCP soketini dinleme moduna al ve port kaydını yap
@@ -3117,21 +3634,13 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
     let tcp_header = TcpHeader::parse(ip_packet.payload)?;
     let data = &ip_packet.payload[tcp_header.header_len()..];
 
-    // Bağlantı ara
-    let conns = TCP_CONNECTIONS.lock();
-
-    // Kurulu bağlantı ara (hem yerel hem uzak port eşleşmeli)
-    let mut found_id = None;
-    for (_, conn) in conns.iter() {
-        if conn.family == AddressFamily::IPV4
-            && conn.local.port == tcp_header.dst_port
-            && conn.remote.port == tcp_header.src_port
-        {
-            found_id = Some(conn.id);
-            break;
-        }
-    }
-    drop(conns);
+    // Kurulu bağlantı ara (O(1) 4-tuple hash)
+    let found_id = tcp_hash_lookup(
+        ip_packet.header.src.0,
+        tcp_header.src_port,
+        ip_packet.header.dst.0,
+        tcp_header.dst_port,
+    );
 
     if let Some(id) = found_id {
         let mut conns = TCP_CONNECTIONS.lock();
@@ -3199,7 +3708,10 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
                 let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
                 let child_id = child.id;
 
-                TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                let mut conns = TCP_CONNECTIONS.lock();
+                conns.insert(child_id, Box::new(child));
+                tcp_hash_insert(conns.get(&child_id).unwrap());
+                drop(conns);
                 ACCEPT_QUEUE
                     .lock()
                     .entry(listener_id)
@@ -3242,7 +3754,10 @@ pub fn process_packet(ip_packet: &Ipv4Packet) -> Result<(), NetError> {
                     child.snd_nxt = cookie;
                     child.window_size = tcp_header.window_size;
                     let child_id = child.id;
-                    TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                    let mut conns = TCP_CONNECTIONS.lock();
+                    conns.insert(child_id, Box::new(child));
+                    tcp_hash_insert(conns.get(&child_id).unwrap());
+                    drop(conns);
                     ACCEPT_QUEUE
                         .lock()
                         .entry(listener_id)
@@ -3336,7 +3851,10 @@ pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
                     child.mss = peer_mss;
                     let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
                     let child_id = child.id;
-                    TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                    let mut conns = TCP_CONNECTIONS.lock();
+                    conns.insert(child_id, Box::new(child));
+                    tcp_hash_insert(conns.get(&child_id).unwrap());
+                    drop(conns);
                     ACCEPT_QUEUE
                         .lock()
                         .entry(listener_id)
@@ -3364,7 +3882,10 @@ pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
                 let _ = child.send_packet(TcpFlags::syn_ack(), &[]);
                 let child_id = child.id;
 
-                TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                let mut conns = TCP_CONNECTIONS.lock();
+                conns.insert(child_id, Box::new(child));
+                tcp_hash_insert(conns.get(&child_id).unwrap());
+                drop(conns);
                 ACCEPT_QUEUE
                     .lock()
                     .entry(listener_id)
@@ -3400,7 +3921,10 @@ pub fn process_ipv6_packet(ip_packet: &Ipv6Packet) -> Result<(), NetError> {
                     child.state = TcpState::Established;
                     child.window_size = tcp_header.window_size;
                     let child_id = child.id;
-                    TCP_CONNECTIONS.lock().insert(child_id, Box::new(child));
+                    let mut conns = TCP_CONNECTIONS.lock();
+                    conns.insert(child_id, Box::new(child));
+                    tcp_hash_insert(conns.get(&child_id).unwrap());
+                    drop(conns);
                     ACCEPT_QUEUE
                         .lock()
                         .entry(listener_id)
@@ -3469,6 +3993,9 @@ pub fn time_wait_gc() {
 
     for id in &expired_ids {
         crate::serial_println!("[TCP] TIME_WAIT expired, removing connection {}", id);
+        if let Some(conn) = conns.get(id) {
+            tcp_hash_remove(conn);
+        }
         conns.remove(id);
     }
 }
@@ -3509,6 +4036,9 @@ pub fn tcp_timer_tick() {
     }
 
     for id in closed_ids {
+        if let Some(conn) = conns.get(&id) {
+            tcp_hash_remove(conn);
+        }
         conns.remove(&id);
     }
 }
@@ -4464,5 +4994,146 @@ mod tests {
         // The key: cwnd = target_cwnd() still; inflight_hi is the independent safety cap
         assert_eq!(cwnd_after, bbr.target_cwnd(),
             "BBRv3 cwnd should always equal target_cwnd() (model-based)");
+    }
+
+    // ========================================================================
+    // BIC Congestion Control Tests
+    // ========================================================================
+
+    #[test]
+    fn bic_slow_start_increases_cwnd_by_acked_bytes() {
+        let mut bic = BicState::new();
+        bic.ssthresh = 1460 * 100;
+        let initial = bic.cwnd;
+        bic.on_ack(1460, 50);
+        assert!(bic.cwnd > initial, "BIC slow start should increase cwnd");
+    }
+
+    #[test]
+    fn bic_loss_reduces_cwnd_by_beta() {
+        let mut bic = BicState::new();
+        bic.cwnd = 1460 * 100;
+        bic.w_max = 1460 * 100;
+        bic.ssthresh = u32::MAX;
+        bic.on_loss();
+        let expected = (146000.0 * 0.8) as u32;
+        assert_eq!(bic.cwnd, expected.max(bic.min_cwnd),
+            "BIC loss should reduce cwnd by beta (0.8)");
+    }
+
+    #[test]
+    fn bic_timeout_resets_to_mss() {
+        let mut bic = BicState::new();
+        bic.cwnd = 1460 * 100;
+        bic.on_timeout();
+        assert_eq!(bic.cwnd, BicState::MSS,
+            "BIC timeout should reset cwnd to 1 MSS");
+    }
+
+    // ========================================================================
+    // Westwood+ Congestion Control Tests
+    // ========================================================================
+
+    #[test]
+    fn westwood_slow_start_increases_cwnd() {
+        let mut ww = WestwoodState::new();
+        ww.ssthresh = 1460 * 200;
+        let initial = ww.cwnd;
+        ww.on_ack(1460, 50, 1000);
+        assert!(ww.cwnd > initial, "Westwood slow start should increase cwnd");
+    }
+
+    #[test]
+    fn westwood_loss_uses_bwe_for_ssthresh() {
+        let mut ww = WestwoodState::new();
+        ww.cwnd = 1460 * 100;
+        ww.smoothed_bwe = 1_000_000; // 1 MB/s
+        ww.bandwidth_est = 1_000_000;
+        ww.rtt_min = 50; // 50ms
+        ww.on_loss();
+        // ssthresh = BWE * RTT_min / 1000 = 1_000_000 * 50 / 1000 = 50_000
+        assert_eq!(ww.ssthresh, 50_000,
+            "Westwood loss should use BWE*RTT for ssthresh");
+    }
+
+    #[test]
+    fn westwood_timeout_resets_to_mss() {
+        let mut ww = WestwoodState::new();
+        ww.cwnd = 1460 * 100;
+        ww.on_timeout();
+        assert_eq!(ww.cwnd, WestwoodState::MSS,
+            "Westwood timeout should reset cwnd to 1 MSS");
+    }
+
+    // ========================================================================
+    // H-TCP Congestion Control Tests
+    // ========================================================================
+
+    #[test]
+    fn htcp_slow_start_increases_cwnd() {
+        let mut ht = HtcpState::new();
+        ht.ssthresh = 1460 * 200;
+        let initial = ht.cwnd;
+        ht.on_ack(1460, 50, 1000);
+        assert!(ht.cwnd > initial, "HTCP slow start should increase cwnd");
+    }
+
+    #[test]
+    fn htcp_loss_reduces_cwnd_by_beta() {
+        let mut ht = HtcpState::new();
+        ht.cwnd = 1460 * 100;
+        ht.ssthresh = u32::MAX;
+        ht.on_loss(5000);
+        let expected = (146000.0 * 0.8) as u32;
+        assert_eq!(ht.cwnd, expected.max(HtcpState::MSS * 2),
+            "HTCP loss should reduce cwnd by beta (0.8)");
+    }
+
+    #[test]
+    fn htcp_alpha_increases_with_time_since_congestion() {
+        let mut ht = HtcpState::new();
+        ht.last_cong_time_ms = 0;
+        ht.min_rtt = 50;
+        // After long idle period (10 seconds), alpha should be > 1.0
+        let alpha = ht.compute_alpha(10_000);
+        assert!(alpha > 1.0,
+            "HTCP alpha should be > 1.0 after long idle period, got {}", alpha);
+    }
+
+    #[test]
+    fn htcp_timeout_resets_to_mss() {
+        let mut ht = HtcpState::new();
+        ht.cwnd = 1460 * 100;
+        ht.on_timeout(5000);
+        assert_eq!(ht.cwnd, HtcpState::MSS,
+            "HTCP timeout should reset cwnd to 1 MSS");
+    }
+
+    // ========================================================================
+    // CcState Integration Tests
+    // ========================================================================
+
+    #[test]
+    fn cc_state_dispatches_to_bic() {
+        let mut cc = CcState::new(CcAlgorithm::Bic);
+        assert_eq!(cc.cwnd(), BicState::MSS * 10);
+        cc.on_ack(1460, 1000, 50);
+        assert!(cc.cwnd() > BicState::MSS * 10, "BIC via CcState should increase cwnd");
+    }
+
+    #[test]
+    fn cc_state_dispatches_to_westwood() {
+        let mut cc = CcState::new(CcAlgorithm::Westwood);
+        assert_eq!(cc.cwnd(), WestwoodState::MSS * 10);
+        cc.on_ack(1460, 1000, 50);
+        assert!(cc.cwnd() > WestwoodState::MSS * 10, "Westwood via CcState should increase cwnd");
+    }
+
+    #[test]
+    fn cc_state_dispatches_to_htcp() {
+        let mut cc = CcState::new(CcAlgorithm::Htcp);
+        assert_eq!(cc.cwnd(), HtcpState::MSS * 10);
+        cc.on_ack(1460, 1000, 50);
+        assert!(cc.cwnd() > HtcpState::MSS * 10, "HTCP via CcState should increase cwnd");
     }
 }

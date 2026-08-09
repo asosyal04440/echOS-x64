@@ -165,6 +165,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cils-diff-test"
+version = "0.1.0"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "const-default"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -206,6 +213,7 @@ dependencies = [
  "self_cell",
  "skrifa 0.40.0",
  "smol_str",
+ "swash",
  "unicode-bidi",
  "unicode-linebreak",
  "unicode-script",
@@ -330,7 +338,13 @@ dependencies = [
  "cc",
  "core_io",
  "cosmic-text",
+ "echos-compression",
+ "echos-crypto",
+ "echos-doom",
+ "echos-gpu3d",
  "echos-manifest",
+ "echos-ml",
+ "echos-random",
  "echos-sdk-sys",
  "ed448-goldilocks-plus",
  "embedded-graphics",
@@ -366,13 +380,55 @@ dependencies = [
  "tinybmp",
  "typenum",
  "uefi",
+ "valkyrie_v",
  "virtio-drivers",
  "widestring",
  "x86_64",
 ]
 
 [[package]]
+name = "echos-compression"
+version = "0.1.0"
+
+[[package]]
+name = "echos-crypto"
+version = "0.1.0"
+dependencies = [
+ "rand_core",
+ "rsa",
+ "sha1",
+ "sha2",
+ "spin",
+]
+
+[[package]]
+name = "echos-doom"
+version = "0.1.0"
+dependencies = [
+ "spin",
+]
+
+[[package]]
+name = "echos-gpu3d"
+version = "0.1.0"
+dependencies = [
+ "lazy_static",
+ "spin",
+]
+
+[[package]]
 name = "echos-manifest"
+version = "0.1.0"
+
+[[package]]
+name = "echos-ml"
+version = "0.1.0"
+dependencies = [
+ "spin",
+]
+
+[[package]]
+name = "echos-random"
 version = "0.1.0"
 
 [[package]]
@@ -475,6 +531,12 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+
+[[package]]
+name = "fastrand"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "ff"
@@ -1762,6 +1824,16 @@ name = "unicode-width"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
+
+[[package]]
+name = "valkyrie_v"
+version = "0.1.0"
+dependencies = [
+ "ironshim-rs",
+ "libc",
+ "libm",
+ "winapi",
+]
 
 [[package]]
 name = "valuable"

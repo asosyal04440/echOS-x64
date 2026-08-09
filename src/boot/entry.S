@@ -17,6 +17,11 @@ mb2_hdr_end:
 .global _start
 _start:
     cli                         # Mask interrupts while switching CPU modes
+    mov ecx, cr0                # Mode-agnostic probe (0F 20 C1: decodes identically in
+                                # 32-bit protected mode and 64-bit long mode)
+    test ecx, 0x80000000        # Test PG (paging) bit; Limine enters with paging enabled,
+                                # Multiboot2 (GRUB) enters with paging disabled
+    jnz .limine_entry64         # Paging on -> 64-bit Limine handoff (image slid to higher half)
     cmp eax, 0x36d76289         # Multiboot2 magic check (EAX must match)
     je .mb_ok
     mov dword ptr [mb2_info_addr], 0
@@ -180,6 +185,115 @@ _start:
 .halt:
     hlt                          # Stop execution on invalid boot
     jmp .halt                    # Keep CPU halted
+
+.code64
+/*
+ * Limine 64-bit entry path.
+ *
+ * Limine (base revision >= 1) slides a lower-half-linked executable into the
+ * higher half (>= 0xffffffff80000000) and maps the whole image (every PT_LOAD,
+ * including the NOLOAD .boot.bss zero-fill) at the slid addresses; no low
+ * identity map is provided. Every memory reference in this path must therefore
+ * be RIP-relative -- absolute link-time addresses would fault.
+ *
+ * The kernel image itself is verified to be fully RIP-relative (no absolute
+ * pointers in code or data), so no runtime patching is required under the
+ * slide. The slide value is still computed below and passed to kernel_entry
+ * as the KASLR offset: the kernel's virtual memory model is
+ * KERNEL_SPACE_START + kaslr_offset, and the physical kernel region guard
+ * (frame allocator) is driven by the Executable Address feature's physical
+ * base, so the slide must reach the allocator, not be silently zero.
+ *
+ * Entry state (Limine protocol spec, x86-64): CS=0x28, DS/ES/SS/FS/GS=0x30
+ * (flat 64-bit), IF=0, DF=0, paging enabled (PG/PAE/LME/LMA/NX), RSP points to
+ * the top of a bootloader-provided stack, all GP registers are zeroed. Base
+ * revision 4 does not guarantee the base-revision-5 cleanups (RFLAGS, IDTR,
+ * LDTR, TR state undefined), so this bootstrap path loads its own GDT/TSS/IDT.
+ */
+.limine_entry64:
+    mov dx, 0xE9
+    mov al, 0x4C                 # 'L' marker: Limine entry reached
+    out dx, al
+    lea rsp, [rip + stack_top]   # Switch to the kernel's own boot stack
+    xor rbp, rbp
+    cld
+    # Runtime GDT pointer: the static gdt64_ptr embeds the link-time base,
+    # which is invalid under the Limine higher-half slide, so rebuild it here.
+    lea rax, [rip + gdt64]
+    mov qword ptr [rip + gdt64_ptr_runtime + 2], rax
+    lgdt [rip + gdt64_ptr_runtime]
+    # Switch CS from Limine's selector (0x28, not valid in our GDT) to 0x08.
+    lea rax, [rip + .limine_cs_ok]
+    push 0x08
+    push rax
+    retfq
+.limine_cs_ok:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    # TSS: fill the descriptor in our GDT and load the task register.
+    lea rax, [rip + tss64]
+    mov word ptr [rip + gdt64 + 0x18], 0x0067
+    mov word ptr [rip + gdt64 + 0x1A], ax
+    shr rax, 16
+    mov byte ptr [rip + gdt64 + 0x1C], al
+    mov byte ptr [rip + gdt64 + 0x1D], 0x89
+    mov byte ptr [rip + gdt64 + 0x1E], 0
+    mov byte ptr [rip + gdt64 + 0x1F], ah
+    shr rax, 16
+    mov dword ptr [rip + gdt64 + 0x20], eax
+    mov dword ptr [rip + gdt64 + 0x24], 0
+    lea rax, [rip + stack_top]
+    mov qword ptr [rip + tss64 + 0x04], rax
+    lea rax, [rip + ist_stack_top]
+    mov qword ptr [rip + tss64 + 0x20], rax
+    mov word ptr [rip + tss64 + 0x5E], 0x0068
+    mov ax, 0x18
+    ltr ax
+    # Minimal IDT safety net (Rust's interrupts::init replaces it later).
+    lea rdi, [rip + idt64]
+    mov rcx, 256
+    lea rax, [rip + isr_default]
+.fill_idt_limine:
+    call set_gate
+    add rdi, 16
+    loop .fill_idt_limine
+    lea rax, [rip + isr_ud]
+    lea rdi, [rip + idt64 + 16*6]
+    call set_gate
+    lea rax, [rip + isr_df]
+    lea rdi, [rip + idt64 + 16*8]
+    mov cl, 1
+    call set_gate_ist
+    lea rax, [rip + isr_gp]
+    lea rdi, [rip + idt64 + 16*13]
+    call set_gate
+    lea rax, [rip + isr_pf]
+    lea rdi, [rip + idt64 + 16*14]
+    mov cl, 1
+    call set_gate_ist
+    lea rax, [rip + idt64]
+    mov qword ptr [rip + idt64_ptr_runtime + 2], rax
+    lidt [rip + idt64_ptr_runtime]
+    mov dx, 0xE9
+    mov al, 0x6C                 # 'l' marker: dispatching to kernel_entry
+    out dx, al
+    # KASLR slide hesabı: Limine görüntüyü tek bir offset ile higher-half'a
+    # kaydırır. Slide = runtime(kernel_start) - link-time(kernel_start);
+    # link-time sabiti .boot.data'daki sentinel'da tutulur (bootloader'a
+    # görünür .limine_reqs gibi ALLOC bölgelerinde). Sonuç kernel_entry'ye
+    # kaslr_offset olarak geçirilir (virtual model).
+    lea rax, [rip + kernel_start]
+    mov rbx, qword ptr [rip + link_base_sentinel]
+    sub rax, rbx                 # rax = slide
+    xor edi, edi                 # Arg1: boot_info_addr = 0 (Limine state via requests)
+    mov rsi, rax                 # Arg2: kaslr_offset = slide
+    xor edx, edx                 # Arg3: boot_magic = 0 (dispatch via limine_available())
+    lea rax, [rip + kernel_entry]
+    jmp rax
 
 .code64
 trampoline_64:
@@ -385,8 +499,17 @@ boot_magic:
     .quad 0
 kaslr_offset:
     .quad 0
+gdt64_ptr_runtime:
+    .word (gdt64_end - gdt64 - 1)
+    .quad 0
+.align 8
+idt64_ptr_runtime:
+    .word (idt64_end - idt64 - 1)
+    .quad 0
 kernel_main_ptr:
     .quad kernel_entry
+link_base_sentinel:
+    .quad kernel_start
 
 .section .boot.bss, "aw", @nobits
 .align 4096
@@ -438,7 +561,10 @@ tss64:
     .skip 104
 .align 16
 boot_stack:
-    .skip 16384
+    # BootContext carries the bounded pre-heap memory map (256 entries).  Keep
+    # enough headroom for the adapter handover, normalization, and stage-gate
+    # call chain before the final allocator is online.
+    .skip 4194304
 stack_top:
 .align 16
 ist_stack:

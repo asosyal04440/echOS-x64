@@ -17,6 +17,21 @@ pub struct Framebuffer {
     shadow_buffer: Option<SurfacePixelBuffer>,
 }
 
+impl core::fmt::Debug for Framebuffer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Framebuffer")
+            .field("base_addr", &self.base_addr)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("pixels_per_scan_line", &self.pixels_per_scan_line)
+            .field(
+                "shadow_buffer",
+                &self.shadow_buffer.as_ref().map(|_| "SurfacePixelBuffer"),
+            )
+            .finish()
+    }
+}
+
 impl Clone for Framebuffer {
     fn clone(&self) -> Self {
         let shadow_buffer = self.shadow_buffer.as_ref().map(|shadow| {
@@ -63,6 +78,59 @@ impl Clone for Framebuffer {
 }
 
 impl Framebuffer {
+    /// Constructs a framebuffer wrapper from a boot-protocol framebuffer
+    /// response.
+    ///
+    /// The boot adapters pass a *mapped virtual* base address here.  Limine
+    /// and Multiboot2 describe the pitch in bytes while the renderer indexes
+    /// `u32` pixels, therefore the conversion is checked instead of silently
+    /// truncating an unsupported layout.  Only 32-bpp linear buffers are
+    /// accepted; the drawing API writes one `u32` per pixel and cannot safely
+    /// represent indexed, text, 15/16/24-bpp, or sub-32-bpp modes.
+    ///
+    /// # Safety
+    ///
+    /// `base_addr..base_addr + pitch_bytes * height` must be a mapped,
+    /// writable framebuffer range for the current address space.  The caller
+    /// owns the boot-protocol/MMIO mapping proof; this constructor only checks
+    /// arithmetic and the layout contract.
+    pub unsafe fn from_raw_parts(
+        base_addr: usize,
+        width: usize,
+        height: usize,
+        pitch_bytes: usize,
+        bpp: u16,
+    ) -> Option<Self> {
+        if base_addr == 0
+            || base_addr & (core::mem::align_of::<u32>() - 1) != 0
+            || width == 0
+            || height == 0
+            || bpp != 32
+            || pitch_bytes == 0
+            || pitch_bytes % core::mem::size_of::<u32>() != 0
+        {
+            return None;
+        }
+        let stride = pitch_bytes / core::mem::size_of::<u32>();
+        if stride < width
+            || stride.checked_mul(height).is_none()
+            || stride
+                .checked_mul(height)?
+                .checked_mul(core::mem::size_of::<u32>())
+                .is_none()
+        {
+            return None;
+        }
+
+        Some(Self {
+            base_addr,
+            width,
+            height,
+            pixels_per_scan_line: stride,
+            shadow_buffer: None,
+        })
+    }
+
     pub fn new(gop: &mut GraphicsOutput) -> Self {
         let mode_info = gop.current_mode_info();
         let (width, height) = mode_info.resolution();
@@ -317,5 +385,26 @@ impl Framebuffer {
                 shadow.len(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Framebuffer;
+
+    #[test]
+    fn raw_parts_accepts_valid_linear_32bpp_layout() {
+        let fb = unsafe { Framebuffer::from_raw_parts(0x1000, 640, 480, 640 * 4, 32) }
+            .expect("valid raw framebuffer");
+        assert_eq!(fb.width, 640);
+        assert_eq!(fb.height, 480);
+        assert_eq!(fb.pixels_per_scan_line, 640);
+    }
+
+    #[test]
+    fn raw_parts_rejects_non_u32_layouts_and_invalid_pitch() {
+        assert!(unsafe { Framebuffer::from_raw_parts(0x1000, 640, 480, 640 * 4, 24) }.is_none());
+        assert!(unsafe { Framebuffer::from_raw_parts(0x1000, 640, 480, 639 * 4, 32) }.is_none());
+        assert!(unsafe { Framebuffer::from_raw_parts(0, 640, 480, 640 * 4, 32) }.is_none());
     }
 }

@@ -53,6 +53,17 @@ use core::mem;
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use spin::Mutex;
 
+/// Adaptive poll: minimum spin iterations before yielding to IRQ sleep
+const POLL_BUDGET_MIN: u64 = 256;
+/// Adaptive poll: cap to prevent excessive spin on stalled commands
+const POLL_BUDGET_MAX: u64 = 65536;
+/// Budget = EWMA_latency * POLL_BUDGET_FACTOR
+const POLL_BUDGET_FACTOR: u64 = 3;
+/// EWMA alpha = 1/2^EWMA_SHIFT (4 = 1/16, smooth enough for tick-level noise)
+const EWMA_SHIFT: u8 = 4;
+/// Number of samples to collect as simple running average before switching to EWMA
+const EWMA_WARMUP: u64 = 16;
+
 // ============================================================================
 // NVMe SABÄ°TLERÄ° (CONSTANTS)
 // ============================================================================
@@ -729,14 +740,20 @@ pub struct NvmeController {
     pub capabilities: NvmeCapabilities,                   // Denetleyici yetenekleri
     pub identify: Option<NvmeIdentifyController>,         // Denetleyici tanÄ±mlama verisi
     pub namespaces: BTreeMap<u32, NvmeIdentifyNamespace>, // nsid -> namespace bilgisi
-    pub admin_queue: Option<NvmeQueue>,                   // Admin kuyruk ÃSection ifti
-    pub io_queues: Vec<NvmeQueue>, // I/O kuyruk ÃSection iftleri (her CPU iÃSection in)
+    pub admin_queue: Option<NvmeQueue>,                   // Admin kuyruk Ã§ifti
+    pub io_queues: Vec<NvmeQueue>, // I/O kuyruk Ã§iftleri (her CPU iÃ§in)
     pub next_cid: u16,             // Bir sonraki komut ID (1..=65535, dÃ¶ngÃ¼sel)
     pub ready: bool,               // Denetleyici kullanÄ±ma hazÄ±r mÄ±?
     /// MSI kesme vektÃ¶rÃ¼ (allocate_msi_vector() ile atanÄ±r)
     pub irq_vector: Option<u8>,
     /// Komut zaman aÅŸÄ±mÄ± (milisaniye; CAP.TO'dan hesaplanÄ±r)
     pub timeout_ms: u16,
+    /// Adaptive poll iteration budget before transitioning to IRQ sleep
+    pub poll_budget: u64,
+    /// EWMA-smoothed completion latency (in poll iterations, scaled by 4)
+    pub scaled_ewma: u64,
+    /// Number of completions observed (for initial running-average phase)
+    pub completion_count: u64,
 }
 
 impl NvmeController {
@@ -755,6 +772,9 @@ impl NvmeController {
             ready: false,
             irq_vector: None,
             timeout_ms: 5000, // VarsayÄ±lan 5 saniyelik zaman aÅŸÄ±mÄ±
+            poll_budget: POLL_BUDGET_MIN,
+            scaled_ewma: 0,
+            completion_count: 0,
         }
     }
 
@@ -1234,7 +1254,7 @@ impl NvmeController {
                 return Err(NvmeError::Timeout);
             }
 
-            // MSI modundaysa kesme worker'Ä±nÄ± uyandÄ±r
+            core::hint::spin_loop();
             if let Some(vector) = self.irq_vector {
                 crate::interrupts::kick_irq_worker();
             }
@@ -1255,7 +1275,9 @@ impl NvmeController {
         core::ptr::write_volatile(db_ptr, new_tail as u32);
         queue.sq_tail = new_tail;
 
+        let budget = self.poll_budget;
         let start = crate::task::scheduler::get_ticks();
+        let mut poll_iter = 0u64;
         loop {
             let cq_ptr = queue.cq_virt as *const NvmeCompletion;
             let cq_entry = &*cq_ptr.add(queue.cq_head as usize);
@@ -1273,6 +1295,8 @@ impl NvmeController {
                     queue.cq_phase = !queue.cq_phase;
                 }
 
+                self.update_completion_stats(poll_iter);
+
                 return Ok(completion);
             }
 
@@ -1282,10 +1306,37 @@ impl NvmeController {
                 return Err(NvmeError::Timeout);
             }
 
-            if let Some(vector) = self.irq_vector {
-                crate::interrupts::kick_irq_worker();
+            poll_iter += 1;
+            if poll_iter < budget {
+                // Phase 1: fast spin with pause hint (PAUSE)
+                core::hint::spin_loop();
+            } else {
+                // Phase 2: budget exhausted, yield CPU so other tasks run
+                // Paper shows polling is cheap (~80ns), IRQ is the real bottleneck
+                // at high IOPS (~10M limit). For the sync path the win is
+                // relinquishing the CPU, not waiting for IRQ.
+                crate::task::scheduler::sleep(1);
             }
         }
+    }
+
+    /// Update EWMA of completion latency and adaptive poll budget.
+    /// Capped at current budget to prevent positive feedback when Phase 2 (sleep) is entered.
+    fn update_completion_stats(&mut self, poll_iters: u64) {
+        let n = self.completion_count + 1;
+        let sample = poll_iters.min(self.poll_budget);
+        const SHIFT: u64 = 1 << EWMA_SHIFT;
+        if n <= EWMA_WARMUP {
+            self.scaled_ewma = (self.scaled_ewma * (n - 1) + sample * SHIFT) / n;
+        } else {
+            let delta = (sample * SHIFT).saturating_sub(self.scaled_ewma);
+            self.scaled_ewma = self.scaled_ewma.saturating_add(delta >> EWMA_SHIFT);
+        }
+        self.completion_count = n;
+
+        let real_ewma = (self.scaled_ewma >> EWMA_SHIFT).max(1);
+        self.poll_budget = (real_ewma * POLL_BUDGET_FACTOR)
+            .clamp(POLL_BUDGET_MIN, POLL_BUDGET_MAX);
     }
 
     /// Denetleyiciyi donanÄ±msal olarak sÄ±fÄ±rlar (NVM Subsystem Reset veya CC.EN=0)

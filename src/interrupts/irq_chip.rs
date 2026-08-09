@@ -204,8 +204,8 @@ impl IrqChip for IoApicChip {
         true
     }
 
-    fn irq_set_affinity(&self, irq: u32, apic_id: u8) -> bool {
-        crate::apic::ioapic::set_irq_affinity(irq as u8, apic_id);
+    fn irq_set_affinity(&self, _irq: u32, _apic_id: u8) -> bool {
+        crate::apic::ioapic::set_irq_affinity_rr(_irq as u8);
         true
     }
 }
@@ -251,6 +251,35 @@ impl IrqChip for MsiChip {
 
     fn irq_eoi(&self, _irq: u32) {
         crate::apic::lapic::eoi();
+    }
+
+    fn irq_set_affinity(&self, irq: u32, apic_id: u8) -> bool {
+        let vector = irq as u8;
+        if vector < crate::interrupts::MSI_VECTOR_START {
+            return false;
+        }
+        let (bus, device, function, is_msix, table_index) =
+            match crate::interrupts::msi_lookup_device(vector) {
+                Some(v) => v,
+                None => return false,
+            };
+        let target = if apic_id == 0xFF {
+            crate::apic::ioapic::next_round_robin_apic_id() as u32
+        } else {
+            apic_id as u32
+        };
+        if is_msix {
+            crate::drivers::pci::set_msix_affinity(
+                bus,
+                device,
+                function,
+                table_index,
+                vector,
+                target,
+            )
+        } else {
+            crate::drivers::pci::set_msi_affinity(bus, device, function, vector, target)
+        }
     }
 }
 

@@ -12,7 +12,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::structures::paging::PhysFrame;
 
 /// CLONE flags — Linux: include/uapi/linux/sched.h
@@ -322,7 +322,7 @@ pub struct TaskColdData {
     pub name: &'static str,
     pub mode: ExecutionMode,
     pub page_table: Option<PhysFrame>,
-    pub address_space: Option<Arc<Mutex<AddressSpace>>>,
+    pub address_space: Option<Arc<RwLock<AddressSpace>>>,
     pub user_entry: Option<u64>,
     pub user_stack_top: Option<u64>,
     pub exit_code: Option<i32>,
@@ -562,7 +562,7 @@ impl Task {
     pub fn init_fd_table(&mut self) {
         if self.cold.fd_table.is_none() {
             use alloc::sync::Arc;
-            use spin::Mutex;
+use spin::{Mutex, RwLock};
             self.cold.fd_table = Some(Arc::new(Mutex::new(crate::fs::FileDescriptorTable::new())));
         }
     }

@@ -18,11 +18,46 @@ $ErrorActionPreference = "Stop"
 
 function Require-Tool {
     param([string]$Name)
-    $tool = Get-Command $Name -ErrorAction SilentlyContinue
-    if (-not $tool) {
-        throw "Required tool '$Name' not found in PATH."
+    $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
+    if ($wsl) {
+        $wslTool = & $wsl.Source -e sh -lc "command -v $Name" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $wslTool) {
+            return [pscustomobject]@{
+                FilePath = $wsl.Source
+                Prefix = @("-e", $Name)
+                Wsl = $true
+            }
+        }
     }
-    $tool.Source
+    $tool = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($tool) {
+        return [pscustomobject]@{
+            FilePath = $tool.Source
+            Prefix = @()
+            Wsl = $false
+        }
+    }
+    throw "Required tool '$Name' not found in native PATH or WSL."
+}
+
+function Invoke-CheckedTool {
+    param($Tool, [string[]]$Arguments)
+    $toolArgs = @()
+    foreach ($argument in $Arguments) {
+        if ($Tool.Wsl -and $argument -match '^[A-Za-z]:\\') {
+            $converted = & wsl.exe -e wslpath -a -u -- $argument 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "WSL path conversion failed: $argument"
+            }
+            $toolArgs += ($converted | Select-Object -Last 1).ToString().Trim()
+        } else {
+            $toolArgs += $argument
+        }
+    }
+    & $Tool.FilePath @($Tool.Prefix + $toolArgs)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed ($LASTEXITCODE): $($Tool.FilePath) $($Arguments -join ' ')"
+    }
 }
 
 function Require-Path {
@@ -48,25 +83,19 @@ $signedDir = Split-Path -Parent $SignedImage
 if ($signedDir -and -not (Test-Path -LiteralPath $signedDir)) {
     New-Item -ItemType Directory -Path $signedDir -Force | Out-Null
 }
+$signedOutput = [System.IO.Path]::GetFullPath($SignedImage)
 
 $signArgs = @(
     "--key", $key,
     "--cert", $cert,
-    "--output", $SignedImage
+    "--output", $signedOutput
 )
 if ($intermediate) {
     $signArgs += @("--addcert", $intermediate)
 }
 $signArgs += $unsigned
 
-& $sbsign @signArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "sbsign failed with exit code $LASTEXITCODE"
-}
+Invoke-CheckedTool $sbsign $signArgs
+Invoke-CheckedTool $sbverify @("--cert", $cert, $signedOutput)
 
-& $sbverify "--cert" $cert $SignedImage
-if ($LASTEXITCODE -ne 0) {
-    throw "sbverify failed with exit code $LASTEXITCODE"
-}
-
-Write-Output "Secure Boot signed image created: $SignedImage"
+Write-Output "Secure Boot signed image created: $signedOutput"

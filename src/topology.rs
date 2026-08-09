@@ -307,7 +307,7 @@ impl SystemTopology {
     }
 
     /// Detect CPU topology using CPUID
-    pub fn detect_topology(&mut self) -> Result<(), TopologyError> {
+    pub fn detect_topology(&self) -> Result<(), TopologyError> {
         if !self.detection_enabled.load(Ordering::Acquire) {
             return Err(TopologyError::DetectionDisabled);
         }
@@ -340,7 +340,7 @@ impl SystemTopology {
     }
 
     /// Detect basic CPU information using CPUID
-    fn detect_basic_info(&mut self) -> Result<(), TopologyError> {
+    fn detect_basic_info(&self) -> Result<(), TopologyError> {
         // CPUID leaf 1: CPU signature ve features
         let cpuid1 = unsafe { core::arch::x86_64::__cpuid_count(1, 0) };
         let cpu_signature = cpuid1.eax;
@@ -381,7 +381,7 @@ impl SystemTopology {
     }
 
     /// Detect cache hierarchy
-    fn detect_cache_hierarchy(&mut self) -> Result<(), TopologyError> {
+    fn detect_cache_hierarchy(&self) -> Result<(), TopologyError> {
         // CPUID leaf 4 ile gerçek cache bilgilerini oku
         // Her subleaf bir cache seviyesini tanımlar; EAX[4:0] == 0 olduğunda biter
         let mut caches = Vec::new();
@@ -455,7 +455,7 @@ impl SystemTopology {
     }
 
     /// Detect SMT/hyperthreading information
-    fn detect_smt_info(&mut self) -> Result<(), TopologyError> {
+    fn detect_smt_info(&self) -> Result<(), TopologyError> {
         // CPUID leaf 0xB (Extended Topology Enumeration) ile gerçek SMT bilgisi
         // Subleaf 0 = SMT seviyesi, Subleaf 1 = Core seviyesi
         let max_leaf = unsafe { core::arch::x86_64::__cpuid(0) }.eax;
@@ -522,7 +522,7 @@ impl SystemTopology {
     }
 
     /// Detect package information
-    fn detect_package_info(&mut self) -> Result<(), TopologyError> {
+    fn detect_package_info(&self) -> Result<(), TopologyError> {
         // Count unique packages
         let mut packages = Vec::new();
 
@@ -559,7 +559,7 @@ impl SystemTopology {
     }
 
     /// Build cache sharing relationships
-    fn build_sharing_relationships(&mut self) -> Result<(), TopologyError> {
+    fn build_sharing_relationships(&self) -> Result<(), TopologyError> {
         // Build sharing masks for each cache level
         for cache_level in 1..=3 {
             self.build_cache_sharing_for_level(cache_level)?;
@@ -569,7 +569,7 @@ impl SystemTopology {
     }
 
     /// Build cache sharing for specific level
-    fn build_cache_sharing_for_level(&mut self, level: u8) -> Result<(), TopologyError> {
+    fn build_cache_sharing_for_level(&self, level: u8) -> Result<(), TopologyError> {
         for cpu_id in 0..self.max_cpus {
             let topology = match self.get_cpu_topology(cpu_id) {
                 Some(topology) => topology,
@@ -628,7 +628,7 @@ impl SystemTopology {
     }
 
     /// Update topology statistics
-    fn update_statistics(&mut self) {
+    fn update_statistics(&self) {
         let mut total_cores = 0;
         let mut total_threads = 0;
         let mut unique_cores = Vec::new();
@@ -655,7 +655,7 @@ impl SystemTopology {
     }
 
     /// Update topology version
-    fn update_version(&mut self) {
+    fn update_version(&self) {
         let current_time = crate::task::scheduler::get_ticks() as u64;
         self.last_update.store(current_time, Ordering::Release);
         self.update_count.fetch_add(1, Ordering::AcqRel);
@@ -885,11 +885,28 @@ pub fn get_system_topology() -> Option<&'static SystemTopology> {
 pub fn redetect_topology() -> Result<(), TopologyError> {
     let topology = get_system_topology().ok_or(TopologyError::DetectionDisabled)?;
 
-    // In a real implementation, this would need mutable access
-    // For now, we'll just log the request
-    crate::serial_println!("Topology: Redetection requested");
+    if !topology.detection_enabled.load(Ordering::Acquire) {
+        return Err(TopologyError::DetectionDisabled);
+    }
 
-    Err(TopologyError::NotImplemented)
+    crate::serial_println!("Topology: Re-detecting CPU topology for hotplug events...");
+
+    // Reset per-CPU entries with fresh instances (RcuPtr::update atomically swaps)
+    // Eski pointer'lar RCU grace period sonrası güvenle free edilecek
+    // Şu an async RCU reclamation yok → eski pointer'ları sızdır (hotplug nadir olay)
+    for cpu_id in 0..topology.max_cpus {
+        if let Some(rcu_ptr) = topology.get_cpu_topology(cpu_id) {
+            let fresh = Box::new(CpuTopology::new(cpu_id));
+            let _old_ptr = rcu_ptr.update(Box::into_raw(fresh));
+            // _old_ptr sızdırıldı — okuyucular hâlâ eski pointer'ı tutuyor olabilir
+        }
+    }
+
+    // Re-run full detection pipeline on fresh CpuTopology instances
+    topology.detect_topology()?;
+
+    crate::serial_println!("Topology: Re-detection completed successfully");
+    Ok(())
 }
 
 /// Convenience functions

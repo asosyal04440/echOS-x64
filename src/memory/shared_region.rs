@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use lazy_static::lazy_static;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::structures::paging::PageTableFlags;
 
 use super::{
@@ -96,7 +96,7 @@ pub fn map_ipc_region(pid: u64, region_id: SharedRegionId) -> Option<UserMapping
 pub fn map_ipc_region_into_space(
     pid: u64,
     region_id: SharedRegionId,
-    space: &Arc<Mutex<AddressSpace>>,
+    space: &Arc<RwLock<AddressSpace>>,
 ) -> Option<UserMapping> {
     let (len, writable, generation, backing_shared_id, existing_base) = {
         let regions = SHARED_REGIONS.lock();

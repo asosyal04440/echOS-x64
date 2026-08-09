@@ -1,397 +1,338 @@
 # echOS-x64
 
-**echOS-x64 is a Rust `no_std` x86-64 operating system kernel for UEFI, Multiboot2, Limine, SMP scheduling, memory management, filesystems, networking, and GUI/compositor research.**
+**A `no_std` x86-64 operating-system kernel research platform written in Rust.**
 
-[Türkçe README](README.tr.md) · [Technical report](echOS_teknik_rapor.pdf) · [Build and run](#building)
+echOS is built from the boot boundary upward: firmware handoff, CPU and interrupt
+state, memory, scheduling, drivers, storage, networking, and a native graphical
+session. The project is aimed at people who want to study and change those layers
+in one codebase rather than consume them as opaque services.
+
+[Türkçe README](README.tr.md) · [Technical report](echOS_teknik_rapor.pdf) · [Build and run](#build)
 
 <div align="center">
 
-```
+```text
  ███████╗ ██████╗██╗  ██╗ ██████╗ ███████╗    ██╗  ██╗ ██████╗ ██╗  ██╗
  ██╔════╝██╔════╝██║  ██║██╔═══██╗██╔════╝    ╚██╗██╔╝██╔════╝ ██║  ██║
- █████╗  ██║     ███████║██║   ██║███████╗     ╚███╔╝ ███████╗ ███████║
+ █████╗  ██║     ███████║██║   ██║███████╗     ╚███╔╝ ███████╗██║  ██║
  ██╔══╝  ██║     ██╔══██║██║   ██║╚════██║     ██╔██╗ ██╔═══██╗╚════██║
  ███████╗╚██████╗██║  ██║╚██████╔╝███████║    ██╔╝ ██╗╚██████╔╝     ██║
  ╚══════╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝    ╚═╝  ╚═╝ ╚═════╝      ╚═╝
 ```
 
-**Rust `no_std` x86-64 operating system research kernel.**
-
-[![CI: Simics Zero-Tolerance](https://img.shields.io/badge/CI-Simics%20Zero--Tolerance-blueviolet?style=flat-square&logo=github-actions)](/.github/workflows/simics-zero-tolerance.yml)
-[![Rust: nightly](https://img.shields.io/badge/Rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
-[![Target: x86_64-unknown-none](https://img.shields.io/badge/target-x86__64--unknown--none-lightgrey?style=flat-square)]()
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green?style=flat-square)](LICENSE)
-[![no_std](https://img.shields.io/badge/no__std-✓-blue?style=flat-square)]()
-[![Boot: UEFI](https://img.shields.io/badge/boot-UEFI%20%7C%20Multiboot2%20%7C%20Limine-informational?style=flat-square)]()
+[![Rust](https://img.shields.io/badge/Rust-nightly-orange?style=flat-square&logo=rust)](rust-toolchain.toml)
+[![Target](https://img.shields.io/badge/target-x86__64--unknown--none-lightgrey?style=flat-square)]()
+[![no_std](https://img.shields.io/badge/no__std-yes-blue?style=flat-square)]()
+[![Boot](https://img.shields.io/badge/boot-UEFI%20%7C%20Limine%20%7C%20Multiboot2-informational?style=flat-square)]()
+[![License](https://img.shields.io/badge/license-AGPL--3.0--only-green?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
-## Table of Contents
+## At a glance
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Current Status](#current-status)
-4. [Phase 6 Filesystem and Storage](#phase-6-filesystem-and-storage)
-5. [Module Tree](#module-tree)
-6. [Building](#building)
-7. [Running](#running)
-8. [CI — Simics Zero-Tolerance Gate](#ci--simics-zero-tolerance-gate)
-9. [Technical Report](#technical-report)
-10. [Third-Party Components](#third-party-components)
-11. [License](#license)
+| Item | Current repository shape |
+|---|---|
+| Language | Rust with `no_std` kernel paths |
+| Architecture | x86-64 |
+| Boot adapters | UEFI, Limine, Multiboot2 |
+| Execution | QEMU/OVMF, Limine BIOS smoke, Multiboot2 smoke, Intel Simics workflows |
+| Core areas | CPU, interrupts, memory, scheduler, storage, networking, drivers, security |
+| Desktop work | Framebuffer graphics and the Velvet Gloves native session/compositor |
+| Status | Active research and engineering development |
+| License | AGPL-3.0-only for echOS project code |
 
----
+echOS is not a Linux distribution and it is not presented as a finished desktop
+operating system. Some subsystems are exercised by focused tests and boot gates;
+others are active implementation work. The status tables below make that boundary
+explicit.
 
-## Overview
+## Why echOS exists
 
-**echOS-x64** is a Rust `no_std` x86-64 operating-system research kernel. The current public repository focuses on boot flow, kernel architecture, memory/scheduler/driver experiments, a v1 test-gated filesystem/storage stack, host-side tooling, and reproducible local validation paths.
+Most operating-system projects expose one interesting layer and borrow the rest.
+echOS keeps the layers close enough to inspect together. A change in the boot
+context can be followed into the memory manager, scheduler, driver boundary,
+filesystem, networking, and graphical session. That makes the repository useful
+as a working kernel laboratory as well as a long-term operating-system project.
 
-This README is intentionally conservative: `✅` means the capability has a concrete implementation or repository workflow visible in this tree; `⏳` means the subsystem is under active development, partially integrated, target-specific, or still needs stronger validation before it should be presented as complete.
+The design emphasis is straightforward:
 
----
+- explicit ownership and failure boundaries;
+- `no_std`-friendly kernel code with host-side validation where useful;
+- lock-free or per-core structures in paths where contention matters;
+- real hardware-facing contracts instead of invented register behavior;
+- tests and smoke gates that state what has actually been verified.
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                         USER SPACE (future)                          │
-│         POSIX API │ Win32 API │ ELF Loader │ PE Loader │ VDSO        │
-├──────────────────────────────────────────────────────────────────────┤
-│                         SYSTEM CALL INTERFACE                        │
-├────────────┬─────────────┬──────────────┬───────────────────────────┤
-│  SCHEDULER │   MEMORY    │  FILESYSTEM  │       NETWORKING           │
-│  CFS/RT/DL │  PMM + VMM  │ VFS+ext4/F2FS│  smoltcp-backed stack     │
-│  SMP/AP    │  Allocators │ image tools  │  protocol experiments     │
-│  Work-Steal│  paging     │ validation   │  packet/device plumbing   │
-├────────────┴─────────────┴──────────────┴───────────────────────────┤
-│                            KERNEL CORE                               │
-│   GDT │ IDT │ APIC │ IOAPIC │ IRQ Domains │ Softirq │ RCU │ Preempt │
-├──────────────────────────────────────────────────────────────────────┤
-│                           DRIVER LAYER                               │
-│  NVMe │ ATA │ VirtIO │ PCI │ USB (HID/CDC/MSD) │ PS/2 │ Audio │ BT  │
-├──────────────────────────────────────────────────────────────────────┤
-│                          HARDWARE (x86-64)                           │
-│        UEFI Firmware │ ACPI Tables │ TSC │ RDRAND │ AES-NI │ AVX    │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    B["UEFI / Limine / Multiboot2"] --> P["Platform layer\nACPI · CPU · APIC · interrupts"]
+    P --> K["Kernel core\nmemory · scheduler · syscall · IPC"]
+    K --> D["Drivers and storage\nPCI · VirtIO · NVMe · VFS"]
+    K --> N["Networking\npacket, transport, and protocol paths"]
+    K --> R["Runtime and compatibility\nprocess, POSIX, Win32, IronShim"]
+    R --> G["Velvet Gloves\nframebuffer desktop session and compositor"]
+    D --> G
 ```
 
-**Boot flow:**
+### Boot paths
 
-```
-UEFI/Multiboot2/Limine
-        │
-        ▼
-  UEFI Entry (uefi_main)  ──OR──  Limine Entry  ──OR──  Multiboot2 Entry
-        │
-        ▼
-  GOP Framebuffer init  →  Splash screen
-        │
-        ▼
-  ACPI parse  →  APIC / IOMMU init  →  SMP AP bringup path
-        │
-        ▼
-  PMM + Paging  →  TLSF Heap  →  Security (SMEP/SMAP/NX)  →  TPM Secure Boot
-        │
-        ▼
-  Drivers (PCI / NVMe / VirtIO / USB)  →  Filesystem mount
-        │
-        ▼
-  Network experiments  →  GUI/compositor experiments  →  shell/tooling
-```
+The repository contains three boot adapters with a shared kernel phase model:
 
----
+1. UEFI entry and GOP framebuffer setup;
+2. native Limine handoff for the bare-metal path;
+3. Multiboot2 handoff for the legacy ISO path.
 
-## Current Status
+The adapters converge on common CPU, memory, interrupt, driver, and service
+initialization rather than maintaining three unrelated kernels. The repository
+contains scripts for building and checking the handoff markers for each path.
 
-| Area | Status | Notes |
-|------|--------|-------|
-| Rust `no_std` kernel crate | ✅ | Primary kernel code is Rust with explicit bare-metal targets. |
-| UEFI build target | ✅ | `x86_64-unknown-uefi` build path and `.efi` artifact are documented. |
-| QEMU/OVMF launch path | ✅ | `run_qemu.ps1` is the local smoke-run entrypoint. |
-| Shareable UEFI VM ISO | ✅ | `scripts/build_vm_iso.ps1` emits `build/appliance/echOS-uefi.iso`. |
-| AGPL-3.0 project licensing | ✅ | Root `LICENSE`, manifest metadata, and README badge agree. |
-| Simics gate tooling | ✅ | Gate scripts and log/verdict locations are part of the repository workflow. |
-| Limine / Multiboot2 paths | ⏳ | Present in the code and docs, but UEFI is the primary public run path. |
-| SMP / AP bring-up | ⏳ | Active kernel path; VirtualBox smoke profile is intentionally single-vCPU. |
-| Memory manager stack | ⏳ | PMM, paging, and allocator work exists; broader invariants still need tighter public proof coverage. |
-| Scheduler stack | ⏳ | CFS/RT/deadline/work-stealing work is in-tree; end-to-end workload validation is still ongoing. |
-| Filesystem/storage stack | ✅ | Phase 6 v1 gate passes for unified VFS, ext4, F2FS, FAT32/exFAT, loopback, notification, package/seed, crash, fsck/oracle-inspired, and corrupt-image corpora. |
-| Networking | ⏳ | smoltcp-backed work is in-tree; protocol matrix is not presented as complete. |
-| GUI/compositor | ⏳ | Framebuffer, graphics, and UI experiments are in-tree; not a finished desktop environment. |
-| Win32/POSIX/IronShim compatibility | ⏳ | Compatibility work exists, but public support should be treated as experimental. |
-| Hardware driver surface | ⏳ | VirtIO/PCI/storage/input/display work is active; bare-metal hardware coverage varies by target. |
+### Kernel and platform layer
 
----
+The platform side covers ACPI discovery, GDT/IDT setup, Local APIC and IO-APIC
+handling, interrupt routing, CPU-local state, SMP bring-up, paging, physical frame
+allocation, heap allocation, preemption, RCU-style publication, and architecture
+specific security controls.
 
-## Phase 6 Filesystem and Storage
+### Storage and filesystem layer
 
-Phase 6 is the current v1 filesystem/storage foundation. It is intentionally described by tested contracts rather than by Linux/Windows/FreeBSD parity claims.
+The filesystem work is organized around a unified VFS and explicit backend
+contracts. The current tree contains ext4, F2FS, FAT32, exFAT, read-only image
+paths, virtual filesystems, and boundary work for NTFS, XFS, and Btrfs. Unsupported
+operations are intended to fail explicitly; the project does not treat a returned
+success code as proof that durability or recovery semantics exist.
 
-### What is in scope for v1
+### Networking and drivers
 
-| Layer | Status | Contract |
-|-------|--------|----------|
-| Unified VFS | ✅ | Mount routing, path normalization, backend dispatch, stable unsupported-operation failures, and POSIX-facing read/write/stat/truncate/rename-style surfaces. |
-| ext4 | ✅ | Main disk filesystem candidate with read/write, metadata mutation, journaling integration, feature gates, and VFS wiring. |
-| F2FS | ✅ | Flash-oriented filesystem candidate with checkpoint/recovery-oriented paths, read/write/truncate/rename/fsync/fdatasync coverage, and truthful feature gates. |
-| FAT32 | ✅ | Portable-media backend with read/write/create/mkdir/rename/truncate paths and explicit no-fake-success durability limits. |
-| exFAT | ✅ | Portable-media backend with read/write/create/mkdir/unlink/truncate, entry-set-safe rename, checksum refresh, and fail-closed behavior when an operation would require an unsafe entry-set resize. |
-| EROFS/SquashFS | ✅ | Read-only seed/package image candidates. |
-| tmpfs/devfs/procfs/sysfs-style filesystems | ✅ | Virtual filesystem surfaces with explicit unsupported-operation behavior. |
-| NTFS/XFS/Btrfs | ⏳ | Read/gate and unsupported-boundary work exists; write parity is not claimed for v1. |
+Networking includes packet and transport experiments, while the driver layer
+contains PCI, VirtIO, storage, input, display, audio, USB, IOMMU, and related
+support paths. Hardware coverage depends on the target and emulator profile. The
+presence of a driver module is not, by itself, a claim of production hardware
+coverage.
 
-### Validation evidence
+### Velvet Gloves
 
-The Phase 6 gate runner is:
+Velvet Gloves is echOS's native graphical session and compositor work. It is built
+around the framebuffer and kernel-owned session path rather than a conventional
+desktop stack. The current implementation includes desktop session state, window
+and workspace behavior, launcher and application surfaces, input handling, damage
+tracking, text/UI rendering, and related shell behavior under `src/gfx/` and
+`src/gui/`.
 
-```powershell
-.\scripts\phase6_fs_gate.ps1 -SkipFullTests
-```
+Velvet Gloves is an active subsystem. It is a real part of the repository and a
+useful integration target, but it is not advertised as a finished desktop
+environment or a drop-in Wayland/X11 implementation.
 
-The latest local validation before this README update passed:
+## Current status
 
-- `cargo check --target x86_64-pc-windows-msvc --lib -q`
-- `.\scripts\phase6_fs_gate.ps1 -SkipFullTests`
-- `cargo test --target x86_64-pc-windows-msvc --test regression_suite -q`
-- `cargo test --target x86_64-pc-windows-msvc --tests -q`
+| Area | State | What that means |
+|---|---|---|
+| Boot adapters | In tree | UEFI, Limine, and Multiboot2 paths share the kernel phase model and have local runners or smoke paths. |
+| CPU, interrupts, and memory | Active | Core implementations are present; target-specific and worst-case validation continues. |
+| Scheduler and concurrency | Active | CFS/RT/deadline, work-stealing, RCU, and per-CPU work are present in the tree; end-to-end workload evidence is still growing. |
+| Filesystem and storage | Test-gated | Phase 6 runners and filesystem corpora cover the declared v1 contracts; full external filesystem parity is not claimed. |
+| Networking | Active | Protocol and device paths are implemented in stages; the complete protocol matrix is not closed. |
+| GUI and Velvet Gloves | Experimental | The native compositor/session is integrated into the kernel tree and remains under active development. |
+| POSIX/Win32/IronShim | Experimental | Compatibility surfaces exist, but they are not a promise of broad application compatibility. |
+| Simics validation | Available | The repository contains a hardware-oriented gate workflow that requires a compatible Simics environment. |
 
-The Phase 6 gate currently covers:
+The repository's authoritative evidence is the test, smoke, and gate output for a
+given revision. This README describes the available paths; it does not turn an
+unrun command into a passing result.
 
-- xfstests-inspired corpus
-- crash consistency corpus
-- fsck/oracle-inspired corpus
-- corrupt image hardening
-- backend feature gates
-- loopback behavior
-- notification behavior
-- path and VFS contracts
-- package/seed state model
-
-### Boundaries
-
-- Unsupported filesystem features must fail closed; they must not return fake success.
-- `fsync`/`fdatasync` only succeed where the backend has an implemented durability path.
-- FAT32/exFAT are useful v1 portable-media filesystems, not journaled crash-recovery filesystems.
-- Full Linux/Windows/FreeBSD filesystem parity is not claimed. Real hardware soak testing, broader power-loss replay, long fuzzing, and larger external oracle comparison remain future hardening work.
-
----
-
-## Module Tree
-
-```
-src/
-├── main.rs              # Kernel entry point (UEFI / Limine / Multiboot2)
-├── lib.rs               # Crate root, module declarations
-│
-├── boot/                # Boot protocol handlers, BootInfo extraction
-├── acpi/                # ACPI table parsing, AML interpreter, MADT, GPE
-├── apic/                # Local APIC, IO-APIC
-├── cpu/                 # SMP AP startup, TSC, NUMA, microcode, virtualisation
-├── gdt.rs               # Global Descriptor Table
-├── interrupts/          # IDT, PIC, IRQ chip, IRQ domains, softirq, remapping
-│
-├── memory/              # PMM, paging, TLSF allocator, OOM, THP, zswap
-├── allocator/           # Bump, linked-list, TLSF, stack allocators
-│
-├── task/                # CFS, RT, Deadline, Ghost scheduler, SMP work-steal
-├── preempt.rs           # Preemption control (preempt_disable / enable)
-├── rcu.rs               # Read-Copy-Update
-├── atomic_ops.rs        # Architecture-specific atomics
-├── memory_barriers.rs   # SMP memory barriers (smp_mb / rmb / wmb)
-│
-├── fs/                  # Unified VFS, ext4+journal, F2FS, FAT32/exFAT, NTFS/XFS/Btrfs gates
-├── net/                 # TCP/UDP, TLS 1.3, QUIC, WireGuard, IPSec, HTTP/2
-├── drivers/             # NVMe, ATA, VirtIO, PCI, USB, audio, BT, IOMMU
-│
-├── security/            # SMEP/SMAP, TPM, Secure Boot, MAC, seccomp, audit
-├── crypto/              # AES-NI, SHA, Blake3, ChaCha20, Ed25519, Argon2
-├── fault/               # Fault injection, monitors, checkpoints, recovery
-│
-├── gui/                 # Window manager, desktop, dock, spotlight, apps
-├── gfx/                 # Tile compositor, SIMD blending, GAL
-├── gop/                 # UEFI GOP framebuffer
-├── font/                # VGA bitmap font
-│
-├── ipc/                 # Channels, messages
-├── tty/                 # TTY layer, PTY, ANSI, line discipline
-├── serial/              # UART debug output
-├── shell/               # Interactive shell, scripting, line editor
-├── syscall.rs           # System call dispatcher
-│
-├── posix/               # POSIX compatibility (pipe, msgq, semaphore, dlopen)
-├── linux_glue.rs        # Linux kernel ABI compatibility glue
-├── elf.rs               # ELF binary loader
-├── pe_loader.rs         # PE/COFF binary loader
-├── win32.rs             # Win32 API emulation
-├── ironshim_bridge.rs   # IronShim Windows-driver bridge
-├── vdso.rs              # Virtual DSO
-├── virt.rs              # VMX/SVM virtualisation
-└── gpu3d.rs             # 3D GPU API experiments
-```
-
----
-
-## Building
+## Build
 
 ### Prerequisites
 
-- **Rust nightly** — managed automatically via `rust-toolchain.toml`
-- **LLVM / lld** linker
-- QEMU (for local testing) or Intel Simics (for CI gate)
+- Windows PowerShell;
+- internet access and `winget` on the first run if a tool is missing;
+- administrator permission when Windows requires it for a package installation;
+- Intel Simics only when running the Simics gate.
+
+The normal QEMU runner bootstraps the rest of the local toolchain. It detects Rustup,
+the required Rust targets, QEMU, OVMF, Python, and the host linker; missing Windows
+packages are installed through `winget`. No pre-generated EFI binary, appliance disk,
+or OVMF variable store is required in a clean checkout. Hardware virtualization is
+optional: the runner uses WHPX when available and falls back to TCG.
+
+If package installation is not allowed in the current environment, install Rustup,
+QEMU/OVMF, and the required host linker manually, then run with `-SkipBootstrap`.
+The script reports the exact missing component instead of silently continuing.
+
+On a fresh Rust installation:
 
 ```bash
-# Install Rust (if needed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Install required targets (toolchain file handles this automatically)
 rustup target add x86_64-unknown-none x86_64-unknown-uefi
 ```
 
-### UEFI Build (primary target)
+Host-side library check:
 
-```bash
+```powershell
+cargo check --target x86_64-pc-windows-msvc --lib -q
+```
+
+UEFI release build:
+
+```powershell
 cargo build --target x86_64-unknown-uefi --release
-# Output: target/x86_64-unknown-uefi/release/ech_os.efi
+# target/x86_64-unknown-uefi/release/ech_os.efi
 ```
 
-### Bare-metal Build (Limine/Multiboot2)
+Bare-metal release build:
 
-```bash
+```powershell
 cargo build --target x86_64-unknown-none --release
-# Output: target/x86_64-unknown-none/release/ech_os
+# target/x86_64-unknown-none/release/ech_os
 ```
 
----
+The bare-metal linker can be selected through `ECHOS_KERNEL_LINKER`; the Limine
+runner uses the repository's Limine linker configuration when appropriate.
 
-## Running
+## Run and validate
 
-### QEMU (UEFI — OVMF)
+### QEMU/OVMF
 
 ```powershell
 .\run_qemu.ps1
 ```
 
-### Shareable UEFI VM ISO
+This is the intended first-run command. It uses the UEFI path by default, builds the
+kernel EFI artifact and the host-side appliance builder, creates the raw GPT appliance
+under `build/appliance/`, creates a disposable OVMF variable store, launches the GUI,
+and writes the QEMU and serial logs under `logs/`. The same command is safe to repeat;
+Cargo and fresh generated artifacts are reused when their inputs are unchanged.
+
+Useful variants:
+
+```powershell
+.\run_qemu.ps1 -Headless
+.\run_qemu.ps1 -Headless -BootTests
+.\run_qemu.ps1 -Profile debug -Accel tcg
+.\run_qemu.ps1 -SkipBootstrap
+```
+
+`-SkipBootstrap` disables automatic package installation and is intended for machines
+whose toolchain is already prepared. `-Mode iso` is an explicit legacy Multiboot2
+path; it is not selected automatically just because an old ISO exists in the tree.
+
+### Limine BIOS smoke
+
+```powershell
+.\scripts\run_limine_bios_smoke.ps1 -Profile debug
+```
+
+### Multiboot2 smoke
+
+```powershell
+.\scripts\run_multiboot2_smoke.ps1
+```
+
+The legacy `multiboot_iso/` path is kept for the Multiboot2 workflow. The
+`multiboot_iso/boot/ech_os` file is a generated kernel image, while the boot
+configuration belongs to the boot-media setup.
+
+### UEFI VM appliance
 
 ```powershell
 .\scripts\build_vm_iso.ps1
-# Output: build\appliance\echOS-uefi.iso
+# build/appliance/echOS-uefi.iso
 ```
 
-Attach this ISO as optical media in a VM configured for UEFI/OVMF firmware.
-Legacy BIOS boot is outside this artifact contract; select EFI/UEFI firmware in
-VirtualBox, VMware, or QEMU.
-
-VirtualBox test profile: `Other/Unknown (64-bit)`, EFI enabled, `1` CPU, and
-disk/optical media first in the boot order. VirtualBox 7.2.x currently trips the
-AP bring-up path on the second vCPU while loading the TSS, so SMP is disabled for
-the VirtualBox smoke profile; QEMU/Simics SMP validation is a separate gate.
-
-Or manually:
-
-```bash
-qemu-system-x86_64 \
-  -bios ovmf/OVMF.fd \
-  -drive format=raw,file=fat:rw:esp/ \
-  -m 512M \
-  -serial stdio \
-  -device virtio-net-pci \
-  -device virtio-blk-pci,drive=disk0 \
-  -drive id=disk0,file=disk.img,if=none,format=raw
-```
-
-### Intel Simics
+### Filesystem gate
 
 ```powershell
-# Launch Simics GUI
+.\scripts\phase6_fs_gate.ps1 -SkipFullTests
+```
+
+### Secure Boot and TPM smoke
+
+```powershell
+.\scripts\run_secure_boot_qemu_smoke.ps1 -Phase auto -BuildProfile debug -QemuProfile fast
+```
+
+This path uses Secure OVMF, a disposable variable store, and WSL `swtpm` on the
+documented Windows host workflow. Secure Boot keys and generated enrollment files
+are local test material; private keys must never be committed to GitHub.
+
+### Simics gate
+
+```powershell
 .\run_simics.ps1
-
-# Or headless gate run
+# or
 Simics\echos-simics\bin\run-gate.bat
 ```
 
-### Legacy Multiboot2 ISO
+The gate reports boot/interrupt/input, syscall/security, filesystem/network,
+performance, and IronShim stress axes. A local gate result is tied to the exact
+revision and simulator environment that produced it.
 
-```bash
-# ISO is pre-built at:
-multiboot_iso/boot/ech_os
+## Tests and benchmarks
 
-qemu-system-x86_64 -cdrom echos.iso -m 512M -serial stdio
+Host-side tests are configured for the MSVC target because the bare-metal target
+does not provide the host test runtime:
+
+```powershell
+cargo test --target x86_64-pc-windows-msvc --lib -q
+cargo test --target x86_64-pc-windows-msvc --tests -q
 ```
 
----
+Nightly benchmarks are defined in `Cargo.toml` and cover memory, scheduling,
+filesystem, networking, and address-space paths. Run a benchmark only after
+checking its required feature and target contract.
 
-## CI — Simics Zero-Tolerance Gate
+## Repository layout
 
-Every pull request targeting `main` / `master` is blocked by a **five-axis hardware gate** running on an Intel Simics simulator.
-
-### Gate axes
-
-| Axis | Description |
-|------|-------------|
-| `boot_irq_input` | Clean UEFI boot, interrupt handling, keyboard/mouse input |
-| `syscall_security` | System call ABI correctness + SMEP/SMAP enforcement |
-| `fs_network` | Filesystem R/W integrity + network connectivity |
-| `performance` | Boot time, scheduler latency, memory throughput benchmarks |
-| `extreme_ironshim` | IronShim Windows-driver stress test |
-
-### Rules
-
-- **Any single FAIL → `exit code 2` → merge blocked.**
-- Gate logs: `Simics/echos-simics/targets/echos/logs/gate_run_<timestamp>.log`
-- Machine-readable verdict: `Simics/echos-simics/targets/echos/logs/gate_verdict_<timestamp>.json`
-
-### Manual gate run
-
-```bat
-Simics\echos-simics\bin\run-gate.bat
+```text
+src/                 kernel, platform, subsystems, GUI, compatibility
+helpers/             workspace helper crates
+echshell/            user-mode shell component
+third_party/         vendored or locally pinned upstream components
+scripts/             build, smoke, gate, and verification runners
+tests/               host-side and subsystem corpus tests
+Simics/              simulator project and gate integration
+multiboot_iso/       legacy Multiboot2 boot-media path
+docs/                architecture, validation, and engineering records
 ```
 
-### CI workflow
+Generated build products do not define the source layout. In particular, do not
+commit `target/`, generated ISO trees, Secure Boot private keys, or disposable
+VM/TPM state. Keep `artifacts/secure_boot/`, `limine_iso/`,
+`limine_iso_extract/`, and `minimal_iso/` local unless a release workflow
+explicitly requires a reviewed artifact.
 
-```yaml
-# .github/workflows/simics-zero-tolerance.yml
-# Runner label: [self-hosted, windows, simics]
-```
+## Working on echOS
 
-Artifacts (logs + serial capture) are uploaded after every gate run regardless of result.
+Before changing a subsystem, read the nearest architecture or validation document,
+check the existing working tree, and keep the patch within a coherent boundary.
+For hardware-facing work, record the specification and reference version that
+supports the decision. For a behavioral change, update the relevant test or smoke
+path with the code.
 
----
+The most useful contribution is a small, reproducible change with a clear failure
+mode and a command that demonstrates the result.
 
-## Technical Report
+## Third-party code and licensing
 
-A detailed technical report covering the internal design decisions, subsystem architecture, and benchmarks is available in:
+The root project is licensed under **AGPL-3.0-only**; see [`LICENSE`](LICENSE).
+Third-party components retain their own upstream licenses. Check the manifest and
+license files in each `third_party/` or helper crate before redistributing a build.
 
-```
-echOS_teknik_rapor.pdf
-```
-
----
-
-## Third-Party Components
-
-| Component | Location | License |
-|-----------|----------|---------|
-| `virtio-drivers` | `third_party/virtio-drivers` | MIT / Apache-2.0 |
-| `core_io` | `third_party/core_io` | MIT |
-| `ironshim-rs` | `third_party/ironshim-rs` | confidential |
-| `smoltcp` | crates.io | MIT / Apache-2.0 |
-| `rcore-fs` | git submodule | MIT |
-
----
+The repository includes components such as VirtIO support, `smoltcp`, filesystem
+helpers, text/rendering support, and local workspace crates. Their presence in the
+tree does not change the license of the root project or remove the obligation to
+preserve upstream notices.
 
 ## License
 
-echOS-x64 project code is distributed under the **GNU Affero General Public License v3.0 only** — see [`LICENSE`](LICENSE) for details.
-
-Third-party components keep their own upstream licenses as listed above and in their vendored manifests.
+echOS project code is distributed under the **GNU Affero General Public License
+v3.0 only**. Third-party components keep their respective upstream licenses.
 
 ---
 
 <div align="center">
 
-*echOS — because the best way to understand an OS is to build one.*
+*echOS — a kernel project built to keep the interesting parts visible.*
 
 </div>

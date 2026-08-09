@@ -32,7 +32,12 @@
 //! `version` alanı, geriye dönük uyumluluk için kullanılır.
 
 pub mod appliance;
+pub mod context;
+pub mod error_policy;
+pub mod pipeline;
 pub mod safety;
+
+pub use context::BootContext;
 
 use crate::gop::framebuffer::Framebuffer;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -64,6 +69,10 @@ pub struct BootInfo {
     pub cmdline_len: u64,
     pub image_size: u64,
     pub image_hash: [u8; 32],
+    /// Loader-resolved boot-control flags carried across ExitBootServices.
+    /// Runtime-variable reads are not a reliable transport for acceptance
+    /// requests, so the UEFI adapter carries the validated seed explicitly.
+    pub boot_flags: u8,
 }
 
 /// Boot bilgisi sihirli sayısı: "ECHBOOT0" ASCII karakter dizisi.
@@ -80,6 +89,12 @@ pub const BOOTINFO_VERSION: u32 = 2;
 
 /// Secure Boot durumunu atomik olarak saklayan global bayrak.
 static SECURE_BOOT: AtomicBool = AtomicBool::new(false);
+
+/// UEFI RNG protokolünden alınan 32-byte entropy tohumu köprüsü.
+///
+/// `efi_main` ExitBootServices ÖNCESİ okur (EBS sonrası boot services
+/// ölür), `BootContext::from_uefi` tüketir (`take()`). RNG yoksa `None`.
+pub static UEFI_ENTROPY_SEED: Mutex<Option<[u8; 32]>> = Mutex::new(None);
 
 /// UEFI Runtime Services pointer'ını atomik olarak saklayan global.
 static RUNTIME_SERVICES: AtomicUsize = AtomicUsize::new(0);

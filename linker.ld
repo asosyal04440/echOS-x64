@@ -62,7 +62,7 @@ SECTIONS
      * Bölümün adı `boot` prefix'i taşır çünkü bu kod 32-bit protected mode'da çalışır.
      */
     .boot.multiboot2 : {
-        *(.boot.multiboot2)
+        KEEP(*(.boot.multiboot2))
     }
 
     /*
@@ -143,6 +143,30 @@ SECTIONS
     }
 
     /*
+     * Limine istek blokları: SIRA ZORUNLU — spec (limine-protocol.md,
+     * "Requests Delimiters"): bootloader yalnızca SON start marker ile İLK
+     * end marker arasındaki istekleri kabul eder. Bu üç bölüm linker script'te
+     * yer almadığında lld orphan section'ları isim sırasına göre dizer
+     * (.limine_req_end < .limine_req_start alfabetik) ve pencere boşalır;
+     * base revision >= 2'de delimiter'lar bağlayıcı olduğundan HİÇBİR istek
+     * (HHDM, memmap, RSDP, cmdline, module, executable-address, base rev)
+     * kabul edilmez. Açık yerleşim ile start < reqs < end garanti edilir.
+     * Yanıt alanları bootloader tarafından yazıldığından .data komşuluğunda
+     * (yazılabilir bölge) tutulur.
+     */
+    .limine_req_start : {
+        KEEP(*(.limine_req_start))
+    }
+
+    .limine_reqs : {
+        KEEP(*(.limine_reqs))
+    }
+
+    .limine_req_end : {
+        KEEP(*(.limine_req_end))
+    }
+
+    /*
      * .bss (NOLOAD): Başlatılmamış değişken veri bölümü.
      * Rust'ta başlangıç değeri verilmemiş `static mut` değişkenler buraya düşer.
      * NOLOAD: Disk görüntüsünde yer kaplamaz; önyükleyici/çekirdek başlangıcında
@@ -151,6 +175,16 @@ SECTIONS
     .bss (NOLOAD) : {
         *(.bss .bss.*)
     }
+
+    /*
+     * kernel_phys_start / kernel_phys_end: Çekirdek görüntüsünün FİZİKSEL
+     * (LMA) adres sınırları. VMA == LMA olduğundan (0x100000 tabanlı düzen)
+     * kernel_start/kernel_end ile aynı değerlerdir, ancak yükleme adresinden
+     * bağımsız olarak doğru kalır. KASLR slide'ı çalışma zamanında ayrıca
+     * uygulanır (src/memory/frame_allocator.rs::kernel_phys_range).
+     */
+    kernel_phys_start = LOADADDR(.boot.multiboot2);
+    kernel_phys_end = LOADADDR(.bss) + SIZEOF(.bss);
 
     /*
      * kernel_end: Çekirdeğin bellekteki bitiş adresini işaret eden sembol.

@@ -3,6 +3,38 @@ fn main() {
 
     // Bare-metal / UEFI hedefleri için echshell derle
     if target_os == "none" || target_os == "uefi" {
+        // x86_64-unknown-none: linker.ld kernel_start/kernel_end/boot_lma_end tanımlar.
+        // --no-pie: PIE kapalı çünkü çekirdek sabit 0x100000 adresine yüklenir.
+        if target_os == "none" {
+            let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+            let linker_name = std::env::var("ECHOS_KERNEL_LINKER")
+                .unwrap_or_else(|_| "linker.ld".to_string());
+            println!("cargo:rustc-check-cfg=cfg(echos_native_limine)");
+            if linker_name == "linker_limine.ld" {
+                println!("cargo:rustc-cfg=echos_native_limine");
+            }
+            let linker_ld = std::path::Path::new(&manifest_dir)
+                .join(&linker_name)
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            println!("cargo:rustc-link-arg=-T{}", linker_ld);
+            if std::env::var_os("ECHOS_KERNEL_RELOCATABLE").is_none() {
+                println!("cargo:rustc-link-arg=--no-pie");
+            }
+            if linker_name == "linker_limine.ld" {
+                // Keep each permission class on a page-aligned PT_LOAD
+                // boundary. Limine rejects ELF files where a read-only and a
+                // writable load segment share one memory page; lld otherwise
+                // places its synthetic GOT at the end of .boot.rodata.
+                println!("cargo:rustc-link-arg=-z");
+                println!("cargo:rustc-link-arg=separate-loadable-segments");
+            }
+            println!("cargo:rerun-if-env-changed=ECHOS_KERNEL_LINKER");
+            println!("cargo:rerun-if-env-changed=ECHOS_KERNEL_RELOCATABLE");
+        }
         build_echshell();
         return;
     }
@@ -40,14 +72,7 @@ fn build_echshell() {
         let _ = std::fs::remove_file(&echshell_local);
     }
 
-    let linker_script = std::path::Path::new(&echshell_dir)
-        .join("linker.ld")
-        .canonicalize()
-        .expect("Failed to canonicalize echshell linker script")
-        .display()
-        .to_string()
-        .replace('\\', "/");
-    let linker_arg = format!("link-arg=-T{}", linker_script);
+    let linker_arg = "link-arg=-Tlinker.ld".to_string();
     let rustflags = [
         "-C".to_string(),
         linker_arg.clone(),

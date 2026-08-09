@@ -289,7 +289,7 @@ pub fn init_heap(
                 crate::serial_println!("[HEAP] allocated first frame");
             }
             let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
-            let _ = unsafe { mapper.map_to(page, frame, flags, frame_allocator) }?;
+            let _mapped = unsafe { mapper.map_to(page, frame, flags, frame_allocator) }?;
             mapped_pages = mapped_pages.saturating_add(1);
             if mapped_pages == 1 {
                 crate::serial_println!("[HEAP] mapped first page");
@@ -309,7 +309,6 @@ pub fn init_heap(
     }
 
     init_heap_page_ownership();
-    slab::activate();
 
     // Başlatıldı olarak işaretle (Release: önceki tüm yazma işlemleri görünür olur)
     HEAP_INITIALIZED.store(true, Ordering::Release);

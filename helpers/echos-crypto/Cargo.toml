@@ -1,0 +1,21 @@
+[package]
+name = "echos-crypto"
+version = "0.1.0"
+edition = "2021"
+description = "echOS Cryptography library — hardware-accelerated AES, SHA3, BLAKE3, ChaCha20, Ed25519, RSA, Argon2"
+license = "MIT"
+
+[features]
+default = []
+std = []
+rsa_legacy_private_ops = []
+
+[dependencies]
+spin = "0.9.4"
+sha2 = { version = "0.10", default-features = false, features = ["force-soft", "oid"] }
+sha1 = { version = "0.10", default-features = false }
+rsa = { version = "0.9", default-features = false }
+rand_core = { version = "0.6", default-features = false }
+
+[lib]
+test = true

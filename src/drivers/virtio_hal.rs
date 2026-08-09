@@ -87,8 +87,10 @@ unsafe impl Hal for VirtioHal {
                     pages,
                     domain
                 );
-                // Bellek tükenirse panik: daha güvenli bir geri dönüş yolu yok
-                panic!("[VirtioHal] DMA allocation failed")
+                // paddr=0 upstream virtio_drivers Dma::new() tarafından
+                // Err(DmaError)'a çevrilir. NonNull::dangling() asla
+                // dereference edilmez çünkü Dma struct'ı oluşturulmaz.
+                (0, NonNull::dangling())
             }
         }
     }

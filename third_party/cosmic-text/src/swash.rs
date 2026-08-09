@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::iter;
 use core::fmt;
+#[cfg(not(feature = "std"))]
+use core_maths::CoreFloat;
 use swash::scale::{image::Content, ScaleContext};
 use swash::scale::{Render, Source, StrikeWith};
 use swash::zeno::{Format, Vector};
@@ -33,7 +37,7 @@ fn swash_image(
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
     if let Some(variation) = variable_width {
-        scaler = scaler.variations(std::iter::once(swash::Setting {
+        scaler = scaler.variations(iter::once(swash::Setting {
             tag: swash::Tag::from_be_bytes(*b"wght"),
             value: f32::from(cache_key.font_weight.0)
                 .clamp(variation.min_value(), variation.max_value()),
@@ -100,7 +104,7 @@ fn swash_outline_commands(
         .size(f32::from_bits(cache_key.font_size_bits))
         .hint(!cache_key.flags.contains(CacheKeyFlags::DISABLE_HINTING));
     if let Some(variation) = variable_width {
-        scaler = scaler.variations(std::iter::once(swash::Setting {
+        scaler = scaler.variations(iter::once(swash::Setting {
             tag: swash::Tag::from_be_bytes(*b"wght"),
             value: f32::from(cache_key.font_weight.0)
                 .clamp(variation.min_value(), variation.max_value()),

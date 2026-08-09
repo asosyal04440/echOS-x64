@@ -57,7 +57,6 @@
 //! - `frame_allocator.rs`: Multiboot2 bootstrap ayırıcısı (bu modülün öncüsü)
 
 use super::fibonacci_buddy::FibonacciBuddyAllocator;
-use alloc::vec::Vec;
 use uefi::table::boot::{MemoryDescriptor, MemoryType};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
@@ -107,6 +106,7 @@ impl MemoryZone {
 // REGION ALLOCATOR (Zone bilgisi ile)
 // ============================================================================
 
+#[derive(Clone, Copy)]
 struct RegionAllocator {
     start: PhysAddr,
     size: usize,
@@ -120,7 +120,8 @@ struct RegionAllocator {
 
 /// Fibonacci Physical Memory Manager — Zone-based allocation ile.
 pub struct FibonacciPmm {
-    regions: Vec<RegionAllocator>,
+    regions: [Option<RegionAllocator>; MAX_PMM_REGIONS],
+    region_count: usize,
     /// Toplam frame sayısı
     total_frames: usize,
     /// Kullanılan frame sayısı
@@ -130,6 +131,8 @@ pub struct FibonacciPmm {
     zone_used: [usize; 3],
 }
 
+const MAX_PMM_REGIONS: usize = 32;
+
 unsafe impl Send for FibonacciPmm {}
 unsafe impl Sync for FibonacciPmm {}
 
@@ -137,7 +140,8 @@ impl FibonacciPmm {
     /// Yeni boş PMM oluşturur.
     pub fn empty() -> Self {
         Self {
-            regions: Vec::new(),
+            regions: [None; MAX_PMM_REGIONS],
+            region_count: 0,
             total_frames: 0,
             used_frames: 0,
             zone_total: [0; 3],
@@ -160,13 +164,14 @@ impl FibonacciPmm {
     where
         I: Iterator<Item = &'a MemoryDescriptor> + Clone,
     {
-        self.regions.clear();
+        self.regions = [None; MAX_PMM_REGIONS];
+        self.region_count = 0;
         self.total_frames = 0;
         self.used_frames = 0;
         self.zone_total = [0; 3];
         self.zone_used = [0; 3];
 
-        for desc in map_iter.clone() {
+        for (desc_index, desc) in map_iter.clone().enumerate() {
             if desc.ty != MemoryType::CONVENTIONAL || desc.page_count == 0 {
                 continue;
             }
@@ -190,15 +195,27 @@ impl FibonacciPmm {
                 let size = (chunk_end - cursor) as usize;
                 let zone = MemoryZone::from_addr(cursor);
                 let start = PhysAddr::new(cursor);
+                crate::serial_println!(
+                    "[PMM] region {} zone={:?} base={:#x} pages={:#x}",
+                    desc_index,
+                    zone,
+                    cursor,
+                    size / 4096
+                );
                 let buddy = FibonacciBuddyAllocator::new(start, size);
                 let pages = size / 4096;
 
-                self.regions.push(RegionAllocator {
+                if self.region_count >= MAX_PMM_REGIONS {
+                    crate::serial_println!("[PMM] region capacity exhausted");
+                    return;
+                }
+                self.regions[self.region_count] = Some(RegionAllocator {
                     start,
                     size,
                     zone,
                     buddy,
                 });
+                self.region_count += 1;
                 self.total_frames = self.total_frames.saturating_add(pages);
                 self.zone_total[Self::zone_idx(zone)] += pages;
 
@@ -262,7 +279,8 @@ impl FibonacciPmm {
 
     /// Tek zone'dan single frame (fallback yok)
     fn try_allocate_zone(&mut self, zone: MemoryZone) -> Option<PhysFrame> {
-        for region in &mut self.regions {
+        for index in 0..self.region_count {
+            let Some(region) = self.regions[index].as_mut() else { continue };
             if region.zone != zone {
                 continue;
             }
@@ -282,7 +300,8 @@ impl FibonacciPmm {
         zone: MemoryZone,
     ) -> Option<PhysFrame> {
         let size = pages * 4096;
-        for region in &mut self.regions {
+        for index in 0..self.region_count {
+            let Some(region) = self.regions[index].as_mut() else { continue };
             if region.zone != zone {
                 continue;
             }
@@ -301,7 +320,26 @@ impl FibonacciPmm {
 
     /// Single frame tahsisi — varsayılan olarak NORMAL zone'dan başlar.
     pub fn allocate_frame(&mut self) -> Option<PhysFrame> {
-        self.allocate_from_zone(MemoryZone::Normal)
+        let result = self.allocate_from_zone(MemoryZone::Normal);
+        if result.is_none() {
+            crate::serial_println!(
+                "[PMM-OOM] used={}/{} zones={:?}",
+                self.used_frames,
+                self.total_frames,
+                self.zone_used
+            );
+            for i in 0..self.region_count {
+                let Some(reg) = self.regions[i].as_ref() else { continue };
+                crate::serial_println!(
+                    "[PMM-OOM] region[{}] start={:#x} size={:#x} zone={:?}",
+                    i,
+                    reg.start.as_u64(),
+                    reg.size,
+                    reg.zone
+                );
+            }
+        }
+        result
     }
 
     /// Contiguous frames tahsisi — varsayılan NORMAL zone.
@@ -316,7 +354,8 @@ impl FibonacciPmm {
         }
         let addr = start.start_address();
         let size = pages * 4096;
-        for region in &mut self.regions {
+        for index in 0..self.region_count {
+            let Some(region) = self.regions[index].as_mut() else { continue };
             let region_start = region.start.as_u64();
             let region_end = region_start + region.size as u64;
             let addr_u64 = addr.as_u64();
@@ -360,7 +399,8 @@ impl FibonacciPmm {
     pub fn fragmentation(&self) -> f64 {
         let mut total_weight = 0usize;
         let mut weighted_sum = 0.0;
-        for region in &self.regions {
+        for index in 0..self.region_count {
+            let Some(region) = self.regions[index].as_ref() else { continue };
             let pages = region.size / 4096;
             if pages == 0 {
                 continue;

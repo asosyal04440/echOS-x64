@@ -46,6 +46,7 @@ pub use ech_store::{get_store, EchStore, FileEntry, StoreCommand, StoreResponse}
 use super::ipc::{publish_service_endpoint, ServiceEndpointRegistration, ServiceId};
 use super::runtime_layer::{launch_contract, service_parity_contract};
 use super::{serial_println, task};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServiceDeploymentMode {
@@ -62,6 +63,23 @@ struct ServiceSpawnSpec {
     ensure_kernel_ready: fn(),
 }
 
+/// PCI/MMIO probe izni adapter capability sözleşmesinin tek kaynağıdır.
+/// UEFI bu bayrağı açık bırakır; Limine/Multiboot2 BIOS handover'ı gerçek
+/// BAR mapping kanıtı yayınlayana kadar kapatır.
+static HARDWARE_PROBE_ALLOWED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_hardware_probe_policy(allowed: bool) {
+    HARDWARE_PROBE_ALLOWED.store(allowed, Ordering::Release);
+    serial_println!(
+        "[SERVICES] hardware probe policy={}",
+        if allowed { "enabled" } else { "deferred" }
+    );
+}
+
+pub fn hardware_probe_allowed() -> bool {
+    HARDWARE_PROBE_ALLOWED.load(Ordering::Acquire)
+}
+
 fn deployment_mode(service_name: &str) -> ServiceDeploymentMode {
     if launch_contract::service_process_available(service_name) {
         ServiceDeploymentMode::IsolatedProcess
@@ -71,6 +89,12 @@ fn deployment_mode(service_name: &str) -> ServiceDeploymentMode {
 }
 
 fn ensure_display_kernel_ready() {
+    if !hardware_probe_allowed() {
+        serial_println!(
+            "[SERVICES] EchDisplay hardware probe deferred (BAR mapping capability absent)"
+        );
+        return;
+    }
     ech_display::init();
     if let Some(display) = ech_display::get_display().lock().clone() {
         publish_service_endpoint(
@@ -89,6 +113,12 @@ fn ensure_input_kernel_ready() {
 }
 
 fn ensure_audio_kernel_ready() {
+    if !hardware_probe_allowed() {
+        serial_println!(
+            "[SERVICES] EchAudio hardware probe deferred (BAR mapping capability absent)"
+        );
+        return;
+    }
     ech_audio::init();
     publish_service_endpoint(
         ServiceId::EchAudio,

@@ -16,6 +16,7 @@ const BOOT_FLAG_SUSPEND_RESUME_SMOKE: u8 = 1 << 1;
 const BOOT_FLAG_FS_SMOKE_TEST: u8 = 1 << 2;
 const BOOT_FLAG_SHELL_SMOKE_TEST: u8 = 1 << 3;
 const BOOT_FLAG_SHELL_COMMAND_TEST: u8 = 1 << 4;
+pub const BOOT_FLAG_BOOT_TESTS: u8 = 1 << 5;
 #[cfg(target_os = "uefi")]
 const APPLIANCE_VENDOR_GUID: VariableVendor = VariableVendor(uefi::Guid::new(
     [0x83, 0x61, 0x26, 0x6d],
@@ -352,11 +353,13 @@ pub struct RecoveryRecord {
 
 static BOOT_CONTROL_SHADOW: Mutex<BootControlBlock> = Mutex::new(BootControlBlock::new());
 static CURRENT_BOOT_STAGE: AtomicU32 = AtomicU32::new(BootStage::LoaderEntry as u32);
+static BOOT_SUCCESS_PUBLISHED: AtomicU32 = AtomicU32::new(0);
 static BOOT_FLAGS: AtomicU32 = AtomicU32::new(0);
 static PACKAGED_PE_SMOKE_BUNDLE: Mutex<Option<Vec<u8>>> = Mutex::new(None);
 static CURATED_APP_BUNDLES: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
 
 pub fn init_shadow(block: BootControlBlock) {
+    BOOT_SUCCESS_PUBLISHED.store(0, Ordering::Release);
     let mut guard = BOOT_CONTROL_SHADOW.lock();
     *guard = if block.validate() {
         block
@@ -401,6 +404,11 @@ pub fn shell_smoke_test_requested() -> bool {
 
 pub fn shell_command_test_requested() -> bool {
     (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_SHELL_COMMAND_TEST) != 0
+}
+
+/// Wave 4 kernel self-check and ring3/VM/IRQ suite request.
+pub fn boot_tests_requested() -> bool {
+    (BOOT_FLAGS.load(Ordering::Acquire) as u8 & BOOT_FLAG_BOOT_TESTS) != 0
 }
 
 pub fn clear_suspend_resume_smoke_request() {
@@ -455,6 +463,12 @@ pub fn publish_stage(stage: BootStage) {
 }
 
 pub fn mark_boot_success() {
+    if BOOT_SUCCESS_PUBLISHED
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
     let snapshot = {
         let mut guard = BOOT_CONTROL_SHADOW.lock();
         guard.mark_boot_success();
@@ -526,12 +540,24 @@ pub fn persist_shadow(block: &BootControlBlock) {
     let attrs = VariableAttributes::BOOTSERVICE_ACCESS
         | VariableAttributes::RUNTIME_ACCESS
         | VariableAttributes::NON_VOLATILE;
-    let _ = runtime.set_variable(
-        cstr16!("echOSBootControl"),
-        &APPLIANCE_VENDOR_GUID,
-        attrs,
-        bytes_of(block),
-    );
+    if runtime
+        .set_variable(
+            cstr16!("echOSBootControl"),
+            &APPLIANCE_VENDOR_GUID,
+            attrs,
+            bytes_of(block),
+        )
+        .is_err()
+    {
+        crate::boot::safety::BOOT_SAFETY.record_violation(
+            crate::boot::safety::ViolationType::CapabilityUnavailable,
+            "UEFI boot-control persistence unavailable",
+            true,
+        );
+        crate::serial_println!(
+            "[BOOT_POLICY] stage=BootControl persistence disposition=degraded-safe reason=runtime-variable-write"
+        );
+    }
 }
 
 #[cfg(not(target_os = "uefi"))]

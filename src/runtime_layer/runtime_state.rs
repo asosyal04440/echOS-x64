@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 use super::runtime_model::{
     BrokeredLaunch, CapabilityToken, ExternalRuntimeGraph, IsolationDomain, ProcessBrokerTicket,
@@ -23,7 +23,7 @@ pub struct RuntimeCoordinator {
     windows: BTreeMap<WindowId, WindowSessionHandle>,
     tasks: BTreeMap<u64, RuntimeHandleId>,
     services: BTreeMap<ServiceId, RuntimeHandleId>,
-    address_spaces: BTreeMap<u64, Arc<Mutex<AddressSpace>>>,
+    address_spaces: BTreeMap<u64, Arc<RwLock<AddressSpace>>>,
 }
 
 #[derive(Default)]
@@ -64,7 +64,7 @@ impl RuntimeCoordinator {
         session: LaunchSession,
         task_id: Option<u64>,
         image_path: Option<String>,
-        address_space: Option<Arc<Mutex<AddressSpace>>>,
+        address_space: Option<Arc<RwLock<AddressSpace>>>,
         isolation_domain: IsolationDomain,
         service_id: Option<ServiceId>,
     ) -> RuntimeHandle {
@@ -84,7 +84,7 @@ impl RuntimeCoordinator {
         session: LaunchSession,
         task_id: Option<u64>,
         image_path: Option<String>,
-        address_space: Option<Arc<Mutex<AddressSpace>>>,
+        address_space: Option<Arc<RwLock<AddressSpace>>>,
         isolation_domain: IsolationDomain,
         service_id: Option<ServiceId>,
         parent_ticket: Option<ProcessBrokerTicket>,
@@ -117,7 +117,7 @@ impl RuntimeCoordinator {
         session: LaunchSession,
         task_id: Option<u64>,
         image_path: Option<String>,
-        address_space: Option<Arc<Mutex<AddressSpace>>>,
+        address_space: Option<Arc<RwLock<AddressSpace>>>,
         isolation_domain: IsolationDomain,
         service_id: Option<ServiceId>,
         broker_ticket: ProcessBrokerTicket,
@@ -139,7 +139,7 @@ impl RuntimeCoordinator {
         session: LaunchSession,
         task_id: Option<u64>,
         image_path: Option<String>,
-        address_space: Option<Arc<Mutex<AddressSpace>>>,
+        address_space: Option<Arc<RwLock<AddressSpace>>>,
         isolation_domain: IsolationDomain,
         service_id: Option<ServiceId>,
         grant: BrokeredLaunch,
@@ -248,7 +248,7 @@ impl RuntimeCoordinator {
         Some(runtime.clone())
     }
 
-    pub fn address_space_for_pid(&self, pid: u64) -> Option<Arc<Mutex<AddressSpace>>> {
+    pub fn address_space_for_pid(&self, pid: u64) -> Option<Arc<RwLock<AddressSpace>>> {
         self.address_spaces.get(&pid).cloned()
     }
 }
@@ -395,7 +395,7 @@ pub fn register_launch_session(
     session: LaunchSession,
     task_id: Option<u64>,
     image_path: Option<String>,
-    address_space: Option<Arc<Mutex<AddressSpace>>>,
+    address_space: Option<Arc<RwLock<AddressSpace>>>,
     isolation_domain: IsolationDomain,
     service_id: Option<ServiceId>,
 ) -> RuntimeHandle {
@@ -418,7 +418,7 @@ pub fn register_launch_session_with_parent(
     session: LaunchSession,
     task_id: Option<u64>,
     image_path: Option<String>,
-    address_space: Option<Arc<Mutex<AddressSpace>>>,
+    address_space: Option<Arc<RwLock<AddressSpace>>>,
     isolation_domain: IsolationDomain,
     service_id: Option<ServiceId>,
     parent_ticket: ProcessBrokerTicket,
@@ -467,7 +467,7 @@ pub fn register_launch_session_from_grant(
     session: LaunchSession,
     task_id: Option<u64>,
     image_path: Option<String>,
-    address_space: Option<Arc<Mutex<AddressSpace>>>,
+    address_space: Option<Arc<RwLock<AddressSpace>>>,
     isolation_domain: IsolationDomain,
     service_id: Option<ServiceId>,
     broker_ticket: ProcessBrokerTicket,
@@ -579,7 +579,7 @@ pub fn annotate_brokered_launch_runtime_graph(
         .annotate_external_runtime_graph(ticket, graph)
 }
 
-pub fn runtime_address_space_for_pid(pid: u64) -> Option<Arc<Mutex<AddressSpace>>> {
+pub fn runtime_address_space_for_pid(pid: u64) -> Option<Arc<RwLock<AddressSpace>>> {
     RUNTIME_COORDINATOR.lock().address_space_for_pid(pid)
 }
 

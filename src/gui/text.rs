@@ -202,7 +202,17 @@ impl TextSystem {
                 TextFamily::Ui => Family::SansSerif,
                 TextFamily::Mono => Family::Monospace,
             });
-            buffer.set_text(text, &attrs, Shaping::Advanced, None);
+            // The desktop protocol is overwhelmingly ASCII (labels, status text,
+            // shortcuts).  Advanced shaping is reserved for text that can contain
+            // non-ASCII scripts; Basic shaping keeps the real font/raster pipeline
+            // intact while avoiding the expensive cluster machinery on the hot
+            // bootstrap path under software-emulated QEMU.
+            let shaping = if text.is_ascii() {
+                Shaping::Basic
+            } else {
+                Shaping::Advanced
+            };
+            buffer.set_text(text, &attrs, shaping, None);
             buffer.shape_until_scroll(true);
         }
 

@@ -29,7 +29,8 @@ impl DebugconWriter {
                 core::ptr::write(buf.add(current_pos as usize + i), b);
             }
         }
-        self.pos.store(current_pos + data.len() as u32, Ordering::Release);
+        self.pos
+            .store(current_pos + data.len() as u32, Ordering::Release);
         self.try_flush();
     }
 
@@ -71,7 +72,8 @@ impl DebugconWriter {
             }
         }
         self.pos.store(0, Ordering::Release);
-        self.last_flush.store(self.timestamp_ms(), Ordering::Release);
+        self.last_flush
+            .store(self.timestamp_ms(), Ordering::Release);
     }
 
     fn timestamp_ms(&self) -> u64 {
@@ -90,6 +92,12 @@ pub fn write_fmt(args: core::fmt::Arguments) {
             Ok(())
         }
     }
-    let _ = DebugconAdapter.write_fmt(args);
-    let _ = DebugconAdapter.write_str("\n");
+    if DebugconAdapter.write_fmt(args).is_err() {
+        // Keep diagnostics visible if the formatter contract ever becomes
+        // fallible; the current adapter is byte-level and infallible.
+        DEBUGCON.write(b"!");
+    }
+    if DebugconAdapter.write_str("\n").is_err() {
+        DEBUGCON.write(b"!");
+    }
 }

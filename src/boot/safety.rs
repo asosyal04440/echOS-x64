@@ -42,42 +42,16 @@ pub const HEAP_CHECK_INTERVAL: u64 = 1000;
 pub const MAX_HEAP_CORRUPTIONS: u32 = 3;
 
 // ============================================================================
-// BOOT AŞAMASI TAKİBİ
+// BOOT AŞAMASI TAKİBİ — delegasyon (Karar 1)
 // ============================================================================
 
-/// Sistemin hangi boot aşamasında olduğunu temsil eden sayım (enum).
+/// Kanonik faz tipi `boot::pipeline::BootPhase`'den yeniden dışa aktarılır.
 ///
-/// Sıralı değerler (0'dan 255'e kadar) aşamaların doğru sırayla
-/// geçildiğini doğrulamaya olanak tanır.
-///
-/// ## Boot Aşamaları Akışı:
-/// ```
-/// Reset(0) --> UefiHandover(1) --> MemoryInit(2) --> PagingSetup(3)
-///   --> HeapInit(4) --> GdtSetup(5) --> IdtSetup(6) --> AcpiInit(7)
-///   --> SmpInit(8) --> DriverInit(9) --> UserspaceReady(10) --> Running(255)
-/// ```
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum BootPhase {
-    Reset = 0,
-    UefiHandover = 1,
-    MemoryInit = 2,
-    PagingSetup = 3,
-    HeapInit = 4,
-    GdtSetup = 5,
-    IdtSetup = 6,
-    AcpiInit = 7,
-    SmpInit = 8,
-    DriverInit = 9,
-    UserspaceReady = 10,
-    Running = 255,
-}
-
-impl Default for BootPhase {
-    fn default() -> Self {
-        BootPhase::Reset
-    }
-}
+/// Tek kanonik model (Karar 1): faz kimliği, geçiş tablosu, yaşam döngüsü ve
+/// authoritative state word `boot::pipeline` içinde sahiplenilir; `safety.rs`
+/// burada yalnızca re-export + delegasyon yapar (ayrı semantik taşımaz).
+/// `safety::BootPhase` diye ayrı bir tip YOKTUR.
+pub use crate::boot::pipeline::BootPhase;
 
 // ============================================================================
 // BOOT GÜVENLİK DURUMU
@@ -89,8 +63,6 @@ impl Default for BootPhase {
 /// mutex gerekmeksizin okunabilir. Mutex yalnızca `BTreeMap` ve `Vec`
 /// için gereklidir (bu yapılar atomik değildir).
 pub struct BootSafetyState {
-    /// Geçerli boot aşaması (BootPhase enum değeri)
-    pub current_phase: AtomicU32,
     /// Boot başlangıç zaman damgası (tik cinsinden)
     pub boot_start_time: AtomicUsize,
     /// Son başarılı kontrol noktası zaman damgası
@@ -132,22 +104,26 @@ pub struct SafetyViolation {
 /// Her tür farklı bir kurtarma stratejisi gerektirebilir.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViolationType {
-    HeapCorruption,   // Heap bellek bozulması
-    NullPointer,      // Null pointer erişimi
-    InvalidPointer,   // Geçersiz bellek adresi
-    StackOverflow,    // Yığın taşması
-    StackUnderflow,   // Yığın altında kalma
-    DoubleFault,      // CPU çift hata istisnası
-    PageFault,        // Sayfa hatası
-    Gpf,              // Genel koruma hatası (General Protection Fault)
-    SmpTimeout,       // Çok işlemcili başlatma zaman aşımı
-    ApStartupFailed,  // Yardımcı işlemci başlatma hatası
-    IdtLoadFailed,    // IDT yükleme hatası
-    GopInitFailed,    // Grafik protokolü başlatma hatası
-    AcpiTableInvalid, // Geçersiz ACPI tablosu
-    MemoryMapInvalid, // Geçersiz bellek haritası
-    Timeout,          // Genel zaman aşımı
-    InfiniteLoop,     // Sonsuz döngü tespiti
+    HeapCorruption,        // Heap bellek bozulması
+    NullPointer,           // Null pointer erişimi
+    InvalidPointer,        // Geçersiz bellek adresi
+    StackOverflow,         // Yığın taşması
+    StackUnderflow,        // Yığın altında kalma
+    DoubleFault,           // CPU çift hata istisnası
+    PageFault,             // Sayfa hatası
+    Gpf,                   // Genel koruma hatası (General Protection Fault)
+    SmpTimeout,            // Çok işlemcili başlatma zaman aşımı
+    ApStartupFailed,       // Yardımcı işlemci başlatma hatası
+    IdtLoadFailed,         // IDT yükleme hatası
+    GopInitFailed,         // Grafik protokolü başlatma hatası
+    AcpiTableInvalid,      // Geçersiz ACPI tablosu
+    MemoryMapInvalid,      // Geçersiz bellek haritası
+    Timeout,               // Genel zaman aşımı
+    InfiniteLoop,          // Sonsuz döngü tespiti
+    PhaseOrder,            // Faz sırası/geçiş kuralı ihlali (boot::pipeline DAG)
+    BootPolicy,            // Açık fatal/degraded/unsupported politika kararı
+    IommuUnavailable,      // IOMMU izolasyonu yok veya politika ile devre dışı
+    CapabilityUnavailable, // İsteğe bağlı capability yayınlanamadı
 }
 
 impl BootSafetyState {
@@ -156,7 +132,6 @@ impl BootSafetyState {
     /// `const fn` olduğundan global statik olarak tanımlanabilir.
     pub const fn new() -> Self {
         Self {
-            current_phase: AtomicU32::new(BootPhase::Reset as u32),
             boot_start_time: AtomicUsize::new(0),
             last_checkpoint: AtomicUsize::new(0),
             error_counts: Mutex::new(BTreeMap::new()),
@@ -172,12 +147,74 @@ impl BootSafetyState {
         }
     }
 
-    /// Yeni bir boot aşamasına geçer ve kontrol noktası zaman damgasını günceller.
+    /// Boot aşamasına giriş — `boot::pipeline` makinesine DELEGE eder (Karar 1).
     ///
-    /// `SeqCst` (Sıralı Tutarlılık) sıralama kullanılır: tüm CPU'lar aynı
-    /// aşamayı aynı anda görmeli ve sıra bozulmamalıdır.
+    /// Authoritative state `BOOT_PIPELINE`'dır; buradan doğrudan store YOKTUR.
+    /// Geçiş dönemi köprüsü: eski (DAG öncesi) UEFI zinciri makineyi yalnızca
+    /// DAG-uyumlu adımlarla sürer; DAG dışı adımlar (eksik fazlar) tolere
+    /// edilir ve yalnızca kontrol noktası/log güncellenir. Yeni UEFI adapter
+    /// bu köprüyü kullanmaz (begin/complete API'sini kullanır); köprü yalnızca
+    /// `BootWatchdog::complete` (Running) gibi legacy çağrılar için kalır.
     pub fn enter_phase(&self, phase: BootPhase) {
-        self.current_phase.store(phase as u32, Ordering::SeqCst);
+        use crate::boot::pipeline::{caps, PhaseState, BOOT_PIPELINE};
+
+        if phase == BootPhase::UefiHandover {
+            // Eski UEFI zincirinin DAG kapıları için fiilen mevcut yetenekler:
+            // EBS sonrası memory map, HHDM, RSDP (firmware config table) ve
+            // cmdline UEFI handover'ında her zaman mevcuttur.
+            if let Err(err) = BOOT_PIPELINE
+                .set_capabilities(caps::MEMORY_MAP | caps::HHDM | caps::RSDP | caps::CMDLINE)
+            {
+                self.record_violation(
+                    ViolationType::PhaseOrder,
+                    "legacy handover capability publication failed",
+                    false,
+                );
+                crate::serial_println!(
+                    "[BOOT_SAFETY] handover capability policy rejected: {:?}",
+                    err
+                );
+            }
+        }
+
+        let current = BOOT_PIPELINE.current_phase();
+        if current != phase {
+            if BOOT_PIPELINE.current_state() == PhaseState::Running {
+                if let Err(err) = BOOT_PIPELINE.complete_phase(current) {
+                    self.record_violation(
+                        ViolationType::PhaseOrder,
+                        "legacy phase completion failed",
+                        false,
+                    );
+                    crate::serial_println!(
+                        "[BOOT_SAFETY] legacy phase completion rejected: {:?}",
+                        err
+                    );
+                }
+            }
+            // Yalnızca DAG-uyumlu adımlar makineye işlenir (tek writer:
+            // validate ile begin arasında yarış yok; begin kendi içinde
+            // yeniden doğrular ve gerçek ihlalde fatal zincire girer).
+            if BOOT_PIPELINE.validate_transition(phase).is_ok() {
+                if let Err(err) = BOOT_PIPELINE.begin_phase(phase) {
+                    self.record_violation(
+                        ViolationType::PhaseOrder,
+                        "legacy phase begin failed",
+                        false,
+                    );
+                    crate::serial_println!(
+                        "[BOOT_SAFETY] enter_phase delegasyonu reddedildi: {:?}",
+                        err
+                    );
+                }
+            } else {
+                crate::serial_println!(
+                    "[BOOT_SAFETY] enter_phase DAG dışı adım tolere edildi (legacy köprü): {:?}",
+                    phase
+                );
+            }
+        }
+
         self.last_checkpoint
             .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
 
@@ -188,7 +225,9 @@ impl BootSafetyState {
     ///
     /// Her aşamanın hata sayısı `error_counts` haritasında tutulur.
     pub fn record_error(&self) {
-        let phase = self.current_phase.load(Ordering::SeqCst) as u8;
+        let phase = crate::boot::pipeline::BOOT_PIPELINE
+            .current_phase()
+            .phase_id();
         let mut counts = self.error_counts.lock();
         *counts.entry(phase).or_insert(0) += 1;
     }
@@ -209,8 +248,7 @@ impl BootSafetyState {
     /// `recovered` alanı, sistemin ihlalden kurtulup kurtulmadığını belirtir.
     /// Kurtarılamazsa ileride `emergency_halt` tetiklenebilir.
     pub fn record_violation(&self, violation_type: ViolationType, message: &str, recovered: bool) {
-        let phase = BootPhase::try_from(self.current_phase.load(Ordering::SeqCst) as u8)
-            .unwrap_or(BootPhase::Reset);
+        let phase = crate::boot::pipeline::BOOT_PIPELINE.current_phase();
 
         let violation = SafetyViolation {
             phase,
@@ -668,6 +706,22 @@ impl IdtSafety {
         limit >= 32 * 16 - 1 && base != 0
     }
 
+    /// Mevcut CPU'nun IDTR kaydını doğrular.
+    ///
+    /// Boot öz-denetimi bu dar API'yi kullanır; IDT yeniden oluşturulmaz ve
+    /// herhangi bir bootloader pointer'ı okunmaz. `SIDT` yalnızca x86-64
+    /// hedeflerinde anlamlıdır; diğer hedeflerde doğrulama güvenli biçimde
+    /// başarısız sayılır.
+    #[cfg(target_arch = "x86_64")]
+    pub fn verify_loaded() -> bool {
+        Self::verify_idt_loaded()
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    pub fn verify_loaded() -> bool {
+        false
+    }
+
     /// Güvenli istisna işleyicilerini kurar.
     ///
     /// Tüm istisna işleyicilerinin çift hata (double fault) oluşturmadan
@@ -785,9 +839,21 @@ impl BootWatchdog {
     ///
     /// `boot_start_time` mevcut tik sayısıyla ayarlanır.
     pub fn start() {
-        BOOT_SAFETY
-            .boot_start_time
-            .store(crate::task::scheduler::get_ticks(), Ordering::SeqCst);
+        let now = crate::task::scheduler::get_ticks();
+        // UEFI/BIOS adapters share `common_kernel_init`; repeated safety init
+        // calls must not reset the watchdog origin and hide a timeout.
+        match BOOT_SAFETY.boot_start_time.compare_exchange(
+            0,
+            now,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {}
+            Err(existing) => {
+                crate::serial_println!("[BOOT_WATCHDOG] zaten başlatılmış origin={}", existing)
+            }
+        }
+        BOOT_SAFETY.last_checkpoint.store(now, Ordering::Release);
 
         crate::serial_println!("[BOOT_WATCHDOG] Başlatıldı");
     }
@@ -799,24 +865,21 @@ impl BootWatchdog {
     /// - DriverInit: BOOT_PHASE_TIMEOUT_MS / 2 (sürücüler hızlı başlamalı)
     /// - Diğer: BOOT_PHASE_TIMEOUT_MS / 4
     pub fn check() {
-        let current_phase = BOOT_SAFETY.current_phase.load(Ordering::SeqCst);
+        let current_phase = crate::boot::pipeline::BOOT_PIPELINE.current_phase();
         let last_checkpoint = BOOT_SAFETY.last_checkpoint.load(Ordering::SeqCst);
         let current_time = crate::task::scheduler::get_ticks();
 
         // Aşamaya özel zaman aşımı eşiğini belirle
-        let phase_timeout: usize = match BootPhase::try_from(current_phase as u8) {
-            Ok(BootPhase::SmpInit) => AP_STARTUP_TIMEOUT_MS * 2,
-            Ok(BootPhase::DriverInit) => BOOT_PHASE_TIMEOUT_MS / 2,
+        let phase_timeout: usize = match current_phase {
+            BootPhase::SmpInit => AP_STARTUP_TIMEOUT_MS * 2,
+            BootPhase::DriverInit => BOOT_PHASE_TIMEOUT_MS / 2,
             _ => BOOT_PHASE_TIMEOUT_MS / 4,
         } as usize;
 
         if current_time.saturating_sub(last_checkpoint as usize) > phase_timeout {
             BOOT_SAFETY.record_violation(
                 ViolationType::Timeout,
-                &format!(
-                    "Aşama {:?} zaman aşımı",
-                    BootPhase::try_from(current_phase as u8)
-                ),
+                &format!("Aşama {:?} zaman aşımı", current_phase),
                 false,
             );
 
@@ -829,24 +892,21 @@ impl BootWatchdog {
     ///
     /// Kurtarma bağlama bağlıdır: SmpInit'te AP'ler atlanır,
     /// DriverInit'te sürücü atlanır, diğer durumlarda yalnızca kayıt yapılır.
-    fn attempt_recovery(phase: u32) {
+    fn attempt_recovery(phase: BootPhase) {
         BOOT_SAFETY.recovery_attempts.fetch_add(1, Ordering::SeqCst);
         BOOT_SAFETY.in_recovery.store(true, Ordering::SeqCst);
 
-        match BootPhase::try_from(phase as u8) {
-            Ok(BootPhase::SmpInit) => {
+        match phase {
+            BootPhase::SmpInit => {
                 // Kalan AP'leri atla ve devam et
                 crate::serial_println!("[BOOT_WATCHDOG] Kalan AP'ler atlanıyor");
             }
-            Ok(BootPhase::DriverInit) => {
+            BootPhase::DriverInit => {
                 // Başarısız sürücüyü atla ve devam et
                 crate::serial_println!("[BOOT_WATCHDOG] Başarısız sürücü atlanıyor");
             }
             _ => {
-                crate::serial_println!(
-                    "[BOOT_WATCHDOG] {:?} aşamasından kurtarılamıyor",
-                    BootPhase::try_from(phase as u8)
-                );
+                crate::serial_println!("[BOOT_WATCHDOG] {:?} aşamasından kurtarılamıyor", phase);
             }
         }
 
@@ -896,8 +956,7 @@ pub fn init() {
 pub fn get_report() -> BootSafetyReport {
     BootSafetyReport {
         boot_complete: BOOT_SAFETY.boot_complete.load(Ordering::SeqCst),
-        current_phase: BootPhase::try_from(BOOT_SAFETY.current_phase.load(Ordering::SeqCst) as u8)
-            .unwrap_or(BootPhase::Reset),
+        current_phase: crate::boot::pipeline::BOOT_PIPELINE.current_phase(),
         violation_count: BOOT_SAFETY.violation_count() as u32,
         heap_corruptions: BOOT_SAFETY.heap_corruptions.load(Ordering::SeqCst),
         smp_failures: BOOT_SAFETY.smp_failures.load(Ordering::SeqCst),
@@ -920,30 +979,4 @@ pub struct BootSafetyReport {
     pub idt_failures: u32,
     pub gop_failures: u32,
     pub recovery_attempts: u32,
-}
-
-/// u8 değerinden `BootPhase`'e dönüşüm.
-///
-/// Bilinmeyen değerler için `Err(())` döner; bu sayede geçersiz
-/// aşama değerleri güvenli biçimde `BootPhase::Reset`'e geri döndürülebilir.
-impl TryFrom<u8> for BootPhase {
-    type Error = ();
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(BootPhase::Reset),
-            1 => Ok(BootPhase::UefiHandover),
-            2 => Ok(BootPhase::MemoryInit),
-            3 => Ok(BootPhase::PagingSetup),
-            4 => Ok(BootPhase::HeapInit),
-            5 => Ok(BootPhase::GdtSetup),
-            6 => Ok(BootPhase::IdtSetup),
-            7 => Ok(BootPhase::AcpiInit),
-            8 => Ok(BootPhase::SmpInit),
-            9 => Ok(BootPhase::DriverInit),
-            10 => Ok(BootPhase::UserspaceReady),
-            255 => Ok(BootPhase::Running),
-            _ => Err(()),
-        }
-    }
 }

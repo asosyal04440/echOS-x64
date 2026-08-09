@@ -74,10 +74,10 @@ pub mod pe_loader;
 pub mod win32;
 
 /// Doom oyun portu — klasik id Software oyununun echOS üzerindeki versiyonu.
-pub mod doom;
+pub use echos_doom as doom;
 
 /// Doom WAD dosyası indirici ve oyun başlatıcısı.
-pub mod doom_launcher;
+pub use echos_doom::doom_launcher as doom_launcher;
 
 pub struct KernelBootContext {
     pub physical_memory_offset: u64,
@@ -168,6 +168,9 @@ pub mod numa;
 pub mod pid_namespace;
 pub mod power;
 pub mod preempt;
+
+/// Lock‑ordering checker (debug‑build lockdep).
+pub mod sync;
 /// Rastgele sayı üretici
 pub mod random;
 pub mod rcu;
@@ -191,10 +194,10 @@ pub mod fault;
 pub mod net;
 
 /// Donanım hızlandırmalı kriptografi (AES-NI, SHA-NI)
-pub mod crypto;
+pub use echos_crypto as crypto;
 
-/// Compression/decompression algorithms (DEFLATE, LZO1X, ZSTD)
-pub mod compression;
+/// Compression/decompression algorithms (DEFLATE, LZO1X, LZ4, Zstandard)
+pub use echos_compression as compression;
 
 pub mod elf;
 pub mod ironshim_app;
@@ -213,7 +216,7 @@ pub mod virt;
 
 /// Makine öğrenimi motoru (ONNX Runtime) — AI model çıkartımı
 /// CPU/GPU hızlandırmalı sinir ağı çıkarımı sağlar.
-pub mod ml;
+pub use echos_ml as ml;
 
 /// Ses işleme sistemi — gerçek zamanlı DSP ve efektler
 /// Profesyonel ses işleme yetenekleri sağlar.
@@ -221,7 +224,7 @@ pub mod audio;
 
 /// GPU 3D API — Vulkan benzeri grafik API'si.
 /// Shader, render pass ve pipeline kavramlarını uygular.
-pub mod gpu3d;
+pub use echos_gpu3d as gpu3d;
 
 /// Init sistemi — PID 1 yöneticisi, servis denetimi, runlevel yönetimi
 pub mod init;

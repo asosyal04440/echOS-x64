@@ -1,0 +1,15 @@
+[package]
+name = "echos-random"
+version = "0.1.0"
+edition = "2021"
+description = "echOS platform-independent pseudo-random state machines"
+license = "AGPL-3.0-only"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+
+[lib]
+test = true

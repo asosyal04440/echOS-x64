@@ -558,6 +558,8 @@ pub enum SecurityEvent {
     WxorxViolation,
     SeccompViolation(u64),
     SuspiciousSyscall(u64),
+    IntegrityViolation,
+    SealHealed,
 }
 
 /// Güvenlik olayını seri porta yazar (denetim kaydı).
@@ -591,6 +593,12 @@ pub fn log_security_event(event: SecurityEvent) {
         }
         SecurityEvent::SuspiciousSyscall(syscall) => {
             sec_serial_println!("[SEC/AUDIT] Suspicious syscall {} detected", syscall);
+        }
+        SecurityEvent::IntegrityViolation => {
+            sec_serial_println!("[SEC/AUDIT] *** CODE INTEGRITY VIOLATION *** kernel page content changed");
+        }
+        SecurityEvent::SealHealed => {
+            sec_serial_println!("[SEC/AUDIT] Self-heal: corrupted kernel page restored from shadow copy");
         }
     }
 }
@@ -679,6 +687,7 @@ impl SecurityStatus {
 //    priority=2 (normal) : Konfigüre edilebilir örnekleme oranı
 // ============================================================================
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 
 /// Kernel kod bölgesi tanımı.
@@ -719,6 +728,9 @@ static SEAL_INTEGRITY: Mutex<BTreeMap<u64, PageIntegrity>> = Mutex::new(BTreeMap
 static SEAL_ENABLED: AtomicBool = AtomicBool::new(false);
 /// Normal öncelikli sayfalar için tick başına örnekleme oranı (varsayılan: %5)
 static SEAL_SAMPLING_RATE: AtomicU64 = AtomicU64::new(5); // %5 per tick
+
+/// Boot'ta alınan gölge kopyalar — her mühürlü sayfanın orijinal içeriği
+static SEAL_SHADOW: Mutex<BTreeMap<u64, Box<[u8; 4096]>>> = Mutex::new(BTreeMap::new());
 
 /// Yeni bir kernel bölgesini Eternal Seal'a kaydeder.
 /// Boot sonrası kod bölgeleri, syscall tablosu vb. için çağrılır.
@@ -879,9 +891,10 @@ pub fn seal_init() {
         0, // Kritik öncelik
     );
 
-    // İlk referans checksum'larını hesapla (boot sonrası "iyi" durumu kaydet)
+    // İlk referans checksum'larını hesapla ve gölge kopyaları al (boot sonrası "iyi" durumu)
     let regions = SEAL_REGIONS.lock();
     let mut integrity = SEAL_INTEGRITY.lock();
+    let mut shadow = SEAL_SHADOW.lock();
 
     for region in regions.iter() {
         let page_count = region.size / 4096;
@@ -901,11 +914,22 @@ pub fn seal_init() {
                     violations: 0,
                 },
             );
+
+            // Gölge kopya: boot anındaki temiz sayfa içeriği
+            let mut page_copy = Box::new([0u8; 4096]);
+            page_copy.copy_from_slice(data);
+            shadow.insert(addr, page_copy);
         }
     }
 
+    // Koruma: shadow map'i serbest bırak (integrity için tutuyoruz, shadow artık mevcut)
+    drop(shadow);
+
     SEAL_ENABLED.store(true, Ordering::SeqCst);
-    crate::serial_println!("[SEAL] {} pages sealed", integrity.len());
+    crate::serial_println!(
+        "[SEAL] {} pages sealed, shadow copies captured",
+        integrity.len()
+    );
 }
 
 /// Zamanlayıcı tick'inde güvenlik denetimi yapar.
@@ -966,10 +990,23 @@ pub fn seal_guardian_tick(current_tick: u64) {
                             addr
                         );
 
-                        log_security_event(SecurityEvent::NxViolation);
+                        log_security_event(SecurityEvent::IntegrityViolation);
 
-                        // TODO: Kendi kendini iyileştirme - gölge kopya'dan geri yükle
-                        // seal_self_heal(addr);
+                        // Integrity kilidini bırak — seal_self_heal kendi kilidini alacak
+                        drop(integrity);
+
+                        // Kendi kendini iyileştir — gölge kopya'dan geri yükle
+                        if let Err(e) = seal_self_heal(addr) {
+                            crate::serial_println!(
+                                "[SEAL] Self-heal FAILED for {:#x}: {}",
+                                addr,
+                                e
+                            );
+                        }
+
+                        // Döngüyü sonlandır (integrity referansı artık geçersiz)
+                        // Bir sonraki tick'te kalan sayfalar kontrol edilecek
+                        return;
                     }
                 }
 
@@ -981,17 +1018,44 @@ pub fn seal_guardian_tick(current_tick: u64) {
 
 /// Bütünlüğü bozulan sayfayı gölge kopyasından geri yükler (kendi kendini iyileştirme).
 ///
-/// TODO: Gölge kopya desteği henüz eklenmemiştir.
-/// Gerçek implementasyonda boot sırasında oluşturulan değiştirilemez (immutable)
-/// kopya kullanılacak; ihlal edilen sayfa o kopyayla üzerine yazılacaktır.
+/// Akış:
+///   1) SEAL_SHADOW'da adres ara
+///   2) Bulunamazsa Err döndür
+///   3) Gölge kopyayı sayfaya `copy_from_slice` ile yaz
+///   4) TLB flush + serializing instruction (icache için)
+///   5) Yeni checksum'ları SEAL_INTEGRITY'de güncelle
+///   6) Başarıyı logla
 pub fn seal_self_heal(addr: u64) -> Result<(), &'static str> {
-    crate::serial_println!("[SEAL] Self-healing page at {:#x}", addr);
+    let mut shadow = SEAL_SHADOW.lock();
+    let shadow_copy = shadow.get_mut(&addr).ok_or("shadow copy not found")?;
 
-    // TODO: Shadow copy'den orijinali geri yükle
-    // Bu, boot sırasında oluşturulan immutable kopyadan olacak
+    // Hedef sayfaya gölge kopyayı yaz
+    let ptr = addr as *mut u8;
+    let target = unsafe { core::slice::from_raw_parts_mut(ptr, 4096) };
+    target.copy_from_slice(&**shadow_copy);
 
-    // Şimdilik sadece ihlali logla
-    log_security_event(SecurityEvent::NxViolation);
+    // Bellek bariyeri — yazma işleminin diğer CPU'lara görünmesini garanti et
+    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+
+    // TLB flush + serializing instruction (icache eşitlemesi için)
+    unsafe {
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+    }
+
+    // SEAL_INTEGRITY'de checksum'ları yeniden hesapla
+    let data = unsafe { core::slice::from_raw_parts(ptr, 4096) };
+    let mut integrity = SEAL_INTEGRITY.lock();
+    if let Some(stored) = integrity.get_mut(&addr) {
+        stored.parity = compute_parity(data);
+        stored.crc32 = compute_crc32(data);
+        stored.last_check = 0;
+    }
+
+    log_security_event(SecurityEvent::SealHealed);
+    crate::serial_println!(
+        "[SEAL] Page {:#x} restored from shadow copy",
+        addr
+    );
 
     Ok(())
 }

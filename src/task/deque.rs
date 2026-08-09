@@ -90,13 +90,16 @@ impl<T> Worker<T> {
 
     /// Kuyruğun sonuna (bottom) yeni bir görev ekler.
     /// Sadece sahibi Worker tarafından çağrılabilir (tek üretici).
-    pub fn push(&self, task: Box<T>) {
+    ///
+    /// Dolu kuyruğa ekleme denemesi `Err(task)` ile reddedilir;
+    /// çağrıcı taşma kuyruğuna (`OVERFLOW_TASKS`) yönlendirmelidir.
+    pub fn push(&self, task: Box<T>) -> Result<(), Box<T>> {
         let b = self.inner.bottom.load(Ordering::Relaxed);
         let t = self.inner.top.load(Ordering::Acquire);
 
         if (b.wrapping_sub(t)) as usize >= DEQUE_SIZE {
-            // Tampon doldu! Daha fazla görev kabul edilemiyor.
-            panic!("Worker deque full! Cannot scale beyond 4096 tasks per CPU without resizing.");
+            // Tampon dolu — task çağrıcıya iade edilir
+            return Err(task);
         }
 
         let task_ptr = Box::into_raw(task);
@@ -108,6 +111,8 @@ impl<T> Worker<T> {
         self.inner
             .bottom
             .store(b.wrapping_add(1), Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Kuyruğun sonundan (bottom) bir görev alır — LIFO davranışı.

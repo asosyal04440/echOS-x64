@@ -24,7 +24,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicU64, Ordering};
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::structures::paging::{
     mapper::MapToError, FrameAllocator, Mapper, OffsetPageTable, Page, PageTableFlags, PhysFrame,
     Size4KiB,
@@ -248,7 +248,7 @@ fn validate_pe_offset(e_lfanew: u32, data_len: usize) -> Result<usize, PeError> 
 }
 
 fn choose_user_image_base(
-    space: &Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    space: &Arc<spin::RwLock<kernel_memory::AddressSpace>>,
     preferred_base: u64,
     image_size: u64,
 ) -> Option<u64> {
@@ -270,7 +270,7 @@ fn section_page_flags(characteristics: u32) -> PageTableFlags {
 }
 
 fn register_user_stack_region(
-    space: &Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    space: &Arc<spin::RwLock<kernel_memory::AddressSpace>>,
 ) -> Result<(u64, u64), PeError> {
     kernel_memory::set_active_address_space(Some(space.clone()));
     let (stack_base, stack_top) = kernel_memory::user_stack_bounds();
@@ -1111,7 +1111,7 @@ const WIN32_USER_STACK_ALIGN: usize = 4096;
 
 #[derive(Clone)]
 struct PeUserMappedImage {
-    address_space: Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    address_space: Arc<spin::RwLock<kernel_memory::AddressSpace>>,
     page_table: PhysFrame,
     image_base: u64,
     entry_point: u64,
@@ -1130,7 +1130,7 @@ struct SectionMapSpec {
 
 #[derive(Clone)]
 struct PeProcessRuntimeState {
-    address_space: Arc<spin::Mutex<kernel_memory::AddressSpace>>,
+    address_space: Arc<spin::RwLock<kernel_memory::AddressSpace>>,
     page_table: PhysFrame,
 }
 

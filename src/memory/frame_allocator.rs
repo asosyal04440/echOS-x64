@@ -47,23 +47,20 @@
 //! - `fibonacci_pmm.rs`: UEFI ortamlarında kullanılan zone tabanlı PMM
 //! - `mod.rs`: Global memory manager; `set_global_mb2_frame_allocator()` ile kaydedilir
 
-use alloc::vec::Vec;
+use crate::boot::context::{MemoryRegion, MemoryRegionKind};
 use multiboot2::{BootInformation, MemoryAreaType};
 use x86_64::structures::paging::{FrameAllocator, PhysFrame, Size4KiB};
 use x86_64::PhysAddr;
 
 const FRAME_SIZE: u64 = 4096;
-const KERNEL_VMA: u64 = 0xFFFF_FFFF_8000_0000;
 
-#[derive(Clone, Copy)]
-struct Region {
-    start: u64,
-    end: u64,
-    typ: MemoryAreaType,
-}
+const MAX_MB2_BOOTSTRAP_REGIONS: usize = 192;
 
-pub struct Multiboot2FrameAllocator {
-    regions: Vec<Region>,
+static mut MB2_BOOTSTRAP_REGIONS: [MemoryRegion; MAX_MB2_BOOTSTRAP_REGIONS] =
+    [MemoryRegion::EMPTY; MAX_MB2_BOOTSTRAP_REGIONS];
+
+pub struct Multiboot2FrameAllocator<'a> {
+    regions: &'a [MemoryRegion],
     region_index: usize,
     next_frame: u64,
     kernel_start_phys: u64,
@@ -71,26 +68,59 @@ pub struct Multiboot2FrameAllocator {
     total_usable_bytes: u64,
 }
 
-impl Multiboot2FrameAllocator {
-    pub fn new(boot_info: &BootInformation, kaslr_offset: u64) -> Option<Self> {
+impl<'a> Multiboot2FrameAllocator<'a> {
+    pub fn new(boot_info: &BootInformation, kaslr_offset: u64) -> Option<Multiboot2FrameAllocator<'static>> {
         let memory_map = boot_info.memory_map_tag()?;
-        let mut regions = Vec::new();
-        let mut total_usable_bytes = 0u64;
-
+        let mut count = 0usize;
         for area in memory_map.memory_areas() {
-            let start = area.start_address();
-            let end = area.end_address();
-            let typ = area.typ();
-            if matches!(
-                typ,
-                MemoryAreaType::Available | MemoryAreaType::AcpiAvailable
-            ) {
-                total_usable_bytes = total_usable_bytes.saturating_add(end.saturating_sub(start));
+            if count >= MAX_MB2_BOOTSTRAP_REGIONS {
+                return None;
             }
-            regions.push(Region { start, end, typ });
+            let kind = match area.typ() {
+                MemoryAreaType::Available => MemoryRegionKind::Usable,
+                MemoryAreaType::AcpiAvailable => MemoryRegionKind::ACPIReclaim,
+                _ => MemoryRegionKind::Reserved,
+            };
+            unsafe {
+                MB2_BOOTSTRAP_REGIONS[count] = MemoryRegion {
+                    base: area.start_address(),
+                    len: area.size(),
+                    kind,
+                };
+            }
+            count += 1;
         }
 
+        let regions = unsafe {
+            core::slice::from_raw_parts(MB2_BOOTSTRAP_REGIONS.as_ptr(), count)
+        };
+        Multiboot2FrameAllocator::<'static>::from_regions(regions, kaslr_offset)
+    }
+
+    pub fn from_regions(
+        regions: &'a [MemoryRegion],
+        kaslr_offset: u64,
+    ) -> Option<Self> {
         let (kernel_start_phys, kernel_end_phys) = unsafe { kernel_phys_range(kaslr_offset) };
+        Self::from_regions_with_kernel_range(regions, kernel_start_phys, kernel_end_phys)
+    }
+
+    /// Canonical-map bootstrap constructor for adapters whose image is placed
+    /// at a bootloader-selected physical base (native Limine).  It keeps the
+    /// allocator bounded and heap-free while using the exact executable span
+    /// reported by the adapter.
+    pub fn from_regions_with_kernel_range(
+        regions: &'a [MemoryRegion],
+        kernel_start_phys: u64,
+        kernel_end_phys: u64,
+    ) -> Option<Self> {
+        let mut total_usable_bytes = 0u64;
+        for region in regions {
+            if Self::is_region_usable(region.kind) {
+                total_usable_bytes = total_usable_bytes.saturating_add(region.len);
+            }
+        }
+
         crate::serial_println!(
             "[MEMORY] Kernel phys range: {:#x}-{:#x}",
             kernel_start_phys,
@@ -127,7 +157,7 @@ impl Multiboot2FrameAllocator {
                 None => return None,
             };
 
-            if !Self::is_region_usable(region.typ) {
+            if !Self::is_region_usable(region.kind) {
                 self.advance_region();
                 continue;
             }
@@ -135,7 +165,7 @@ impl Multiboot2FrameAllocator {
             let start = align_up(self.next_frame, FRAME_SIZE);
             let end = start.saturating_add(size);
 
-            if end > region.end {
+            if end > region.base.saturating_add(region.len) {
                 self.advance_region();
                 continue;
             }
@@ -157,7 +187,7 @@ impl Multiboot2FrameAllocator {
                 None => return None,
             };
 
-            if !Self::is_region_usable(region.typ) {
+            if !Self::is_region_usable(region.kind) {
                 self.advance_region();
                 continue;
             }
@@ -165,7 +195,7 @@ impl Multiboot2FrameAllocator {
             let frame_start = align_up(self.next_frame, FRAME_SIZE);
             let frame_end = frame_start.saturating_add(FRAME_SIZE);
 
-            if frame_end > region.end {
+            if frame_end > region.base.saturating_add(region.len) {
                 self.advance_region();
                 continue;
             }
@@ -188,9 +218,9 @@ impl Multiboot2FrameAllocator {
 
     fn advance_to_next_usable_region(&mut self) {
         while let Some(region) = self.current_region() {
-            if Self::is_region_usable(region.typ) {
-                let aligned = align_up(region.start, FRAME_SIZE);
-                if aligned < region.end {
+            if Self::is_region_usable(region.kind) {
+                let aligned = align_up(region.base, FRAME_SIZE);
+                if aligned < region.base.saturating_add(region.len) {
                     self.next_frame = aligned;
                     return;
                 }
@@ -199,7 +229,7 @@ impl Multiboot2FrameAllocator {
         }
     }
 
-    fn current_region(&self) -> Option<Region> {
+    fn current_region(&self) -> Option<MemoryRegion> {
         self.regions.get(self.region_index).copied()
     }
 
@@ -207,15 +237,17 @@ impl Multiboot2FrameAllocator {
         start < self.kernel_end_phys && end > self.kernel_start_phys
     }
 
-    fn is_region_usable(typ: MemoryAreaType) -> bool {
+    fn is_region_usable(kind: MemoryRegionKind) -> bool {
         matches!(
-            typ,
-            MemoryAreaType::Available | MemoryAreaType::AcpiAvailable
+            kind,
+            MemoryRegionKind::Usable
+                | MemoryRegionKind::ACPIReclaim
+                | MemoryRegionKind::BootloaderReclaimable
         )
     }
 }
 
-unsafe impl FrameAllocator<Size4KiB> for Multiboot2FrameAllocator {
+unsafe impl<'a> FrameAllocator<Size4KiB> for Multiboot2FrameAllocator<'a> {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.allocate_frame_internal()
     }
@@ -228,8 +260,10 @@ pub struct LimineMemmapEntry {
     pub typ: u64,
 }
 
-pub struct LimineFrameAllocator {
-    regions: Vec<LimineMemmapEntry>,
+pub const MAX_LIMINE_MEMORY_REGIONS: usize = 256;
+
+pub struct LimineFrameAllocator<'a> {
+    regions: &'a [LimineMemmapEntry],
     region_index: usize,
     next_frame: u64,
     kernel_start_phys: u64,
@@ -237,9 +271,8 @@ pub struct LimineFrameAllocator {
     total_usable_bytes: u64,
 }
 
-impl LimineFrameAllocator {
-    pub fn new(entries: &[LimineMemmapEntry], kaslr_offset: u64) -> Option<Self> {
-        let mut regions = Vec::new();
+impl<'a> LimineFrameAllocator<'a> {
+    pub fn new(entries: &'a [LimineMemmapEntry], physical_base: u64) -> Option<Self> {
         let mut total_usable_bytes = 0u64;
 
         for entry in entries {
@@ -248,13 +281,12 @@ impl LimineFrameAllocator {
             if Self::is_region_usable(entry.typ) {
                 total_usable_bytes = total_usable_bytes.saturating_add(end.saturating_sub(start));
             }
-            regions.push(*entry);
         }
 
-        let (kernel_start_phys, kernel_end_phys) = unsafe { kernel_phys_range(kaslr_offset) };
+        let (kernel_start_phys, kernel_end_phys) = unsafe { kernel_phys_range_limine(physical_base) };
 
         let mut allocator = Self {
-            regions,
+            regions: entries,
             region_index: 0,
             next_frame: 0,
             kernel_start_phys,
@@ -334,7 +366,7 @@ impl LimineFrameAllocator {
     }
 }
 
-unsafe impl FrameAllocator<Size4KiB> for LimineFrameAllocator {
+unsafe impl<'a> FrameAllocator<Size4KiB> for LimineFrameAllocator<'a> {
     fn allocate_frame(&mut self) -> Option<PhysFrame<Size4KiB>> {
         self.allocate_frame_internal()
     }
@@ -355,26 +387,52 @@ fn align_down(addr: u64, align: u64) -> u64 {
 }
 
 #[cfg(target_os = "none")]
-unsafe fn kernel_phys_range(kaslr_offset: u64) -> (u64, u64) {
+unsafe fn kernel_phys_range_limine(physical_base: u64) -> (u64, u64) {
     extern "C" {
-        static kernel_start: u8;
-        static kernel_end: u8;
-        static boot_lma_end: u8;
+        static kernel_phys_start: u8;
+        static kernel_phys_end: u8;
     }
 
-    let kernel_start_virt = &kernel_start as *const u8 as u64;
-    let kernel_end_virt = &kernel_end as *const u8 as u64;
-    let boot_lma_end_phys = &boot_lma_end as *const u8 as u64;
+    // Limine path'i: görüntü tek bir slide ile higher-half'a kaydırılır ve
+    // fiziksel yerleşim garantisizdir (spec). Link-time LMA sembolleri
+    // (0x100000 tabanlı) yalnız görüntü-içi offset türetmek için kullanılır;
+    // gerçek fiziksel taban Executable Address feature'dan gelir.
+    let link_base = &kernel_phys_start as *const u8 as u64;
+    let link_end = &kernel_phys_end as *const u8 as u64;
 
-    let kernel_start_phys = kernel_start_virt
-        .wrapping_sub(KERNEL_VMA)
-        .wrapping_sub(kaslr_offset)
-        .wrapping_add(boot_lma_end_phys);
+    (
+        align_down(physical_base, FRAME_SIZE),
+        align_up(
+            physical_base.wrapping_add(link_end.wrapping_sub(link_base)),
+            FRAME_SIZE,
+        ),
+    )
+}
 
-    let kernel_end_phys = kernel_end_virt
-        .wrapping_sub(KERNEL_VMA)
-        .wrapping_sub(kaslr_offset)
-        .wrapping_add(boot_lma_end_phys);
+#[cfg(not(target_os = "none"))]
+unsafe fn kernel_phys_range_limine(_physical_base: u64) -> (u64, u64) {
+    // Host verification builds: stable local image span (bkz. kernel_phys_range).
+    static HOST_IMAGE_START: u8 = 0;
+    static HOST_IMAGE_END: u8 = 0;
+
+    let start = &HOST_IMAGE_START as *const u8 as u64;
+    let end = (&HOST_IMAGE_END as *const u8 as u64).saturating_add(FRAME_SIZE);
+
+    (align_down(start, FRAME_SIZE), align_up(end, FRAME_SIZE))
+}
+
+#[cfg(target_os = "none")]
+unsafe fn kernel_phys_range(kaslr_offset: u64) -> (u64, u64) {
+    extern "C" {
+        static kernel_phys_start: u8;
+        static kernel_phys_end: u8;
+    }
+
+    // Linker LMA sembolleri (linker.ld): kernel görüntüsünün fiziksel adres
+    // aralığı. Kernel 0x100000 tabanına VMA == LMA olarak bağlanır; KASLR
+    // slide'ı varsa fiziksel aralığı kaydırır (VMA sabittir).
+    let kernel_start_phys = (&kernel_phys_start as *const u8 as u64).wrapping_add(kaslr_offset);
+    let kernel_end_phys = (&kernel_phys_end as *const u8 as u64).wrapping_add(kaslr_offset);
 
     (
         align_down(kernel_start_phys, FRAME_SIZE),

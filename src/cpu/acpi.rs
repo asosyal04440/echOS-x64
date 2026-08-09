@@ -42,10 +42,10 @@
 //! ACPI tablo parsing, power management ve CPU/Memory topology discovery.
 //! Minimal ACPICA subset implementasyonu.
 
+use crate::boot::context::RsdpAddressKind;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 /// RSDP (Root System Description Pointer) — ACPI'nin bellekteki başlangıç noktası.
@@ -62,12 +62,10 @@ const SLIT_SIGNATURE: &[u8; 4] = b"SLIT"; // System Locality Information Table (
 const SSDT_SIGNATURE: &[u8; 4] = b"SSDT"; // Secondary System Description Table (ek AML kod)
 const MCFG_SIGNATURE: &[u8; 4] = b"MCFG"; // PCIe Memory-Mapped Config adresi
 const DMAR_SIGNATURE: &[u8; 4] = b"DMAR"; // DMA Remapping (Intel VT-d / IOMMU tablosu)
+const HPET_SIGNATURE: &[u8; 4] = b"HPET"; // HPET Description Table (yüksek hassasiyetli zamanlayıcı MMIO adresi)
 
 /// Hatalı/devasa tabloların parse edilmesini önlemek için maksimum tablo boyutu (1 MB)
 const MAX_ACPI_TABLE_SIZE: u32 = 1024 * 1024;
-
-/// UEFI firmware tarafından sağlanan RSDP adresi; boot aşamasında set_uefi_rsdp_address ile doldurulur.
-static UEFI_RSDP_ADDRESS: AtomicU64 = AtomicU64::new(0);
 
 /// Global ACPI durumu — Mutex ile korunur; herhangi bir CPU'dan güvenli erişim sağlar.
 pub static ACPI_STATE: Mutex<AcpiState> = Mutex::new(AcpiState::new());
@@ -138,6 +136,10 @@ pub struct AcpiState {
     pub fadt_flags: u32,
     /// SCI (System Control Interrupt) numarası — ACPI olayları bu IRQ üzerinden gelir
     pub sci_interrupt: u16,
+    /// PM Timer I/O port adresi — FADT pm_tmr_blk (3.579545 MHz, 24-bit sayıcı)
+    pub pm_tmr_blk: u16,
+    /// HPET taban adresi — ACPI HPET tablosundan okunan MMIO adresi
+    pub hpet_base: u64,
     /// FADT başarıyla parse edildi mi; false ise güç yönetimi işlemleri fallback kullanır
     pub fadt_parsed: bool,
 }
@@ -269,6 +271,8 @@ impl AcpiState {
             reset_value: 0,
             fadt_flags: 0,
             sci_interrupt: 0,
+            pm_tmr_blk: 0,
+            hpet_base: 0,
             fadt_parsed: false,
         }
     }
@@ -387,6 +391,17 @@ struct MadtLocalApicAddressOverride {
     address: u64,
 }
 
+/// ACPI Generic Address Structure (GAS) — 12 bayt
+/// Çeşitli ACPI tablolarında (FADT RESET_REG, HPET BaseAddress, vs.) kullanılır.
+#[repr(C, packed)]
+struct GenericAddress {
+    address_space: u8,
+    bit_width: u8,
+    bit_offset: u8,
+    access_size: u8,
+    address: u64,
+}
+
 #[repr(C, packed)]
 struct McfgHeader {
     header: SdtHeader,
@@ -415,20 +430,19 @@ pub fn find_rsdp() -> Option<u64> {
     find_rsdp_bios()
 }
 
-/// UEFI boot aşamasında kaydedilen RSDP adresini döndürür.
-/// Bu adres, UEFI loader tarafından `set_uefi_rsdp_address()` ile önceden ayarlanmış olmalıdır.
+/// UEFI boot aşamasında authoritative state'e kaydedilen RSDP adresini döndürür.
+///
+/// Wave 1: adres `acpi::publish_rsdp` ile tek authoritative state'te saklanır;
+/// bu fonksiyon yalnızca state'e delege eder (ayrı state tutulmaz).
+/// Fiziksel adres döndürülür; sanal (HHDM-lineer) adaylar fiziğe çevrilir.
 fn find_rsdp_uefi() -> Option<u64> {
-    let addr = UEFI_RSDP_ADDRESS.load(Ordering::Relaxed);
-    if addr != 0 {
-        return Some(addr);
-    }
-    None
-}
-
-pub fn set_uefi_rsdp_address(address: u64) {
-    if address != 0 {
-        UEFI_RSDP_ADDRESS.store(address, Ordering::Relaxed);
-    }
+    let candidate = crate::acpi::authoritative_rsdp()?;
+    Some(match candidate.address_kind {
+        RsdpAddressKind::Physical => candidate.address,
+        RsdpAddressKind::Virtual => {
+            candidate.address.saturating_sub(crate::memory::active_physical_offset())
+        }
+    })
 }
 
 /// Eski BIOS bellein iki kritik bölgesini tarayarak RSDP'yi arar.
@@ -505,6 +519,16 @@ fn read_sdt_signature(header: *const SdtHeader) -> [u8; 4] {
 /// FADT, MADT, SRAT gibi alt tablolara ulaşır.
 pub fn parse_acpi_tables() -> bool {
     crate::serial_println!("Parsing ACPI tables...");
+
+    // Wave 1: authoritative RSDP state'ini signature/checksum/length ile doğrula.
+    // Hata durumunda loglanır; find_rsdp yine de state'ten beslenir ve
+    // geçersiz adresle parse zaten başarısız olur (eski davranış + net log).
+    match crate::acpi::validate_authoritative_rsdp() {
+        Ok((rev, len)) => {
+            crate::serial_println!("ACPI: RSDP validated (rev={}, len={})", rev, len)
+        }
+        Err(e) => crate::serial_println!("ACPI: RSDP validation failed: {:?}", e),
+    }
 
     // İlk adım: RSDP'yi bul — bu olmadan ACPI kullanılamaz
     let rsdp_addr = match find_rsdp() {
@@ -684,12 +708,27 @@ fn parse_table(table_addr: u64, state: &mut AcpiState) {
             state.dmar_address = table_addr;
             parse_dmar(table_addr, state);
         }
+        HPET_SIGNATURE => {
+            parse_hpet(table_addr, state);
+        }
         _ => {}
     }
 }
 
 pub fn get_dmar_units() -> Vec<DmarDrhd> {
     ACPI_STATE.lock().dmar_units.clone()
+}
+
+/// PM Timer (ACPI 3.579545 MHz) I/O port adresini döndürür.
+/// TSC kalibrasyonu için kullanılır. 0 dönerse PM Timer mevcut değildir.
+pub fn get_pm_tmr_port() -> u16 {
+    ACPI_STATE.lock().pm_tmr_blk
+}
+
+/// HPET (High Precision Event Timer) MMIO taban adresini döndürür.
+/// TSC kalibrasyonu için kullanılır. 0 dönerse HPET mevcut değildir.
+pub fn get_hpet_base() -> u64 {
+    ACPI_STATE.lock().hpet_base
 }
 
 fn parse_dmar(table_addr: u64, state: &mut AcpiState) {
@@ -930,6 +969,11 @@ fn parse_fadt(fadt_addr: u64, state: &mut AcpiState) {
     state.acpi_enable_cmd = acpi_enable;
     state.sci_interrupt = sci_int;
     state.fadt_flags = flags;
+
+    // PM Timer portu — TSC kalibrasyonu için kullanılır (3.579545 MHz, 24-bit sayıcı)
+    let pm_tmr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(fadt.pm_tmr_blk)) };
+    state.pm_tmr_blk = pm_tmr as u16;
+    crate::serial_println!("ACPI: FADT PM_TMR_BLK=0x{:X} len={}", pm_tmr, fadt.pm_tmr_len);
 
     crate::serial_println!(
         "ACPI: FADT PM1a_CNT=0x{:X} PM1b_CNT=0x{:X} PM1a_EVT=0x{:X} FACS=0x{:X} SCI={}",
@@ -1300,6 +1344,53 @@ fn parse_madt(madt_addr: u64, state: &mut AcpiState) {
 
     if !state.cpu_info.cpu_list.is_empty() {
         state.cpu_info.cpu_count = state.cpu_info.cpu_list.len() as u32;
+    }
+}
+
+/// HPET (High Precision Event Timer) tablosunu parse eder.
+///
+/// HPET tablosu, yüksek hassasiyetli zamanlayıcının MMIO taban adresini içerir.
+/// Bu adres TSC kalibrasyonunda HPET periyodik sayıcısını okumak için kullanılır.
+/// Yapı formatı (ACPI 1.0+ / IA-PC HPET spec):
+/// ```text
+/// 0x00  SdtHeader        (36 bayt)
+/// 0x24  Hardware Rev ID  (u8)
+/// 0x25  Comparator Count + Legacy IRQ Capable (u8 — alt 4 bit sayıcı, bit5 legacy)
+/// 0x26  PCI Vendor ID    (u16)
+/// 0x28  Base Address     (Generic Address Structure — 12 bayt)
+/// 0x34  Minimum Clock Tick (u16, üretim döngüsü başına minimum tick sayısı)
+/// 0x36  Page Protection  (u8, bit0=4K, bit2=64K, vs.)
+/// ```
+#[repr(C, packed)]
+struct HpetTable {
+    header: SdtHeader,
+    hardware_rev_id: u8,
+    info: u8,
+    pci_vendor_id: u16,
+    base_address: GenericAddress,
+    minimum_clock_tick: u16,
+    page_protection: u8,
+}
+
+fn parse_hpet(hpet_addr: u64, state: &mut AcpiState) {
+    crate::serial_println!("ACPI: Found HPET table at 0x{:X}", hpet_addr);
+    let hpet = unsafe { &*phys_to_virt_ptr::<HpetTable>(hpet_addr) };
+    let base_addr = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(hpet.base_address.address)) };
+    let info_val = unsafe { core::ptr::read_unaligned(core::ptr::addr_of!(hpet.info)) };
+    let comparators = (info_val & 0x1F) + 1;
+    let legacy_irq = (info_val >> 5) & 1 == 1;
+
+    if base_addr != 0 {
+        crate::serial_println!(
+            "ACPI: HPET base=0x{:X} rev=0x{:X} comparators={} legacy_irq={}",
+            base_addr,
+            hpet.hardware_rev_id,
+            comparators,
+            legacy_irq,
+        );
+        state.hpet_base = base_addr;
+    } else {
+        crate::serial_println!("ACPI: HPET table found but base address is 0");
     }
 }
 

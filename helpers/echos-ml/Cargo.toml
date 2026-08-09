@@ -1,0 +1,12 @@
+[package]
+name = "echos-ml"
+version = "0.1.0"
+edition = "2021"
+description = "echOS Machine Learning inference engine with ONNX Runtime support"
+license = "MIT"
+
+[dependencies]
+spin = "0.9.4"
+
+[lib]
+test = true

@@ -317,6 +317,25 @@ pub fn record_eviction(space_id: u64, page_index: u64) {
     });
 }
 
+pub fn cleanup_space(space_id: u64) {
+    if !is_enabled() {
+        return;
+    }
+    let mut mg = MGLRU.lock();
+    let to_remove: Vec<(u64, u64)> = mg
+        .entries
+        .keys()
+        .filter(|(sid, _)| *sid == space_id)
+        .copied()
+        .collect();
+    for key in to_remove {
+        mg.remove_page(MglruPageKey {
+            space_id: key.0,
+            page_index: key.1,
+        });
+    }
+}
+
 pub fn remove_page(space_id: u64, page_index: u64) {
     if !is_enabled() {
         return;

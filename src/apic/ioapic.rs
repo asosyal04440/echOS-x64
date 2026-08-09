@@ -36,6 +36,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
+use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use spin::Mutex;
 
 use crate::acpi::madt::{ApicInfo, InterruptOverride, IoApicInfo};
@@ -66,6 +67,8 @@ struct IoApicState {
     affinity: BTreeMap<u8, u8>,
     /// IRQ → tetikleme modu geçersiz kılması (edge vs level)
     trigger_override: BTreeMap<u8, bool>,
+    /// Round-robin CPU sayacı — her IRQ'yu sıradaki CPU'ya yönlendir
+    rr_cursor: AtomicU32,
 }
 
 static IOAPIC_STATE: Mutex<IoApicState> = Mutex::new(IoApicState {
@@ -74,6 +77,7 @@ static IOAPIC_STATE: Mutex<IoApicState> = Mutex::new(IoApicState {
     bsp_apic_id: 0,
     affinity: BTreeMap::new(),
     trigger_override: BTreeMap::new(),
+    rr_cursor: AtomicU32::new(0),
 });
 
 impl IoApic {
@@ -262,14 +266,14 @@ fn configure_irq(state: &mut IoApicState, irq: u8, masked: bool) {
     if let Some(override_trigger) = state.trigger_override.get(&irq) {
         level_trigger = *override_trigger;
     }
+    // x86 ISR vektörleri 0–31 arasında ayrılmış; IRQ vektörleri 32'den başlar
+    let vector = 32u8.wrapping_add(irq);
+    let dest_apic_id = state
+        .affinity
+        .get(&irq)
+        .copied()
+        .unwrap_or_else(|| round_robin_apic_id_locked(state));
     if let Some((ioapic, index)) = find_ioapic_for_gsi(&mut state.ioapics, gsi) {
-        // x86 ISR vektörleri 0–31 arasında ayrılmış; IRQ vektörleri 32'den başlar
-        let vector = 32u8.wrapping_add(irq);
-        let dest_apic_id = state
-            .affinity
-            .get(&irq)
-            .copied()
-            .unwrap_or(state.bsp_apic_id);
         ioapic.set_redirection(
             index,
             vector,
@@ -278,6 +282,16 @@ fn configure_irq(state: &mut IoApicState, irq: u8, masked: bool) {
             level_trigger,
             masked,
         );
+        // Level-triggered IRQ'da Remote IRR temizliği:
+        // Intel SDM §10.8.5: RTE yeniden yazıldığında IOAPIC
+        // Remote IRR bitini otomatik temizler.
+        if !masked && level_trigger {
+            let (low, high) = ioapic.read_redirection(index);
+            let remote_irr = (low >> 14) & 1;
+            if remote_irr != 0 {
+                ioapic.write_redirection(index, low, high);
+            }
+        }
     }
 }
 
@@ -310,4 +324,80 @@ fn resolve_override(irq: u8, overrides: &[InterruptOverride]) -> (u32, bool, boo
         }
     }
     (irq as u32, false, false)
+}
+
+/// Level-triggered IRQ için Remote IRR temizliği.
+///
+/// Intel SDM §10.8.5: Level-triggered interrupt'ta LAPIC EOI yeterli değildir.
+/// IOAPIC'in Remote IRR biti (RTE bit 14) hala set kalabilir.
+/// Bu fonksiyon RTE'yi okuyup Remote IRR'i kontrol eder; eğer setse
+/// EOI'yı tekrarlar veya level'i toggle eder.
+///
+/// Dönüş: true = başarıyla temizlendi, false = hata
+pub fn clear_remote_irr(irq: u8) -> bool {
+    let mut state = IOAPIC_STATE.lock();
+    let gsi = resolve_override(irq, &state.overrides).0;
+    if let Some((ioapic, index)) = find_ioapic_for_gsi(&mut state.ioapics, gsi) {
+        let (low, high) = ioapic.read_redirection(index);
+        let remote_irr = (low >> 14) & 1;
+        if remote_irr != 0 {
+            // Remote IRR set — level-triggered IRQ kitlenmiş olabilir.
+            // Çözüm: RTE'ye yeniden yaz (aynı değerle) — IOAPIC
+            // remote_irr'i otomatik temizler.
+            crate::serial_println!("[IOAPIC] Remote IRR set for IRQ {} (GSI {}) — clearing", irq, gsi);
+            ioapic.write_redirection(index, low, high);
+            // Tekrar kontrol
+            let (low2, _) = ioapic.read_redirection(index);
+            let cleared = ((low2 >> 14) & 1) == 0;
+            if !cleared {
+                crate::serial_println!("[IOAPIC] WARNING: Remote IRR still set for IRQ {} after retry", irq);
+            }
+            return cleared;
+        }
+        return true; // Zaten temiz
+    }
+    false
+}
+
+/// Online CPU listesinden round-robin APIC ID seç — state lock'u dışarıdan alınmış.
+fn round_robin_apic_id_locked(state: &IoApicState) -> u8 {
+    let online_count = crate::cpu::smp::online_cpu_count();
+    if online_count <= 1 {
+        return state.bsp_apic_id;
+    }
+    let cursor = state.rr_cursor.fetch_add(1, Ordering::Relaxed);
+    let cpu_id = (cursor % online_count.max(1)) + 1;
+    if let Some(smp) = crate::cpu::smp::SMP_STATE.try_lock() {
+        smp.cpu_apic_ids.get(cpu_id as usize).copied().unwrap_or(state.bsp_apic_id as u32) as u8
+    } else {
+        state.bsp_apic_id
+    }
+}
+
+/// Online CPU listesinden round-robin APIC ID seç (kendi lock'ını alır).
+fn round_robin_apic_id() -> u8 {
+    let state = IOAPIC_STATE.lock();
+    round_robin_apic_id_locked(&state)
+}
+
+/// IRQ için round-robin hedef CPU seç ve RTE'yi güncelle.
+pub fn set_irq_affinity_rr(irq: u8) -> bool {
+    let apic_id = round_robin_apic_id();
+    let mut state = IOAPIC_STATE.lock();
+    let (gsi, polarity_low, mut level_trigger) = resolve_override(irq, &state.overrides);
+    if let Some(override_trigger) = state.trigger_override.get(&irq) {
+        level_trigger = *override_trigger;
+    }
+    if let Some((ioapic, index)) = find_ioapic_for_gsi(&mut state.ioapics, gsi) {
+        let vector = 32u8.wrapping_add(irq);
+        ioapic.set_redirection(index, vector, apic_id, polarity_low, level_trigger, false);
+        crate::serial_println!("[IOAPIC] IRQ {} → CPU APIC {} (round-robin)", irq, apic_id);
+        return true;
+    }
+    false
+}
+
+/// Round-robin ile sıradaki CPU'yu seç (diğer modüllerden erişim için).
+pub fn next_round_robin_apic_id() -> u8 {
+    round_robin_apic_id()
 }

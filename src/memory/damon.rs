@@ -5,6 +5,7 @@
 //! yoluna sıcak/soğuk sinyali sağlar.
 
 use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
 
@@ -320,6 +321,22 @@ pub fn record_eviction(space_id: u64, page_index: u64) {
         space_id,
         page_index,
     });
+}
+
+pub fn cleanup_space(space_id: u64) {
+    if !is_enabled() {
+        return;
+    }
+    let mut dm = DAMON.lock();
+    let to_remove: Vec<(u64, u64)> = dm
+        .entries
+        .keys()
+        .filter(|(sid, _)| *sid == space_id)
+        .copied()
+        .collect();
+    for key in to_remove {
+        dm.entries.remove(&key);
+    }
 }
 
 pub fn remove_page(space_id: u64, page_index: u64) {

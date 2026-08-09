@@ -603,6 +603,137 @@ pub fn configure_napi_irq_coalescing(
     }
 }
 
+// ============================================================================
+// ADAPTIVE INTERRUPT → POLL TRANSITION
+// ============================================================================
+// Linux net/core/dev.c: napi_schedule_irqoff / __napi_schedule / busy_poll
+//
+// Yüksek trafikte interrupt yerine polling'e geçmek throughput'u artırır:
+// 1. IRQ geldiğinde: NAPI schedule + poll_once
+// 2. work_done > 0 ise: IRQ mask + busy-poll döngüsü (timer ile)
+// 3. busy-poll sonunda hâlâ work_done > 0 ise: softirq NAPI schedule
+// 4. work_done == 0 ise: consecutive_empty_polls++, eşik geçilince IRQ unmask
+
+/// Interrupt → Poll adaptasyon politikası
+#[derive(Clone, Debug)]
+pub struct NapiInterruptPolicy {
+    /// Bu sayıda ardışık boş poll'dan sonra interrupt mode'a dön
+    pub empty_poll_threshold: u32,
+    /// Busy-poll max iterasyon sayısı (IRQ mask altında)
+    pub busy_poll_max_iters: u32,
+    /// Adaptive mod açık mı?
+    pub adaptive_enabled: bool,
+}
+
+impl Default for NapiInterruptPolicy {
+    fn default() -> Self {
+        NapiInterruptPolicy {
+            empty_poll_threshold: 3,
+            busy_poll_max_iters: 8,
+            adaptive_enabled: true,
+        }
+    }
+}
+
+/// IRQ handler'dan çağrılır. Adaptive policy'ye göre schedule veya defer yapar.
+///
+/// Driver IRQ geldiğinde bu fonksiyonu çağırmalı.
+/// Adaptive mod açık ve boş poll eşiği aşılmamışsa busy-poll yapar.
+pub fn schedule_from_irq(iface_name: &str, queue_id: u16) {
+    if let Some(napi) = NAPI_SCHEDULER.get_napi(iface_name, queue_id) {
+        napi.schedule();
+    }
+}
+
+/// Adaptive polling: IRQ geldikten sonra busy-poll yaparak interrupt overhead'ı azaltır.
+///
+/// Bu fonksiyon IRQ handler context'inden çağrılır:
+/// 1. IRQ mask (interrupt devre dışı)
+/// 2. Busy-poll: poll_once() döngüsü (max iterations)
+/// 3. Hâlâ trafik varsa softirq NAPI schedule
+/// 4. Boş poll sayacı threshold'u aşarsa IRQ unmask (interrupt mode'a dön)
+pub fn adaptive_poll(iface_name: &str, queue_id: u16) -> u32 {
+    let napi = match NAPI_SCHEDULER.get_napi(iface_name, queue_id) {
+        Some(n) => n,
+        None => return 0,
+    };
+
+    let policy = NapiInterruptPolicy::default();
+
+    if !policy.adaptive_enabled {
+        return NAPI_SCHEDULER.poll_once();
+    }
+
+    // IRQ mask
+    napi.mask_irq();
+
+    let mut total_work = 0u32;
+    let mut empty_polls = 0u32;
+
+    // Busy-poll döngüsü
+    for _ in 0..policy.busy_poll_max_iters {
+        let work = NAPI_SCHEDULER.poll_once();
+        total_work += work;
+
+        if work == 0 {
+            empty_polls += 1;
+            if empty_polls >= policy.empty_poll_threshold {
+                // Yeterli boş poll → interrupt mode'a dön
+                napi.unmask_irq();
+                return total_work;
+            }
+        } else {
+            empty_polls = 0; // Trafik var, sıfırla
+        }
+    }
+
+    // Busy-poll bitti ama hâlâ trafik olabilir → softirq NAPI schedule
+    if total_work > 0 {
+        napi.schedule();
+    }
+
+    // IRQ unmask (bir sonraki IRQ'ya hazır)
+    napi.unmask_irq();
+    total_work
+}
+
+/// Per-queue adaptive poll (tüm interface queue'ları için)
+pub fn adaptive_poll_all_queues(iface_name: &str) -> u32 {
+    let napis = NAPI_SCHEDULER.get_napis_for_iface(iface_name);
+    let mut total = 0u32;
+    for napi in napis {
+        let policy = NapiInterruptPolicy::default();
+        if !policy.adaptive_enabled {
+            total += NAPI_SCHEDULER.poll_once();
+            continue;
+        }
+
+        napi.mask_irq();
+        let mut queue_work = 0u32;
+        let mut empty = 0u32;
+
+        for _ in 0..policy.busy_poll_max_iters {
+            let work = NAPI_SCHEDULER.poll_once();
+            queue_work += work;
+            if work == 0 {
+                empty += 1;
+                if empty >= policy.empty_poll_threshold {
+                    break;
+                }
+            } else {
+                empty = 0;
+            }
+        }
+
+        if queue_work > 0 {
+            napi.schedule();
+        }
+        napi.unmask_irq();
+        total += queue_work;
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

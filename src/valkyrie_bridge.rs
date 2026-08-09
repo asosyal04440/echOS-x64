@@ -1,7 +1,6 @@
-//! Valkyrie-V compatibility facade.
+//! Valkyrie-V compatibility bridge.
 //!
-//! `valkyrie_virt` already owns the actual hypervisor implementation.
-//! This module preserves the feature-gated public surface expected by the
-//! crate layout and external callers that look for `crate::valkyrie_bridge`.
+//! Re-exports the (now hardware-backed) `valkyrie_virt` module so that callers
+//! can use either `crate::valkyrie_virt::*` or `crate::valkyrie_bridge::*`.
 
 pub use crate::valkyrie_virt::*;

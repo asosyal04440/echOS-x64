@@ -23,6 +23,7 @@ const BOOT_FLAG_SUSPEND_RESUME_SMOKE: u8 = 1 << 1;
 const BOOT_FLAG_FS_SMOKE_TEST: u8 = 1 << 2;
 const BOOT_FLAG_SHELL_SMOKE_TEST: u8 = 1 << 3;
 const BOOT_FLAG_SHELL_COMMAND_TEST: u8 = 1 << 4;
+const BOOT_FLAG_BOOT_TESTS: u8 = 1 << 5;
 
 const F2FS_MAGIC: u32 = 0xF2F52010;
 const F2FS_SUPERBLOCK_SECTOR_OFFSET: usize = 2;
@@ -178,6 +179,7 @@ struct ApplianceConfig {
     fs_smoke_test: bool,
     shell_smoke_test: bool,
     shell_command_test: bool,
+    boot_tests: bool,
     update_smoke_request_url: Option<String>,
     pe_smoke_bundle: Option<PathBuf>,
     bundles: Vec<PathBuf>,
@@ -186,11 +188,7 @@ struct ApplianceConfig {
 }
 
 fn run_appliance(mut args: Args) -> Result<(), String> {
-    std::fs::write(
-        "C:\\Users\\Bahadir\\Desktop\\dersler_ve_projeler\\echOS\\logs\\appliance_debug.txt",
-        "run_appliance called\n",
-    )
-    .unwrap();
+    let _ = std::fs::write("appliance_debug.txt", "run_appliance called\n");
     let mut cfg = ApplianceConfig {
         efi: PathBuf::new(),
         bootctrl: None,
@@ -204,6 +202,7 @@ fn run_appliance(mut args: Args) -> Result<(), String> {
         fs_smoke_test: false,
         shell_smoke_test: false,
         shell_command_test: false,
+        boot_tests: false,
         update_smoke_request_url: None,
         pe_smoke_bundle: None,
         bundles: Vec::new(),
@@ -231,6 +230,7 @@ fn run_appliance(mut args: Args) -> Result<(), String> {
                 cfg.shell_smoke_test = true;
                 cfg.shell_command_test = true;
             }
+            "--boot-tests" => cfg.boot_tests = true,
             "--update-smoke-request-url" => {
                 cfg.update_smoke_request_url = Some(args.value("--update-smoke-request-url")?)
             }
@@ -296,6 +296,7 @@ fn build_appliance(cfg: &ApplianceConfig) -> Result<(), String> {
             cfg.fs_smoke_test,
             cfg.shell_smoke_test,
             cfg.shell_command_test,
+            cfg.boot_tests,
         )?,
     };
     let pe_smoke_bundle = match &cfg.pe_smoke_bundle {
@@ -1579,6 +1580,7 @@ fn build_boot_control(
     fs_smoke_test: bool,
     shell_smoke_test: bool,
     shell_command_test: bool,
+    boot_tests: bool,
 ) -> Result<Vec<u8>, String> {
     let active = slot_id(active_slot)?;
     let pending = slot_id(pending_slot)?;
@@ -1607,6 +1609,9 @@ fn build_boot_control(
     }
     if shell_command_test {
         flags |= BOOT_FLAG_SHELL_COMMAND_TEST;
+    }
+    if boot_tests {
+        flags |= BOOT_FLAG_BOOT_TESTS;
     }
     blob[48] = flags;
     write_u32(&mut blob, 128, 0);
@@ -1687,6 +1692,7 @@ fn build_manifest(
         "    \"shell_command_test\": {},\n",
         cfg.shell_command_test
     ));
+    out.push_str(&format!("    \"boot_tests\": {},\n", cfg.boot_tests));
     match &cfg.update_smoke_request_url {
         Some(url) => out.push_str(&format!(
             "    \"update_smoke_request_url\": \"{}\",\n",

@@ -1,0 +1,13 @@
+[package]
+name = "echos-gpu3d"
+version = "0.1.0"
+edition = "2021"
+description = "echOS 3D Graphics API — Vulkan-like hardware accelerated GPU API"
+license = "MIT"
+
+[dependencies]
+spin = "0.9.4"
+lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
+
+[lib]
+test = true
