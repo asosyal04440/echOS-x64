@@ -51,6 +51,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "scripts\bootstrap_windows.ps1")
+$script:EchosStageNumber = 0
 
 function Wait-FileMarker {
     param(
@@ -421,12 +422,108 @@ function Write-StageElapsed {
 
     if ($Timer) {
         $Timer.Stop()
-        Write-Host ("[TIME] {0}: {1:n3}s" -f $Name, $Timer.Elapsed.TotalSeconds) -ForegroundColor DarkCyan
+        Write-Host ("    [OK] {0} tamamlandı | geçen süre: {1}" -f $Name, $Timer.Elapsed.ToString("hh\:mm\:ss")) -ForegroundColor Green
     }
+}
+
+function Write-EchosStage {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [string]$Detail = ""
+    )
+
+    $script:EchosStageNumber++
+    Write-Host ""
+    Write-Host ("[{0:00}] {1}" -f $script:EchosStageNumber, $Name) -ForegroundColor Yellow
+    if ($Detail) {
+        Write-Host ("     {0}" -f $Detail) -ForegroundColor DarkGray
+    }
+    return $script:EchosStageNumber
+}
+
+function Invoke-EchosCargoBuild {
+    param(
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][string[]]$CargoArgs
+    )
+
+    $stageNumber = Write-EchosStage `
+        -Name $Label `
+        -Detail "Derleme sürüyor;ayrıntılı çıktı loga yazılıyor."
+    $safeLabel = ($Label -replace "[^A-Za-z0-9_-]", "-").ToLowerInvariant()
+    $stageLogPath = Join-Path $logDir ("build_{0}_{1:00}_{2}.log" -f $stamp, $stageNumber, $safeLabel)
+    Write-Host ("     Ayrıntılı build logu: {0}" -f $stageLogPath) -ForegroundColor DarkGray
+
+    $cargoPath = if ($script:EchosCargoPath) {
+        $script:EchosCargoPath
+    } else {
+        $resolvedCargo = Get-Command cargo.exe -ErrorAction Stop
+        $resolvedCargo.Source
+    }
+    $savedRustFlags = $env:RUSTFLAGS
+    $savedCargoTermColor = $env:CARGO_TERM_COLOR
+    $timer = New-StageTimer
+    $exitCode = 1
+    $stdout = ""
+    $stderr = ""
+    try {
+        $env:RUSTFLAGS = if ([string]::IsNullOrWhiteSpace($savedRustFlags)) {
+            "-Awarnings"
+        } else {
+            "$savedRustFlags -Awarnings"
+        }
+        $env:CARGO_TERM_COLOR = "never"
+
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = $cargoPath
+        $psi.Arguments = ConvertTo-ProcessArgumentString -ArgumentList $CargoArgs
+        $psi.WorkingDirectory = $projectRoot
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+        if (-not $process.Start()) {
+            throw "cargo process başlatılamadı: $Label"
+        }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $progressTick = 0
+        while (-not $process.WaitForExit(1000)) {
+            $progressTick++
+            if (($progressTick % 5) -eq 0) {
+                Write-Host ("     ... derleme devam ediyor | geçen süre: {0}" -f $timer.Elapsed.ToString("hh\:mm\:ss")) -ForegroundColor DarkGray
+            }
+        }
+        $process.WaitForExit()
+        $stdout = $stdoutTask.Result
+        $stderr = $stderrTask.Result
+        $exitCode = $process.ExitCode
+        $logText = "[stdout]`r`n$stdout`r`n[stderr]`r`n$stderr"
+        [System.IO.File]::WriteAllText($stageLogPath, $logText, (New-Object System.Text.UTF8Encoding($false)))
+    } finally {
+        if ($null -ne $savedRustFlags) { $env:RUSTFLAGS = $savedRustFlags } else { Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue }
+        if ($null -ne $savedCargoTermColor) { $env:CARGO_TERM_COLOR = $savedCargoTermColor } else { Remove-Item Env:CARGO_TERM_COLOR -ErrorAction SilentlyContinue }
+    }
+
+    Write-StageElapsed $Label $timer
+    if ($exitCode -ne 0) {
+        Write-Host ("    [FAIL] {0} başarısız oldu. Son teşhis satırları:" -f $Label) -ForegroundColor Red
+        $diagnostics = @((Get-Content -LiteralPath $stageLogPath -Tail 80 -ErrorAction SilentlyContinue))
+        foreach ($line in $diagnostics) {
+            if ($line -and $line -notmatch "^\s*warning:\s*") {
+                Write-Host ("       {0}" -f $line) -ForegroundColor Red
+            }
+        }
+        Write-Host ("    Tam çıktı: {0}" -f $stageLogPath) -ForegroundColor DarkGray
+    }
+    return $exitCode
 }
 
 function Invoke-HostCargoBuild {
     param(
+        [string]$Label = "Rust host aracı",
         [string[]]$CargoArgs
     )
 
@@ -435,11 +532,7 @@ function Invoke-HostCargoBuild {
     try {
         Remove-Item Env:CC -ErrorAction SilentlyContinue
         Remove-Item Env:HOST_CC -ErrorAction SilentlyContinue
-        $savedEap = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        cargo @CargoArgs
-        $ErrorActionPreference = $savedEap
-        return $LASTEXITCODE
+        return Invoke-EchosCargoBuild -Label $Label -CargoArgs $CargoArgs
     } finally {
         if ($null -ne $savedCc) { $env:CC = $savedCc } else { Remove-Item Env:CC -ErrorAction SilentlyContinue }
         if ($null -ne $savedHostCc) { $env:HOST_CC = $savedHostCc } else { Remove-Item Env:HOST_CC -ErrorAction SilentlyContinue }
@@ -634,6 +727,7 @@ try {
 Write-Host "Log: $logPath" -ForegroundColor DarkGray
 Write-Host "Serial log: $serialLogPath" -ForegroundColor DarkGray
 Write-Host "Profile: $Profile" -ForegroundColor DarkGray
+Write-Host "Build görünümü: aşamalar ve geçen süre gösterilir; compiler warning'leri gizlenir." -ForegroundColor DarkGray
 
 $traceEnabled = $Profile -eq "debug"
 $fastProfile = $Profile -eq "fast"
@@ -697,6 +791,8 @@ if (Test-Path $llvmBin) {
 # Incremental derleme aktif — sadece değişen dosyalar yeniden derlenir
 # $env:CARGO_INCREMENTAL = "0"  # ESKİ: her seferinde sıfırdan derliyordu
 
+Write-EchosStage -Name "Ortam ve araç zinciri" -Detail "Rust target, QEMU, OVMF ve gerekli host araçları kontrol ediliyor."
+$bootstrapTimer = New-StageTimer
 $bootstrap = Initialize-EchosWindowsEnvironment `
     -ProjectRoot $projectRoot `
     -NeedBareMetal:($Mode -eq "iso") `
@@ -705,6 +801,8 @@ $bootstrap = Initialize-EchosWindowsEnvironment `
     -SkipInstall:$SkipBootstrap
 $qemu = $bootstrap.QemuPath
 $qemuLaunchFile = $qemu
+$script:EchosCargoPath = (Get-Command cargo.exe -ErrorAction Stop).Source
+Write-StageElapsed "Ortam ve araç zinciri" $bootstrapTimer
 
 if ($EnableTpm) {
     $wslCommand = Get-Command wsl.exe -ErrorAction SilentlyContinue
@@ -765,9 +863,10 @@ if ($EnableTpm -and $useIso) {
 
 if ($useIso) {
     if (-not $NoBuild) {
-        Write-Host "Building echOS (multiboot)..." -ForegroundColor Yellow
-        cargo build --quiet
-        if ($LASTEXITCODE -ne 0) { throw "Multiboot build failed" }
+        $kernelBuildExit = Invoke-EchosCargoBuild `
+            -Label "Multiboot2 kernel" `
+            -CargoArgs @("build", "--quiet")
+        if ($kernelBuildExit -ne 0) { throw "Multiboot build failed" }
         if (-not (Test-Path $kernelPath)) { throw "Kernel bulunamadı: $kernelPath" }
         Copy-Item $kernelPath $isoKernelPath -Force
     }
@@ -806,7 +905,8 @@ if ($useIso) {
         Write-Host "QEMU paused (waiting for GDB). Connect with: gdb -x .gdbinit" -ForegroundColor Green
     }
 } else {
-    $efiPath = if ($EfiPath -ne "") {
+    $autoEfiPath = [string]::IsNullOrWhiteSpace($EfiPath)
+    $efiPath = if (-not $autoEfiPath) {
         $resolvedEfiPath = Resolve-Path -LiteralPath $EfiPath -ErrorAction SilentlyContinue
         if (-not $resolvedEfiPath) { throw "EFI binary not found at $EfiPath" }
         $resolvedEfiPath.Path
@@ -841,14 +941,26 @@ $qemuShare = $bootstrap.QemuShare
         Join-Path $artifactDir "OVMF_VARS.fd"
     }
 
-    if (($EfiPath -eq "") -and (-not $NoBuild)) {
-        Write-Host "Building echOS (UEFI)..." -ForegroundColor Yellow
-        $stageTimer = New-StageTimer
-        cargo build --quiet --target x86_64-unknown-uefi
-        if ($LASTEXITCODE -ne 0) { throw "UEFI build failed" }
-        Write-StageElapsed "UEFI cargo build" $stageTimer
+    if ($autoEfiPath -and (-not $NoBuild)) {
+        $efiBuildExit = Invoke-EchosCargoBuild `
+            -Label "UEFI kernel / EFI payload" `
+            -CargoArgs @("build", "--quiet", "--target", "x86_64-unknown-uefi")
+        if ($efiBuildExit -ne 0) { throw "UEFI build failed" }
     }
-    if (-not (Test-Path $efiPath)) { throw "EFI binary not found at $efiPath" }
+    if (-not (Test-Path -LiteralPath $efiPath)) {
+        if ($autoEfiPath -and (-not $NoBuild)) {
+            $efiRecoveryExit = Invoke-EchosCargoBuild `
+                -Label "UEFI EFI recovery build" `
+                -CargoArgs @("build", "--quiet", "--target", "x86_64-unknown-uefi")
+            if ($efiRecoveryExit -ne 0) { throw "UEFI build failed while recovering missing EFI output" }
+        }
+        if (-not (Test-Path -LiteralPath $efiPath)) {
+            if ($autoEfiPath -and $NoBuild) {
+                throw "EFI binary not found at $efiPath because -NoBuild was supplied. Remove -NoBuild to build it automatically."
+            }
+            throw "EFI binary not found at $efiPath"
+        }
+    }
 
     $applianceToolInputs = @(
         (Join-Path $projectRoot "Cargo.toml"),
@@ -857,11 +969,10 @@ $qemuShare = $bootstrap.QemuShare
     if (Test-OutputFresh -OutputPath $builderPath -InputPaths $applianceToolInputs) {
         Write-Host "Reusing fresh Rust appliance tool." -ForegroundColor DarkGray
     } else {
-        Write-Host "Building Rust appliance tool..." -ForegroundColor Yellow
-        $stageTimer = New-StageTimer
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echos_appliance", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
+        $hostBuildExit = Invoke-HostCargoBuild `
+            -Label "echos_appliance host aracı" `
+            -CargoArgs @("build", "--quiet", "--bin", "echos_appliance", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
         if ($hostBuildExit -ne 0) { throw "echos_appliance host build failed" }
-        Write-StageElapsed "echos_appliance build" $stageTimer
     }
     if (-not (Test-Path $builderPath)) { throw "echos_appliance host tool not found at $builderPath" }
 
@@ -874,12 +985,14 @@ $qemuShare = $bootstrap.QemuShare
         $peSmokeRoot = Join-Path $projectRoot "tools\\pe_smoke_windowed"
         $peSmokeBundlePath = Join-Path $artifactDir "pe_smoke_windowed.bhd"
 
-        Write-Host "Building packaged PE smoke sample..." -ForegroundColor Yellow
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--release", "--target", "x86_64-pc-windows-msvc", "--manifest-path", $peSmokeManifest)
+        $hostBuildExit = Invoke-HostCargoBuild `
+            -Label "Packaged PE smoke sample" `
+            -CargoArgs @("build", "--quiet", "--release", "--target", "x86_64-pc-windows-msvc", "--manifest-path", $peSmokeManifest)
         if ($hostBuildExit -ne 0) { throw "PE smoke sample build failed" }
 
-        Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
+        $hostBuildExit = Invoke-HostCargoBuild `
+            -Label "echsdk host aracı" `
+            -CargoArgs @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
         if ($hostBuildExit -ne 0) { throw "echsdk host build failed" }
         if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
 
@@ -917,11 +1030,10 @@ $qemuShare = $bootstrap.QemuShare
         }
         New-Item -ItemType Directory -Force -Path $mixedUpdateArtifactDir | Out-Null
 
-        Write-Host "Building echosdk host tool..." -ForegroundColor Yellow
-        $stageTimer = New-StageTimer
-        $hostBuildExit = Invoke-HostCargoBuild @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
+        $hostBuildExit = Invoke-HostCargoBuild `
+            -Label "echsdk host aracı" `
+            -CargoArgs @("build", "--quiet", "--bin", "echsdk", "--target", "x86_64-pc-windows-msvc", "--features", "host_smoke")
         if ($hostBuildExit -ne 0) { throw "echsdk host build failed" }
-        Write-StageElapsed "echsdk build" $stageTimer
         if (-not (Test-Path $echsdkPath)) { throw "echsdk host tool not found at $echsdkPath" }
 
         Write-Host "Building mixed update platform image..." -ForegroundColor Yellow
@@ -1026,7 +1138,7 @@ $qemuShare = $bootstrap.QemuShare
     if ($reuseAppliance) {
         Write-Host "Reusing fresh raw GPT appliance disk. Use -RebuildAppliance to force rebuild." -ForegroundColor DarkGray
     } else {
-        Write-Host "Building raw GPT appliance disk..." -ForegroundColor Yellow
+        Write-EchosStage -Name "GPT appliance diski" -Detail "EFI, boot-control ve bundle girdileri tek UEFI disk imajında birleştiriliyor."
         $stageTimer = New-StageTimer
         & $builderPath @builderArgs
         if ($LASTEXITCODE -ne 0) { throw "Appliance image build failed" }
@@ -1229,7 +1341,8 @@ function Start-MixedUpdatePhase {
         }
     }
 
-    Write-Host "Launching QEMU ($PhaseName)...`n" -ForegroundColor Yellow
+        Write-EchosStage -Name "QEMU smoke aşaması: $PhaseName" -Detail "Guest başlatılıyor; boot ve desktop marker'ları bekleniyor."
+        Write-Host "Launching QEMU ($PhaseName)...`n" -ForegroundColor Yellow
     $proc = Start-CleanProcess -FilePath $qemu -ArgumentList $phaseArgs -StdoutPath $phaseStdoutPath -StderrPath $phaseStderrPath
     [PSCustomObject]@{
         Name = $PhaseName
@@ -1320,6 +1433,8 @@ try {
             }
         }
     } else {
+        $displayModeLabel = if ($Headless) { "headless" } else { "GUI" }
+        Write-EchosStage -Name "QEMU başlatma" -Detail "$displayModeLabel modunda guest açılıyor; boot/desktop hazır marker'ları izleniyor."
         Write-Host "Launching QEMU...`n" -ForegroundColor Yellow
         $proc = Start-CleanProcess -FilePath $qemuLaunchFile -ArgumentList (Get-QemuLaunchArguments $qemuArgs) -StdoutPath $qemuStdoutPath -StderrPath $qemuStderrPath
 
